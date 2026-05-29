@@ -1,13 +1,15 @@
-// Command cli is the Phase 0 minimal entrypoint for jelly-agent: it wires the
-// OpenAI-compatible model adapter into an ADK llmagent and runs a single
-// question/answer turn through a provider such as DeepSeek.
+// Command cli is the Phase 1 entrypoint for jelly-agent: it wires the
+// OpenAI-compatible model adapter into an ADK llmagent with a web_search tool
+// and runs a single streaming question/answer turn through a provider such as
+// DeepSeek, rendering tool-call activity as it happens.
 //
 // Usage:
 //
 //	export LLM_BASE_URL=https://api.deepseek.com/v1
 //	export LLM_API_KEY=sk-xxxx
-//	export LLM_MODEL=deepseek-chat   # optional, defaults to deepseek-chat
-//	go run ./cmd/cli "你好，用一句话介绍你自己"
+//	export LLM_MODEL=deepseek-chat        # optional, defaults to deepseek-chat
+//	export TAVILY_API_KEY=tvly-xxx        # optional, better web_search results
+//	go run ./cmd/cli "2026 年 Go 在 AI 领域有哪些应用？"
 package main
 
 import (
@@ -20,15 +22,17 @@ import (
 	"google.golang.org/adk/agent/llmagent"
 	"google.golang.org/adk/runner"
 	"google.golang.org/adk/session"
+	adktool "google.golang.org/adk/tool"
 	"google.golang.org/genai"
 
 	jellymodel "github.com/jelly-agent/jelly-agent/internal/model"
+	jellytool "github.com/jelly-agent/jelly-agent/internal/tool"
 )
 
 const (
 	appName   = "jelly-agent"
 	userID    = "local-user"
-	sessionID = "phase0-session"
+	sessionID = "phase1-session"
 )
 
 func main() {
@@ -61,18 +65,26 @@ func run() error {
 		Model:   modelID,
 	})
 
-	// 2. A single LLM agent driven by that model.
+	// 2. The web_search tool.
+	searchTool, err := jellytool.NewWebSearchTool()
+	if err != nil {
+		return fmt.Errorf("create web_search tool: %w", err)
+	}
+
+	// 3. A single LLM agent with the tool bound.
 	a, err := llmagent.New(llmagent.Config{
 		Name:        "root_agent",
 		Model:       llm,
-		Description: "jelly-agent Phase 0 single agent.",
-		Instruction: "你是 jelly-agent，一个用 Go + ADK-Go 构建的助手。请简洁回答。",
+		Description: "jelly-agent Phase 1 single agent with web search.",
+		Instruction: "你是 jelly-agent，一个用 Go + ADK-Go 构建的助手。" +
+			"需要实时或外部信息时调用 web_search 工具，再用中文简洁作答。",
+		Tools: []adktool.Tool{searchTool},
 	})
 	if err != nil {
 		return fmt.Errorf("create agent: %w", err)
 	}
 
-	// 3. Runner + in-memory session.
+	// 4. Runner + in-memory session.
 	sessions := session.InMemoryService()
 	r, err := runner.New(runner.Config{
 		AppName:        appName,
@@ -90,34 +102,49 @@ func run() error {
 		return fmt.Errorf("create session: %w", err)
 	}
 
-	// 4. Run one turn and print the model's text.
+	// 5. Stream one turn, rendering text deltas and tool-call activity.
 	fmt.Printf("[ root_agent | %s @ %s ]\nYou: %s\n\nAgent: ", modelID, baseURL, question)
 
 	msg := genai.NewContentFromText(question, genai.RoleUser)
-	var answered bool
-	for ev, err := range r.Run(ctx, userID, sessionID, msg, agent.RunConfig{StreamingMode: agent.StreamingModeNone}) {
+	for ev, err := range r.Run(ctx, userID, sessionID, msg, agent.RunConfig{StreamingMode: agent.StreamingModeSSE}) {
 		if err != nil {
 			return fmt.Errorf("run: %w", err)
 		}
 		if ev == nil || ev.Content == nil {
 			continue
 		}
-		for _, p := range ev.Content.Parts {
-			if p != nil && p.Text != "" {
-				fmt.Print(p.Text)
-				answered = true
-			}
-		}
-		if ev.UsageMetadata != nil {
+		renderEvent(ev.Content.Parts)
+		if ev.UsageMetadata != nil && !ev.Partial {
 			u := ev.UsageMetadata
-			fmt.Printf("\n\n[Token: prompt=%d completion=%d total=%d]\n",
+			fmt.Printf("\n[Token: prompt=%d completion=%d total=%d]\n",
 				u.PromptTokenCount, u.CandidatesTokenCount, u.TotalTokenCount)
 		}
 	}
-	if !answered {
-		return fmt.Errorf("no response from model")
-	}
 	return nil
+}
+
+// renderEvent prints text deltas inline and surfaces tool calls / results.
+func renderEvent(parts []*genai.Part) {
+	for _, p := range parts {
+		switch {
+		case p == nil:
+			continue
+		case p.FunctionCall != nil:
+			fmt.Printf("\n  → 调用工具: %s(%v)\n", p.FunctionCall.Name, p.FunctionCall.Args)
+		case p.FunctionResponse != nil:
+			fmt.Printf("  → 工具返回: %s\n", summarize(p.FunctionResponse.Response))
+		case p.Text != "":
+			fmt.Print(p.Text)
+		}
+	}
+}
+
+// summarize renders a tool response compactly for the terminal.
+func summarize(resp map[string]any) string {
+	if results, ok := resp["results"].([]any); ok {
+		return fmt.Sprintf("%d 条结果", len(results))
+	}
+	return fmt.Sprintf("%v", resp)
 }
 
 func envOr(key, def string) string {

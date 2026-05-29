@@ -6,6 +6,7 @@
 package model
 
 import (
+	"encoding/json"
 	"strings"
 
 	openai "github.com/sashabaranov/go-openai"
@@ -13,11 +14,15 @@ import (
 	"google.golang.org/genai"
 )
 
-// toOpenAIMessages converts an ADK LLMRequest (genai.Content + system
-// instruction) into the OpenAI chat message list.
+// toOpenAIMessages converts an ADK LLMRequest into the OpenAI chat message
+// list. Each genai.Content is dispatched by the kind of parts it holds:
 //
-// Phase 0 scope: text only. Tool calls / function responses are added in
-// Phase 1 together with streaming.
+//   - text parts            -> user/assistant text message
+//   - FunctionCall parts    -> assistant message carrying tool_calls
+//   - FunctionResponse parts -> one tool message per response (tool_call_id)
+//
+// Dispatching on part type (rather than the content Role) keeps the mapping
+// robust regardless of how ADK labels history entries.
 func toOpenAIMessages(req *adkmodel.LLMRequest) []openai.ChatCompletionMessage {
 	var msgs []openai.ChatCompletionMessage
 
@@ -34,16 +39,96 @@ func toOpenAIMessages(req *adkmodel.LLMRequest) []openai.ChatCompletionMessage {
 		if c == nil {
 			continue
 		}
-		role := openai.ChatMessageRoleUser
-		if c.Role == genai.RoleModel {
-			role = openai.ChatMessageRoleAssistant
+
+		var (
+			text      strings.Builder
+			toolCalls []openai.ToolCall
+			responses []openai.ChatCompletionMessage
+		)
+		for _, p := range c.Parts {
+			switch {
+			case p == nil:
+				continue
+			case p.FunctionCall != nil:
+				toolCalls = append(toolCalls, openai.ToolCall{
+					ID:   p.FunctionCall.ID,
+					Type: openai.ToolTypeFunction,
+					Function: openai.FunctionCall{
+						Name:      p.FunctionCall.Name,
+						Arguments: marshalArgs(p.FunctionCall.Args),
+					},
+				})
+			case p.FunctionResponse != nil:
+				responses = append(responses, openai.ChatCompletionMessage{
+					Role:       openai.ChatMessageRoleTool,
+					ToolCallID: p.FunctionResponse.ID,
+					Content:    marshalArgs(p.FunctionResponse.Response),
+				})
+			case p.Text != "":
+				text.WriteString(p.Text)
+			}
 		}
-		msgs = append(msgs, openai.ChatCompletionMessage{
-			Role:    role,
-			Content: partsText(c.Parts),
-		})
+
+		switch {
+		case len(toolCalls) > 0:
+			msgs = append(msgs, openai.ChatCompletionMessage{
+				Role:      openai.ChatMessageRoleAssistant,
+				Content:   text.String(),
+				ToolCalls: toolCalls,
+			})
+		case len(responses) > 0:
+			msgs = append(msgs, responses...)
+		case text.Len() > 0:
+			role := openai.ChatMessageRoleUser
+			if c.Role == genai.RoleModel {
+				role = openai.ChatMessageRoleAssistant
+			}
+			msgs = append(msgs, openai.ChatCompletionMessage{Role: role, Content: text.String()})
+		}
 	}
 	return msgs
+}
+
+// toOpenAITools converts the function declarations ADK placed on the request
+// into OpenAI tool definitions.
+func toOpenAITools(req *adkmodel.LLMRequest) []openai.Tool {
+	if req.Config == nil {
+		return nil
+	}
+	var tools []openai.Tool
+	for _, gt := range req.Config.Tools {
+		if gt == nil {
+			continue
+		}
+		for _, decl := range gt.FunctionDeclarations {
+			if decl == nil {
+				continue
+			}
+			tools = append(tools, openai.Tool{
+				Type: openai.ToolTypeFunction,
+				Function: &openai.FunctionDefinition{
+					Name:        decl.Name,
+					Description: decl.Description,
+					Parameters:  toolParameters(decl),
+				},
+			})
+		}
+	}
+	return tools
+}
+
+// toolParameters extracts a JSON-schema object for the tool parameters,
+// preferring the JSON-schema form that functiontool emits, then the genai
+// Schema, and finally an empty object so providers that require a schema are
+// satisfied.
+func toolParameters(decl *genai.FunctionDeclaration) any {
+	if decl.ParametersJsonSchema != nil {
+		return decl.ParametersJsonSchema
+	}
+	if decl.Parameters != nil {
+		return decl.Parameters
+	}
+	return map[string]any{"type": "object", "properties": map[string]any{}}
 }
 
 // partsText concatenates the text of all text parts in a genai content.
@@ -57,27 +142,72 @@ func partsText(parts []*genai.Part) string {
 	return b.String()
 }
 
+// marshalArgs renders a key/value map as a JSON object string, returning "{}"
+// for empty or unmarshalable input.
+func marshalArgs(m map[string]any) string {
+	if len(m) == 0 {
+		return "{}"
+	}
+	b, err := json.Marshal(m)
+	if err != nil {
+		return "{}"
+	}
+	return string(b)
+}
+
+// parseArgs parses a tool_call arguments JSON string into a map.
+func parseArgs(s string) map[string]any {
+	if strings.TrimSpace(s) == "" {
+		return map[string]any{}
+	}
+	var m map[string]any
+	if err := json.Unmarshal([]byte(s), &m); err != nil {
+		// Surface the raw payload so the tool can still inspect it.
+		return map[string]any{"_raw": s}
+	}
+	return m
+}
+
 // toLLMResponse converts a non-streaming OpenAI completion into an ADK
-// LLMResponse, mapping the assistant text, finish reason and token usage.
+// LLMResponse, mapping assistant text, tool calls, finish reason and usage.
 func toLLMResponse(resp openai.ChatCompletionResponse) *adkmodel.LLMResponse {
 	out := &adkmodel.LLMResponse{
-		Content:      genai.NewContentFromText("", genai.RoleModel),
 		ModelVersion: resp.Model,
 		TurnComplete: true,
 	}
 
+	var parts []*genai.Part
 	if len(resp.Choices) > 0 {
-		choice := resp.Choices[0]
-		out.Content = genai.NewContentFromText(choice.Message.Content, genai.RoleModel)
-		out.FinishReason = mapFinishReason(choice.FinishReason)
+		msg := resp.Choices[0].Message
+		if msg.Content != "" {
+			parts = append(parts, genai.NewPartFromText(msg.Content))
+		}
+		for _, tc := range msg.ToolCalls {
+			parts = append(parts, &genai.Part{
+				FunctionCall: &genai.FunctionCall{
+					ID:   tc.ID,
+					Name: tc.Function.Name,
+					Args: parseArgs(tc.Function.Arguments),
+				},
+			})
+		}
+		out.FinishReason = mapFinishReason(resp.Choices[0].FinishReason)
 	}
-
-	out.UsageMetadata = &genai.GenerateContentResponseUsageMetadata{
-		PromptTokenCount:     int32(resp.Usage.PromptTokens),
-		CandidatesTokenCount: int32(resp.Usage.CompletionTokens),
-		TotalTokenCount:      int32(resp.Usage.TotalTokens),
-	}
+	out.Content = genai.NewContentFromParts(parts, genai.RoleModel)
+	out.UsageMetadata = toUsage(&resp.Usage)
 	return out
+}
+
+// toUsage maps OpenAI token usage onto the genai usage metadata.
+func toUsage(u *openai.Usage) *genai.GenerateContentResponseUsageMetadata {
+	if u == nil {
+		return nil
+	}
+	return &genai.GenerateContentResponseUsageMetadata{
+		PromptTokenCount:     int32(u.PromptTokens),
+		CandidatesTokenCount: int32(u.CompletionTokens),
+		TotalTokenCount:      int32(u.TotalTokens),
+	}
 }
 
 // mapFinishReason maps an OpenAI finish reason to the genai equivalent.
@@ -88,6 +218,8 @@ func mapFinishReason(r openai.FinishReason) genai.FinishReason {
 	case openai.FinishReasonLength:
 		return genai.FinishReasonMaxTokens
 	default:
+		// tool_calls / function_call / empty all map to STOP for ADK's purposes;
+		// the presence of FunctionCall parts is what drives the tool loop.
 		return genai.FinishReasonStop
 	}
 }
