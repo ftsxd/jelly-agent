@@ -4,6 +4,7 @@ PLAN.md
 OPTIMIZATION.md
 
 # Go 构建产物
+/jelly
 /jelly-agent
 /jelly-cli
 /adk-platform

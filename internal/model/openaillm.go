@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"iter"
-	"sort"
 
 	openai "github.com/sashabaranov/go-openai"
 	adkmodel "google.golang.org/adk/model"
@@ -76,17 +75,9 @@ func (m *OpenAILLM) generateOnce(ctx context.Context, req *adkmodel.LLMRequest) 
 	}
 }
 
-// accumToolCall accumulates a streamed tool call across delta chunks.
-type accumToolCall struct {
-	id   string
-	name string
-	args string
-}
-
-// generateStream streams text deltas as partial responses and accumulates
-// tool-call deltas (which arrive fragmented, keyed by index) into complete
-// function calls, emitting a single final non-partial response that the runner
-// processes.
+// generateStream streams text deltas as partial responses and folds the rest
+// (tool-call fragments, reasoning, usage) via streamAccumulator into a single
+// final non-partial response that the runner processes.
 func (m *OpenAILLM) generateStream(ctx context.Context, req *adkmodel.LLMRequest) iter.Seq2[*adkmodel.LLMResponse, error] {
 	return func(yield func(*adkmodel.LLMResponse, error) bool) {
 		stream, err := m.client.CreateChatCompletionStream(ctx, openai.ChatCompletionRequest{
@@ -101,14 +92,7 @@ func (m *OpenAILLM) generateStream(ctx context.Context, req *adkmodel.LLMRequest
 		}
 		defer stream.Close()
 
-		var (
-			fullText  string
-			reasoning string
-			toolCalls = map[int]*accumToolCall{}
-			usage     *openai.Usage
-			finish    openai.FinishReason
-		)
-
+		acc := newStreamAccumulator()
 		for {
 			chunk, err := stream.Recv()
 			if errors.Is(err, io.EOF) {
@@ -118,92 +102,17 @@ func (m *OpenAILLM) generateStream(ctx context.Context, req *adkmodel.LLMRequest
 				yield(nil, fmt.Errorf("openai stream recv: %w", err))
 				return
 			}
-			if chunk.Usage != nil {
-				usage = chunk.Usage
-			}
-			if len(chunk.Choices) == 0 {
-				continue
-			}
-			choice := chunk.Choices[0]
-			if choice.FinishReason != "" {
-				finish = choice.FinishReason
-			}
-
-			reasoning += choice.Delta.ReasoningContent
-
-			if d := choice.Delta.Content; d != "" {
-				fullText += d
+			if delta := acc.addChunk(chunk); delta != "" {
 				partial := &adkmodel.LLMResponse{
-					Content: genai.NewContentFromText(d, genai.RoleModel),
+					Content: genai.NewContentFromText(delta, genai.RoleModel),
 					Partial: true,
 				}
 				if !yield(partial, nil) {
 					return
 				}
 			}
-
-			for _, tc := range choice.Delta.ToolCalls {
-				idx := 0
-				if tc.Index != nil {
-					idx = *tc.Index
-				}
-				acc := toolCalls[idx]
-				if acc == nil {
-					acc = &accumToolCall{}
-					toolCalls[idx] = acc
-				}
-				if tc.ID != "" {
-					acc.id = tc.ID
-				}
-				if tc.Function.Name != "" {
-					acc.name = tc.Function.Name
-				}
-				acc.args += tc.Function.Arguments
-			}
 		}
-
-		yield(m.finalStreamResponse(req, reasoning, fullText, toolCalls, usage, finish), nil)
-	}
-}
-
-// finalStreamResponse assembles the terminal, non-partial response from the
-// accumulated reasoning, text and tool calls.
-func (m *OpenAILLM) finalStreamResponse(req *adkmodel.LLMRequest, reasoning, text string, toolCalls map[int]*accumToolCall, usage *openai.Usage, finish openai.FinishReason) *adkmodel.LLMResponse {
-	var parts []*genai.Part
-	if reasoning != "" {
-		// Preserved so it can be echoed back to thinking models on the
-		// follow-up request that carries the tool results.
-		parts = append(parts, &genai.Part{Text: reasoning, Thought: true})
-	}
-	if text != "" {
-		parts = append(parts, genai.NewPartFromText(text))
-	}
-
-	indices := make([]int, 0, len(toolCalls))
-	for idx := range toolCalls {
-		indices = append(indices, idx)
-	}
-	sort.Ints(indices)
-	for _, idx := range indices {
-		tc := toolCalls[idx]
-		if tc.name == "" {
-			continue
-		}
-		parts = append(parts, &genai.Part{
-			FunctionCall: &genai.FunctionCall{
-				ID:   tc.id,
-				Name: tc.name,
-				Args: parseArgs(tc.args),
-			},
-		})
-	}
-
-	return &adkmodel.LLMResponse{
-		Content:       genai.NewContentFromParts(parts, genai.RoleModel),
-		ModelVersion:  m.modelID(req),
-		UsageMetadata: toUsage(usage),
-		FinishReason:  mapFinishReason(finish),
-		TurnComplete:  true,
+		yield(acc.final(m.modelID(req)), nil)
 	}
 }
 

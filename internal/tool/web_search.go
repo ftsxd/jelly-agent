@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strings"
 	"time"
 
 	adktool "google.golang.org/adk/tool"
@@ -38,7 +39,10 @@ type WebSearchResult struct {
 	Results []SearchItem `json:"results"`
 }
 
-const defaultMaxResults = 5
+const (
+	defaultMaxResults = 5
+	maxSearchResults  = 10
+)
 
 var httpClient = &http.Client{Timeout: 15 * time.Second}
 
@@ -52,15 +56,24 @@ func NewWebSearchTool() (adktool.Tool, error) {
 			Description: "搜索互联网获取实时信息。传入查询关键词，返回若干条标题/摘要/链接。",
 		},
 		func(tc adktool.Context, args WebSearchArgs) (WebSearchResult, error) {
+			query := strings.TrimSpace(args.Query)
+			if query == "" {
+				return WebSearchResult{}, fmt.Errorf("query 不能为空")
+			}
 			max := args.MaxNum
-			if max <= 0 {
+			switch {
+			case max <= 0:
 				max = defaultMaxResults
+			case max > maxSearchResults:
+				max = maxSearchResults
 			}
-			ctx := context.Background()
+			// tc is itself a context.Context (via ADK ReadonlyContext), so the
+			// tool's HTTP request is cancelled when the upstream call / SSE
+			// connection is cancelled.
 			if key := os.Getenv("TAVILY_API_KEY"); key != "" {
-				return tavilySearch(ctx, key, args.Query, max)
+				return tavilySearch(tc, key, query, max)
 			}
-			return duckDuckGoSearch(ctx, args.Query, max)
+			return duckDuckGoSearch(tc, query, max)
 		},
 	)
 }
