@@ -4,11 +4,13 @@
 
 ## 项目状态
 
-当前处于 **Phase 2（CLI 完善）· 第一批：打地基**。已验证可用：
+当前处于 **Phase 2（CLI 完善）· 第二批：状态与事件**。已验证可用：
 
 - 自写 `model.LLM` OpenAI 兼容适配器（流式 + 工具调用 + DeepSeek 思考模型 `reasoning_content` 往返）。
 - 单 Agent + `web_search` 工具，端到端跑通 DeepSeek。
-- 配置层（YAML + `${ENV}` + 环境变量回落）、模型 Registry、cobra 命令树骨架。
+- 配置层（YAML + `${ENV}` + 环境变量回落）、模型 Registry、cobra 命令树。
+- **交互式多轮对话** + 内联命令（`/help` `/tools` `/clear` `/stats` `/exit`）。
+- **会话持久化**：纯 Go SQLite（无 CGO），落 `~/.jelly-agent/state.db`，可列出历史会话。
 
 > 详细实施依据见 `PLAN.md`（本地文档，不入库）。本 README 是仓库内唯一受 git 追踪的文档。
 
@@ -24,13 +26,14 @@
 go build -o jelly ./cmd/cli
 
 # 方式一：环境变量（最简单）
-LLM_API_KEY=sk-xxxx LLM_MODEL=deepseek-chat \
-  ./jelly agent run root --once "用一句话介绍你自己"
+export LLM_API_KEY=sk-xxxx LLM_MODEL=deepseek-chat
+./jelly agent run                       # 进入交互式多轮对话
+./jelly agent run --once "用一句话介绍你自己"   # 单轮问答后退出
 
 # 方式二：配置文件
 cp configs/config.example.yaml configs/config.yaml   # 按需修改，api_key 用 ${ENV}
 export DEEPSEEK_API_KEY=sk-xxxx
-./jelly agent run root --once "搜索一下 2026 年 Go 在 AI 领域的最新进展"
+./jelly agent run
 ```
 
 配置查找顺序：`--config` 指定 → `$JELLY_CONFIG` → `configs/config.yaml` → `~/.jelly-agent/config.yaml` → 回落到 `LLM_API_KEY` / `LLM_BASE_URL` / `LLM_MODEL` 环境变量。
@@ -38,12 +41,16 @@ export DEEPSEEK_API_KEY=sk-xxxx
 ## 命令
 
 ```text
-jelly agent run [root] --once "问题"   # 单次问答（交互式多轮见第二批）
+jelly agent run                        # 交互式多轮对话（默认）
+jelly agent run --once "问题"          # 单次问答后退出
 jelly agent list                       # 列出 Agent
+jelly session list                     # 列出持久化的历史会话
 jelly config list                      # 列出 Provider（API Key 脱敏）
 jelly tool list                        # 列出内置工具
 jelly --help                           # 全部命令
 ```
+
+交互模式内联命令：`/help` `/tools` `/clear`（开新会话）`/stats`（token 用量）`/exit`（或 Ctrl+D）。
 
 可选环境变量：`TAVILY_API_KEY`（设置后 `web_search` 走 Tavily，否则回落免 key 的 DuckDuckGo）。
 
@@ -57,10 +64,11 @@ go vet ./...
 ## 目录
 
 ```text
-cmd/cli/              # CLI 入口（cobra 命令树）
+cmd/cli/              # CLI 入口（cobra 命令树 + 交互式 REPL）
 internal/model/       # OpenAI 兼容 model.LLM 适配器 + Registry
 internal/tool/        # 内置工具（web_search）
 internal/config/      # YAML + ${ENV} 配置加载
+internal/session/     # SQLite 会话持久化（纯 Go，无 CGO）
 configs/              # 配置示例
 ```
 
