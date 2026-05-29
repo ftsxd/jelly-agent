@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/spf13/cobra"
 )
@@ -24,7 +23,7 @@ func newAgentRunCmd() *cobra.Command {
 	)
 	cmd := &cobra.Command{
 		Use:   "run [agent]",
-		Short: "运行 Agent（--once 单次问答；交互式多轮见第二批）",
+		Short: "运行 Agent（默认进入交互式多轮；--once 单次问答后退出）",
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			reg, err := loadRegistry()
@@ -36,12 +35,10 @@ func newAgentRunCmd() *cobra.Command {
 				return err
 			}
 
-			question := strings.TrimSpace(once)
-			if question == "" {
-				return fmt.Errorf("交互式多轮对话将在 Phase 2 第二批提供；当前请用 --once \"问题\" 进行单次问答")
+			if question := strings.TrimSpace(once); question != "" {
+				return runOnce(cmd.Context(), a, prov, newSessionID(), question)
 			}
-			sessionID := fmt.Sprintf("cli-%d", time.Now().UnixNano())
-			return runOnce(cmd.Context(), a, prov, sessionID, question)
+			return runInteractive(cmd.Context(), a, prov)
 		},
 	}
 	cmd.Flags().StringVarP(&provider, "provider", "p", "", "使用的 Provider 名称（默认用配置的 default_provider）")
