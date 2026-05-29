@@ -1,6 +1,7 @@
 # 规划文档（不入库）
 ADK-Go-Agent平台-完整方案规划v2.docx
 PLAN.md
+OPTIMIZATION.md
 
 # Go 构建产物
 /jelly-agent
@@ -12,6 +13,8 @@ PLAN.md
 
 # 本地配置与数据
 *.local.yaml
+/configs/config.yaml      # 真实配置（可能含 key），只追踪 config.example.yaml
+~/.jelly-agent/
 /data/
 *.db
 *.sqlite
