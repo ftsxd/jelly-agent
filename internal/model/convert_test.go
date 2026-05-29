@@ -74,6 +74,41 @@ func TestToOpenAIMessages_ToolCallRoundTrip(t *testing.T) {
 	}
 }
 
+// TestReasoningRoundTrip checks that a thinking model's reasoning_content is
+// preserved on the assistant turn carrying tool_calls (DeepSeek requirement),
+// and dropped from a plain completed turn.
+func TestReasoningRoundTrip(t *testing.T) {
+	withCall := &adkmodel.LLMRequest{
+		Contents: []*genai.Content{
+			genai.NewContentFromParts([]*genai.Part{
+				{Text: "let me search", Thought: true},
+				{FunctionCall: &genai.FunctionCall{ID: "c1", Name: "web_search", Args: map[string]any{"q": "x"}}},
+			}, genai.RoleModel),
+		},
+	}
+	msgs := toOpenAIMessages(withCall)
+	if len(msgs) != 1 {
+		t.Fatalf("want 1 message, got %d", len(msgs))
+	}
+	if msgs[0].ReasoningContent != "let me search" || len(msgs[0].ToolCalls) != 1 {
+		t.Errorf("assistant msg = %+v, want reasoning echoed with tool call", msgs[0])
+	}
+
+	// A thought on a plain text turn (no tool call) must NOT carry reasoning back.
+	plain := &adkmodel.LLMRequest{
+		Contents: []*genai.Content{
+			genai.NewContentFromParts([]*genai.Part{
+				{Text: "thinking...", Thought: true},
+				{Text: "final answer"},
+			}, genai.RoleModel),
+		},
+	}
+	pm := toOpenAIMessages(plain)
+	if len(pm) != 1 || pm[0].Content != "final answer" || pm[0].ReasoningContent != "" {
+		t.Errorf("plain turn = %+v, want only content with no reasoning", pm[0])
+	}
+}
+
 // TestToLLMResponse_ToolCalls checks a completion carrying tool_calls becomes
 // genai FunctionCall parts with parsed args.
 func TestToLLMResponse_ToolCalls(t *testing.T) {

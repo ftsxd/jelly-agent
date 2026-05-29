@@ -42,6 +42,7 @@ func toOpenAIMessages(req *adkmodel.LLMRequest) []openai.ChatCompletionMessage {
 
 		var (
 			text      strings.Builder
+			reasoning strings.Builder
 			toolCalls []openai.ToolCall
 			responses []openai.ChatCompletionMessage
 		)
@@ -64,6 +65,9 @@ func toOpenAIMessages(req *adkmodel.LLMRequest) []openai.ChatCompletionMessage {
 					ToolCallID: p.FunctionResponse.ID,
 					Content:    marshalArgs(p.FunctionResponse.Response),
 				})
+			case p.Thought:
+				// Reasoning content (DeepSeek-style thinking models).
+				reasoning.WriteString(p.Text)
 			case p.Text != "":
 				text.WriteString(p.Text)
 			}
@@ -71,10 +75,15 @@ func toOpenAIMessages(req *adkmodel.LLMRequest) []openai.ChatCompletionMessage {
 
 		switch {
 		case len(toolCalls) > 0:
+			// DeepSeek thinking models require the reasoning_content that
+			// accompanied a tool call to be echoed back on the assistant
+			// message that carries the tool_calls. We only do so here (not on
+			// completed plain-text turns, which must NOT carry it back).
 			msgs = append(msgs, openai.ChatCompletionMessage{
-				Role:      openai.ChatMessageRoleAssistant,
-				Content:   text.String(),
-				ToolCalls: toolCalls,
+				Role:             openai.ChatMessageRoleAssistant,
+				Content:          text.String(),
+				ReasoningContent: reasoning.String(),
+				ToolCalls:        toolCalls,
 			})
 		case len(responses) > 0:
 			msgs = append(msgs, responses...)
@@ -179,6 +188,9 @@ func toLLMResponse(resp openai.ChatCompletionResponse) *adkmodel.LLMResponse {
 	var parts []*genai.Part
 	if len(resp.Choices) > 0 {
 		msg := resp.Choices[0].Message
+		if msg.ReasoningContent != "" {
+			parts = append(parts, &genai.Part{Text: msg.ReasoningContent, Thought: true})
+		}
 		if msg.Content != "" {
 			parts = append(parts, genai.NewPartFromText(msg.Content))
 		}

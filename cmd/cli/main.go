@@ -113,8 +113,19 @@ func run() error {
 		if ev == nil || ev.Content == nil {
 			continue
 		}
-		renderEvent(ev.Content.Parts)
-		if ev.UsageMetadata != nil && !ev.Partial {
+		if ev.Partial {
+			// Streaming text deltas: print incrementally.
+			for _, p := range ev.Content.Parts {
+				if p != nil && !p.Thought && p.Text != "" {
+					fmt.Print(p.Text)
+				}
+			}
+			continue
+		}
+		// Final event: surface tool activity. Its aggregated text is skipped
+		// because it was already streamed via the partial events above.
+		renderFinal(ev.Content.Parts)
+		if ev.UsageMetadata != nil {
 			u := ev.UsageMetadata
 			fmt.Printf("\n[Token: prompt=%d completion=%d total=%d]\n",
 				u.PromptTokenCount, u.CandidatesTokenCount, u.TotalTokenCount)
@@ -123,8 +134,8 @@ func run() error {
 	return nil
 }
 
-// renderEvent prints text deltas inline and surfaces tool calls / results.
-func renderEvent(parts []*genai.Part) {
+// renderFinal surfaces tool calls and results from a non-partial event.
+func renderFinal(parts []*genai.Part) {
 	for _, p := range parts {
 		switch {
 		case p == nil:
@@ -133,8 +144,6 @@ func renderEvent(parts []*genai.Part) {
 			fmt.Printf("\n  → 调用工具: %s(%v)\n", p.FunctionCall.Name, p.FunctionCall.Args)
 		case p.FunctionResponse != nil:
 			fmt.Printf("  → 工具返回: %s\n", summarize(p.FunctionResponse.Response))
-		case p.Text != "":
-			fmt.Print(p.Text)
 		}
 	}
 }

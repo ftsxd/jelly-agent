@@ -103,6 +103,7 @@ func (m *OpenAILLM) generateStream(ctx context.Context, req *adkmodel.LLMRequest
 
 		var (
 			fullText  string
+			reasoning string
 			toolCalls = map[int]*accumToolCall{}
 			usage     *openai.Usage
 			finish    openai.FinishReason
@@ -127,6 +128,8 @@ func (m *OpenAILLM) generateStream(ctx context.Context, req *adkmodel.LLMRequest
 			if choice.FinishReason != "" {
 				finish = choice.FinishReason
 			}
+
+			reasoning += choice.Delta.ReasoningContent
 
 			if d := choice.Delta.Content; d != "" {
 				fullText += d
@@ -159,14 +162,19 @@ func (m *OpenAILLM) generateStream(ctx context.Context, req *adkmodel.LLMRequest
 			}
 		}
 
-		yield(m.finalStreamResponse(req, fullText, toolCalls, usage, finish), nil)
+		yield(m.finalStreamResponse(req, reasoning, fullText, toolCalls, usage, finish), nil)
 	}
 }
 
 // finalStreamResponse assembles the terminal, non-partial response from the
-// accumulated text and tool calls.
-func (m *OpenAILLM) finalStreamResponse(req *adkmodel.LLMRequest, text string, toolCalls map[int]*accumToolCall, usage *openai.Usage, finish openai.FinishReason) *adkmodel.LLMResponse {
+// accumulated reasoning, text and tool calls.
+func (m *OpenAILLM) finalStreamResponse(req *adkmodel.LLMRequest, reasoning, text string, toolCalls map[int]*accumToolCall, usage *openai.Usage, finish openai.FinishReason) *adkmodel.LLMResponse {
 	var parts []*genai.Part
+	if reasoning != "" {
+		// Preserved so it can be echoed back to thinking models on the
+		// follow-up request that carries the tool results.
+		parts = append(parts, &genai.Part{Text: reasoning, Thought: true})
+	}
 	if text != "" {
 		parts = append(parts, genai.NewPartFromText(text))
 	}

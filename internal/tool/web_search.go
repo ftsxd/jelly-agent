@@ -125,7 +125,15 @@ func duckDuckGoSearch(ctx context.Context, query string, max int) (WebSearchResu
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return WebSearchResult{}, fmt.Errorf("duckduckgo status %d", resp.StatusCode)
+		// DuckDuckGo's Instant Answer API often returns 202 (rate limit / async).
+		// Return a usable note instead of a hard error so the model can proceed.
+		return WebSearchResult{
+			Query:  query,
+			Source: "duckduckgo",
+			Results: []SearchItem{{
+				Snippet: fmt.Sprintf("DuckDuckGo 未返回结果（HTTP %d，即时答案 API 覆盖有限或被限流）。配置 TAVILY_API_KEY 可获得完整网页搜索结果。", resp.StatusCode),
+			}},
+		}, nil
 	}
 
 	var payload struct {
