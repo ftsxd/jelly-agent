@@ -1,0 +1,30 @@
+# 规划文档（不入库）
+ADK-Go-Agent平台-完整方案规划v2.docx
+PLAN.md
+
+# Go 构建产物
+/jelly-agent
+/jelly-cli
+/adk-platform
+*.exe
+*.test
+*.out
+
+# 本地配置与数据
+*.local.yaml
+/data/
+*.db
+*.sqlite
+
+# 依赖与环境
+vendor/
+.env
+
+# 前端
+web/node_modules/
+web/dist/
+
+# 编辑器 / 系统
+.DS_Store
+.idea/
+.vscode/
