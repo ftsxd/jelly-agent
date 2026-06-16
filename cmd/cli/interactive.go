@@ -12,13 +12,17 @@ import (
 	adksession "google.golang.org/adk/session"
 
 	"github.com/jelly-agent/jelly-agent/internal/config"
-	jellytool "github.com/jelly-agent/jelly-agent/internal/tool"
+	"github.com/jelly-agent/jelly-agent/internal/memory"
 )
 
 // runInteractive starts a multi-turn REPL on a single persisted session.
-// Inline commands (prefixed with /) control the session; Ctrl+D exits.
-func runInteractive(ctx context.Context, a agent.Agent, prov config.Provider) error {
-	r, svc, err := newRunner(a)
+// Inline commands (prefixed with /) control the session; Ctrl+D exits. When
+// search is non-nil each turn is indexed into L2 memory for later retrieval.
+func runInteractive(ctx context.Context, a agent.Agent, prov config.Provider, search *memory.Search) error {
+	if search != nil {
+		defer search.Close()
+	}
+	r, svc, err := newRunner(a, search)
 	if err != nil {
 		return err
 	}
@@ -58,7 +62,9 @@ func runInteractive(ctx context.Context, a agent.Agent, prov config.Provider) er
 		fmt.Print("\nAgent: ")
 		if err := runTurn(ctx, r, sessionID, line); err != nil {
 			fmt.Fprintf(os.Stderr, "\n[错误] %v\n", err)
+			continue
 		}
+		indexSession(ctx, svc, search, sessionID)
 	}
 }
 
@@ -73,13 +79,16 @@ func handleInlineCommand(ctx context.Context, svc adksession.Service, line, sess
 	case "/help":
 		fmt.Println(`可用命令：
   /tools          列出当前可用工具
+  /memory         显示长期记忆（MEMORY.md / USER.md）
   /clear          清空上下文（开新会话）
   /stats          显示当前会话 token 用量
   /help           显示本帮助
   /exit           退出（等价 Ctrl+D）
   （/model、/agent 切换将在后续批次提供）`)
+	case "/memory":
+		printMemory()
 	case "/tools":
-		tools, err := jellytool.Builtins()
+		tools, err := listBuiltins()
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "[错误] %v\n", err)
 			return "", false
@@ -119,6 +128,29 @@ func printSessionStats(ctx context.Context, svc adksession.Service, sessionID st
 		}
 	}
 	fmt.Printf("会话 %s：prompt=%d completion=%d total=%d\n", sessionID, prompt, completion, total)
+}
+
+// printMemory shows the current L1 core-memory files.
+func printMemory() {
+	core, err := loadMemory()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[错误] %v\n", err)
+		return
+	}
+	mem, usr := core.Snapshot()
+	fmt.Printf("记忆目录: %s\n", core.Dir())
+	if usr == "" && mem == "" {
+		fmt.Println("（暂无长期记忆）")
+		return
+	}
+	if usr != "" {
+		fmt.Println("\n[USER.md]")
+		fmt.Println(usr)
+	}
+	if mem != "" {
+		fmt.Println("\n[MEMORY.md]")
+		fmt.Println(mem)
+	}
 }
 
 func newSessionID() string {

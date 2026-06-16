@@ -30,15 +30,15 @@ func newAgentRunCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			a, prov, err := buildAgent(reg, provider)
+			a, prov, search, err := buildAgent(reg, provider)
 			if err != nil {
 				return err
 			}
 
 			if question := strings.TrimSpace(once); question != "" {
-				return runOnce(cmd.Context(), a, prov, newSessionID(), question)
+				return runOnce(cmd.Context(), a, prov, search, newSessionID(), question)
 			}
-			return runInteractive(cmd.Context(), a, prov)
+			return runInteractive(cmd.Context(), a, prov, search)
 		},
 	}
 	cmd.Flags().StringVarP(&provider, "provider", "p", "", "使用的 Provider 名称（默认用配置的 default_provider）")

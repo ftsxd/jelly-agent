@@ -9,9 +9,13 @@ import (
 	"os"
 
 	"github.com/spf13/cobra"
+	adktool "google.golang.org/adk/tool"
 
 	"github.com/jelly-agent/jelly-agent/internal/config"
+	"github.com/jelly-agent/jelly-agent/internal/memory"
 	jellymodel "github.com/jelly-agent/jelly-agent/internal/model"
+	jellysession "github.com/jelly-agent/jelly-agent/internal/session"
+	jellytool "github.com/jelly-agent/jelly-agent/internal/tool"
 )
 
 // version is the CLI version, overridable at build time via -ldflags.
@@ -53,4 +57,58 @@ func loadRegistry() (*jellymodel.Registry, error) {
 		return nil, err
 	}
 	return jellymodel.NewRegistry(cfg), nil
+}
+
+// loadMemory builds the L1 core-memory store from the config's memory section,
+// falling back to defaults when the section is absent.
+func loadMemory() (*memory.Core, error) {
+	cfg, err := loadConfig()
+	if err != nil {
+		return nil, err
+	}
+	mc := cfg.Memory.Core
+	return memory.NewCore(mc.Dir, mc.MemoryBudgetTokens, mc.UserBudgetTokens)
+}
+
+// loadMemorySetup builds the L1 core store and, when memory.search is enabled,
+// the L2 FTS5 search service over the shared state.db. The returned search is
+// nil when search is disabled; the caller owns closing it.
+func loadMemorySetup() (*memory.Core, *memory.Search, error) {
+	cfg, err := loadConfig()
+	if err != nil {
+		return nil, nil, err
+	}
+	mc := cfg.Memory.Core
+	core, err := memory.NewCore(mc.Dir, mc.MemoryBudgetTokens, mc.UserBudgetTokens)
+	if err != nil {
+		return nil, nil, err
+	}
+	if !cfg.Memory.Search.Enabled {
+		return core, nil, nil
+	}
+	dbPath, err := jellysession.DefaultDBPath()
+	if err != nil {
+		return nil, nil, err
+	}
+	search, err := memory.NewSearch(dbPath, cfg.Memory.Search.TopK)
+	if err != nil {
+		return nil, nil, fmt.Errorf("init memory search: %w", err)
+	}
+	return core, search, nil
+}
+
+// listBuiltins builds the tool set for display (jelly tool list, /tools): L1
+// core tools always, plus load_memory when L2 search is enabled. It does not
+// open the search index.
+func listBuiltins() ([]adktool.Tool, error) {
+	cfg, err := loadConfig()
+	if err != nil {
+		return nil, err
+	}
+	mc := cfg.Memory.Core
+	core, err := memory.NewCore(mc.Dir, mc.MemoryBudgetTokens, mc.UserBudgetTokens)
+	if err != nil {
+		return nil, err
+	}
+	return jellytool.Builtins(core, cfg.Memory.Search.Enabled)
 }

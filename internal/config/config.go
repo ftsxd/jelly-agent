@@ -24,10 +24,39 @@ type Provider struct {
 type Config struct {
 	DefaultProvider string     `mapstructure:"default_provider" yaml:"default_provider"`
 	Providers       []Provider `mapstructure:"providers" yaml:"providers"`
+	Memory          Memory     `mapstructure:"memory" yaml:"memory"`
 
 	// SourcePath records where the config came from ("(env)" for the env
 	// fallback, "" when nothing was found). Not persisted.
 	SourcePath string `mapstructure:"-" yaml:"-"`
+}
+
+// Memory configures the memory subsystem (PLAN §10.5): L1 core memory
+// (always on) and L2 session search (opt-in, FTS5-backed).
+type Memory struct {
+	Core   MemoryCore   `mapstructure:"core" yaml:"core"`
+	Search MemorySearch `mapstructure:"search" yaml:"search"`
+}
+
+// MemoryCore configures L1 core memory. Zero values are fine: the memory layer
+// substitutes its defaults (~/.jelly-agent/memory, 800/500 token budgets).
+type MemoryCore struct {
+	Dir                string `mapstructure:"dir" yaml:"dir"`
+	MemoryBudgetTokens int    `mapstructure:"memory_budget_tokens" yaml:"memory_budget_tokens"`
+	UserBudgetTokens   int    `mapstructure:"user_budget_tokens" yaml:"user_budget_tokens"`
+}
+
+// MemorySearch configures L2 session search (PLAN §10.5). Disabled by default;
+// when enabled, past-session text is indexed in SQLite FTS5 (sharing state.db)
+// and the agent gains a load_memory tool. A zero TopK uses the memory layer's
+// default. Backend currently accepts only "fts5"; the vector backend is L3
+// (later). Summarize is reserved — model-side compression of results is not
+// yet wired.
+type MemorySearch struct {
+	Enabled   bool   `mapstructure:"enabled" yaml:"enabled"`
+	Backend   string `mapstructure:"backend" yaml:"backend"`
+	TopK      int    `mapstructure:"top_k" yaml:"top_k"`
+	Summarize bool   `mapstructure:"summarize" yaml:"summarize"`
 }
 
 // Load reads and parses a YAML config file, expanding ${ENV} references in its

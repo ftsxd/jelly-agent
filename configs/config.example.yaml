@@ -26,3 +26,19 @@ providers:
     base_url: http://localhost:11434/v1
     api_key: ollama
     model: llama3.3
+
+# 记忆系统（可选）。整段省略即用默认值。
+memory:
+  # L1 核心记忆：MEMORY.md / USER.md 每轮注入 system prompt。
+  # 默认 dir=~/.jelly-agent/memory，预算 800/500 token。
+  core:
+    dir: ~/.jelly-agent/memory
+    memory_budget_tokens: 800   # MEMORY.md（代理长期笔记）硬上限
+    user_budget_tokens: 500     # USER.md（用户画像）硬上限
+  # L2 会话检索：把历史会话文本索引进 SQLite FTS5（与 state.db 同库），
+  # 开启后 Agent 获得 load_memory 工具按需检索。默认关闭。
+  search:
+    enabled: false
+    backend: fts5               # 目前仅 fts5；向量后端属 L3（后续）
+    top_k: 5                    # 每次检索返回的最大条数
+    summarize: false            # 预留：检索结果经模型压缩（尚未接线）

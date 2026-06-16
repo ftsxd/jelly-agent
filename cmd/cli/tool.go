@@ -6,8 +6,6 @@ import (
 	"text/tabwriter"
 
 	"github.com/spf13/cobra"
-
-	jellytool "github.com/jelly-agent/jelly-agent/internal/tool"
 )
 
 func newToolCmd() *cobra.Command {
@@ -24,7 +22,7 @@ func newToolListCmd() *cobra.Command {
 		Use:   "list",
 		Short: "列出已注册的工具",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			tools, err := jellytool.Builtins()
+			tools, err := listBuiltins()
 			if err != nil {
 				return err
 			}
