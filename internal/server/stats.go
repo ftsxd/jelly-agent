@@ -11,14 +11,14 @@ import (
 
 // statsResponse is the aggregate the Monitor view renders.
 type statsResponse struct {
-	Sessions  int            `json:"sessions"`  // persisted session count
-	Messages  int            `json:"messages"`  // text turns (user + agent)
-	ToolCalls int            `json:"tool_calls"` // total tool invocations
-	Tokens    tokenTotals    `json:"tokens"`
-	Tools     []toolStat     `json:"tools"`     // per-tool invocation counts, desc
-	Daily     []dailyStat    `json:"daily"`     // token/message series, chronological
-	Providers providerStat   `json:"providers"`
-	Memory    memoryStat     `json:"memory"`
+	Sessions  int          `json:"sessions"`   // persisted session count
+	Messages  int          `json:"messages"`   // text turns (user + agent)
+	ToolCalls int          `json:"tool_calls"` // total tool invocations
+	Tokens    tokenTotals  `json:"tokens"`
+	Tools     []toolStat   `json:"tools"` // per-tool invocation counts, desc
+	Daily     []dailyStat  `json:"daily"` // token/message series, chronological
+	Providers providerStat `json:"providers"`
+	Memory    memoryStat   `json:"memory"`
 }
 
 type tokenTotals struct {

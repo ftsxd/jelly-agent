@@ -237,7 +237,7 @@ type platformInput struct {
 	Name         string            `json:"name"`
 	Type         string            `json:"type"`
 	ClientID     string            `json:"client_id"`
-	ClientSecret string            `json:"client_secret"`    // empty on update keeps the stored secret
+	ClientSecret string            `json:"client_secret"` // empty on update keeps the stored secret
 	Provider     string            `json:"provider"`
 	Enabled      bool              `json:"enabled"`
 	Settings     map[string]string `json:"settings,omitempty"` // platform-specific (wechatpadpro)
