@@ -112,6 +112,51 @@ func (s *Server) handleDeleteProvider(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "saved_to": path})
 }
 
+// memorySearchInput toggles L2 session search (FTS5) from the web UI.
+type memorySearchInput struct {
+	Enabled bool `json:"enabled"`
+	TopK    int  `json:"top_k"` // 0 = keep the existing value
+}
+
+// handleSetMemorySearch persists memory.search.enabled (and optional top_k) and
+// hot-reloads, so L2 session search turns on/off from the dashboard without
+// editing config.yaml or restarting. Enabling a never-configured search defaults
+// the backend to "fts5" (the only one implemented; vector is L3).
+func (s *Server) handleSetMemorySearch(w http.ResponseWriter, r *http.Request) {
+	var in memorySearchInput
+	if err := decodeJSON(r, &in); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	path, err := s.writeTargetPath()
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	raw, err := loadRawOrEmpty(path)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	raw.Memory.Search.Enabled = in.Enabled
+	if in.Enabled && raw.Memory.Search.Backend == "" {
+		raw.Memory.Search.Backend = "fts5"
+	}
+	if in.TopK > 0 {
+		raw.Memory.Search.TopK = in.TopK
+	}
+
+	if err := s.persist(w, raw, path); err != nil {
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":       true,
+		"enabled":  s.engine().SearchEnabled(),
+		"top_k":    s.engine().Config().Memory.Search.TopK,
+		"saved_to": path,
+	})
+}
+
 // persist saves the config and reloads the engine, writing an error response and
 // returning a non-nil error if either step fails.
 func (s *Server) persist(w http.ResponseWriter, c *config.Config, path string) error {

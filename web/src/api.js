@@ -19,6 +19,17 @@ async function jpost(path, payload) {
   return body
 }
 
+async function jput(path, payload) {
+  const res = await fetch(path, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  const body = await res.json().catch(() => ({}))
+  if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`)
+  return body
+}
+
 async function jdelete(path) {
   const res = await fetch(path, { method: 'DELETE' })
   const body = await res.json().catch(() => ({}))
@@ -37,6 +48,7 @@ export const api = {
   session: (id) => jget(`/api/sessions/${encodeURIComponent(id)}`),
   memoryCore: () => jget('/api/memory/core'),
   memorySearch: (q) => jget(`/api/memory/search?q=${encodeURIComponent(q)}`),
+  setMemorySearch: (payload) => jput('/api/memory/search', payload),
   stats: () => jget('/api/stats'),
   mcp: () => jget('/api/mcp'),
   saveMCP: (s) => jpost('/api/mcp', s),

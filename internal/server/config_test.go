@@ -103,6 +103,39 @@ func TestConfigFileHotReload(t *testing.T) {
 	}
 }
 
+// TestMemorySearchToggle drives the L2 enable/disable endpoint end to end:
+// persist to config + hot-reload + reflect in the engine and /api/memory/core.
+func TestMemorySearchToggle(t *testing.T) {
+	s := newEmptyServer(t)
+
+	if s.engine().SearchEnabled() {
+		t.Fatal("expected L2 search off initially")
+	}
+
+	w := do(t, s, "PUT", "/api/memory/search", `{"enabled":true}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("enable status = %d: %s", w.Code, w.Body.String())
+	}
+	if !s.engine().SearchEnabled() {
+		t.Fatal("engine did not pick up enabled=true after reload")
+	}
+	if m := decode(t, w); m["enabled"] != true {
+		t.Fatalf("response enabled = %v, want true", m["enabled"])
+	}
+
+	// /api/memory/core surfaces the new state for the UI's initial render.
+	w = do(t, s, "GET", "/api/memory/core", "")
+	if decode(t, w)["search_enabled"] != true {
+		t.Fatalf("memory/core search_enabled not true: %s", w.Body.String())
+	}
+
+	// Disabling again flips it back.
+	w = do(t, s, "PUT", "/api/memory/search", `{"enabled":false}`)
+	if w.Code != http.StatusOK || s.engine().SearchEnabled() {
+		t.Fatalf("disable failed: code=%d enabled=%v", w.Code, s.engine().SearchEnabled())
+	}
+}
+
 func TestProviderCreateRequiresFields(t *testing.T) {
 	s := newEmptyServer(t)
 	w := do(t, s, "POST", "/api/providers", `{"name":"x"}`)

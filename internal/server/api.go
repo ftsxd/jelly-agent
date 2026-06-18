@@ -214,9 +214,11 @@ func (s *Server) handleMemoryCore(w http.ResponseWriter, _ *http.Request) {
 	}
 	mem, usr := core.Snapshot()
 	writeJSON(w, http.StatusOK, map[string]any{
-		"dir":    core.Dir(),
-		"user":   usr,
-		"memory": mem,
+		"dir":            core.Dir(),
+		"user":           usr,
+		"memory":         mem,
+		"search_enabled": s.engine().SearchEnabled(),
+		"search_top_k":   s.engine().Config().Memory.Search.TopK,
 	})
 }
 

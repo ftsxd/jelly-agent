@@ -12,6 +12,10 @@ const searching = ref(false)
 const searchError = ref('')
 const searchResult = ref(null) // {enabled, results}
 
+const searchEnabled = ref(false)
+const toggling = ref(false)
+const toggleError = ref('')
+
 onMounted(loadCore)
 
 async function loadCore() {
@@ -19,10 +23,29 @@ async function loadCore() {
   coreError.value = ''
   try {
     core.value = await api.memoryCore()
+    searchEnabled.value = !!core.value.search_enabled
   } catch (e) {
     coreError.value = e.message
   } finally {
     coreLoading.value = false
+  }
+}
+
+// toggleSearch flips memory.search.enabled on the server, which persists to
+// config.yaml and hot-reloads the engine — so it takes effect immediately, no
+// restart. New turns get indexed from here on; turns before enabling are not.
+async function toggleSearch() {
+  if (toggling.value) return
+  toggling.value = true
+  toggleError.value = ''
+  try {
+    const r = await api.setMemorySearch({ enabled: !searchEnabled.value })
+    searchEnabled.value = !!r.enabled
+    if (!searchEnabled.value) searchResult.value = null
+  } catch (e) {
+    toggleError.value = e.message
+  } finally {
+    toggling.value = false
   }
 }
 
@@ -74,7 +97,24 @@ function fmtTime(unix) {
       </section>
 
       <section class="col">
-        <h2 class="section-title">L2 会话检索 · FTS5</h2>
+        <div class="l2-head">
+          <h2 class="section-title">L2 会话检索 · FTS5</h2>
+          <div class="l2-toggle">
+            <span v-if="toggleError" class="toggle-err mono">{{ toggleError }}</span>
+            <span v-else class="mono dim toggle-state">{{ searchEnabled ? '已启用' : '已关闭' }}</span>
+            <button
+              class="switch"
+              :class="{ on: searchEnabled }"
+              role="switch"
+              :aria-checked="searchEnabled"
+              :disabled="toggling || coreLoading"
+              :title="searchEnabled ? '点击关闭 L2 检索' : '点击启用 L2 检索'"
+              @click="toggleSearch"
+            >
+              <span class="switch-knob" :class="{ spin: toggling }" />
+            </button>
+          </div>
+        </div>
         <div class="card search-card">
           <div class="search-row">
             <input
@@ -95,7 +135,7 @@ function fmtTime(unix) {
           <template v-else-if="searchResult">
             <div v-if="!searchResult.enabled" class="notice">
               <Icon name="alert" :size="16" />
-              <span>L2 检索未启用。在配置中设置 <code class="mono">memory.search.enabled: true</code> 后重启服务。</span>
+              <span>L2 检索未启用。打开右上角开关即可启用（即时生效，自动写入 <code class="mono">memory.search.enabled: true</code>）。</span>
             </div>
             <div v-else-if="!searchResult.results.length" class="empty">
               <span class="muted">未命中「{{ searchResult.query }}」</span>
@@ -169,6 +209,69 @@ function fmtTime(unix) {
   text-transform: uppercase;
   letter-spacing: 0.04em;
 }
+.l2-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+}
+.l2-toggle {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+.toggle-state {
+  font-size: 12px;
+}
+.toggle-err {
+  font-size: 11px;
+  color: var(--danger);
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.switch {
+  position: relative;
+  width: 40px;
+  height: 22px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--surface-3);
+  cursor: pointer;
+  padding: 0;
+  transition: background 0.18s ease, border-color 0.18s ease;
+}
+.switch.on {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+.switch:disabled {
+  opacity: 0.6;
+  cursor: progress;
+}
+.switch-knob {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #fff;
+  transition: transform 0.18s ease;
+}
+.switch.on .switch-knob {
+  transform: translateX(18px);
+}
+.switch-knob.spin {
+  animation: knob-pulse 0.8s ease-in-out infinite;
+}
+@keyframes knob-pulse {
+  50% {
+    opacity: 0.5;
+  }
+}
+
 .mem-card {
   padding: 0;
   overflow: hidden;
