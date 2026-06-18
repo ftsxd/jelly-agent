@@ -71,7 +71,7 @@ Agent 维护两份 markdown 长期记忆，每轮对话自动拼进 system promp
 - `~/.jelly-agent/memory/USER.md` —— 用户画像（默认上限 500 token）
 - `~/.jelly-agent/memory/MEMORY.md` —— 代理长期笔记（默认上限 800 token）
 
-模型在对话中通过 `remember` / `forget` 工具自行增删条目；目录与预算可在 `config.yaml` 的 `memory.core` 段覆盖。`/memory` 命令随时查看当前内容。
+两种写入方式：① 模型在对话中通过 `remember` / `forget` 工具自行增删条目（仅当出现值得跨会话记住的偏好/身份/约定时）；② 在 Web **记忆**页直接编辑 USER.md / MEMORY.md（保存即生效，下一轮对话注入）。目录与预算可在 `config.yaml` 的 `memory.core` 段覆盖。`/memory` 命令随时查看当前内容。
 
 ## 技能（Skills）
 

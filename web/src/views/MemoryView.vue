@@ -7,6 +7,11 @@ const core = ref(null)
 const coreLoading = ref(true)
 const coreError = ref('')
 
+// inline editing of USER.md / MEMORY.md, keyed by target ('user' | 'memory')
+const editTarget = ref('') // '' | 'user' | 'memory'
+const draft = ref('')
+const savingCore = ref(false)
+
 const query = ref('')
 const searching = ref(false)
 const searchError = ref('')
@@ -49,6 +54,31 @@ async function toggleSearch() {
   }
 }
 
+function startEditCore(target) {
+  editTarget.value = target
+  draft.value = (target === 'user' ? core.value?.user : core.value?.memory) || ''
+}
+
+function cancelEditCore() {
+  editTarget.value = ''
+  draft.value = ''
+}
+
+async function saveCore() {
+  if (savingCore.value) return
+  savingCore.value = true
+  coreError.value = ''
+  try {
+    await api.setMemoryCore(editTarget.value, draft.value)
+    editTarget.value = ''
+    await loadCore()
+  } catch (e) {
+    coreError.value = e.message
+  } finally {
+    savingCore.value = false
+  }
+}
+
 async function search() {
   const q = query.value.trim()
   if (!q || searching.value) return
@@ -84,14 +114,46 @@ function fmtTime(unix) {
         <div v-else-if="coreError" class="error-bar"><Icon name="alert" :size="16" /> {{ coreError }}</div>
         <template v-else>
           <div class="card mem-card">
-            <div class="mem-head"><Icon name="user" :size="15" /> USER.md</div>
-            <pre v-if="core.user" class="mem-body mono">{{ core.user }}</pre>
-            <div v-else class="mem-empty muted">（暂无用户画像）</div>
+            <div class="mem-head">
+              <span class="mem-title"><Icon name="user" :size="15" /> USER.md</span>
+              <button v-if="editTarget !== 'user'" class="btn btn-mini" @click="startEditCore('user')">
+                <Icon name="settings" :size="13" /> 编辑
+              </button>
+            </div>
+            <template v-if="editTarget === 'user'">
+              <textarea v-model="draft" class="textarea mono mem-edit" rows="6" placeholder="- 每条一行，例如：偏好简洁中文回答" />
+              <div class="mem-actions">
+                <button class="btn btn-mini" @click="cancelEditCore" :disabled="savingCore">取消</button>
+                <button class="btn btn-mini btn-primary" @click="saveCore" :disabled="savingCore">
+                  <span v-if="savingCore" class="spinner" /> 保存
+                </button>
+              </div>
+            </template>
+            <template v-else>
+              <pre v-if="core.user" class="mem-body mono">{{ core.user }}</pre>
+              <div v-else class="mem-empty muted">（暂无用户画像）</div>
+            </template>
           </div>
           <div class="card mem-card">
-            <div class="mem-head"><Icon name="doc" :size="15" /> MEMORY.md</div>
-            <pre v-if="core.memory" class="mem-body mono">{{ core.memory }}</pre>
-            <div v-else class="mem-empty muted">（暂无长期记忆）</div>
+            <div class="mem-head">
+              <span class="mem-title"><Icon name="doc" :size="15" /> MEMORY.md</span>
+              <button v-if="editTarget !== 'memory'" class="btn btn-mini" @click="startEditCore('memory')">
+                <Icon name="settings" :size="13" /> 编辑
+              </button>
+            </div>
+            <template v-if="editTarget === 'memory'">
+              <textarea v-model="draft" class="textarea mono mem-edit" rows="6" placeholder="- 每条一行，例如：项目部署在阿里云" />
+              <div class="mem-actions">
+                <button class="btn btn-mini" @click="cancelEditCore" :disabled="savingCore">取消</button>
+                <button class="btn btn-mini btn-primary" @click="saveCore" :disabled="savingCore">
+                  <span v-if="savingCore" class="spinner" /> 保存
+                </button>
+              </div>
+            </template>
+            <template v-else>
+              <pre v-if="core.memory" class="mem-body mono">{{ core.memory }}</pre>
+              <div v-else class="mem-empty muted">（暂无长期记忆）</div>
+            </template>
           </div>
         </template>
       </section>
@@ -279,12 +341,36 @@ function fmtTime(unix) {
 .mem-head {
   display: flex;
   align-items: center;
+  justify-content: space-between;
   gap: var(--sp-2);
   padding: var(--sp-3) var(--sp-4);
   border-bottom: 1px solid var(--border);
   font-weight: 600;
   font-size: 13px;
   color: var(--text-dim);
+}
+.mem-title {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+.btn-mini {
+  padding: 2px var(--sp-2);
+  font-size: 12px;
+  height: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.mem-edit {
+  margin: var(--sp-3);
+  width: calc(100% - var(--sp-3) * 2);
+}
+.mem-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--sp-2);
+  padding: 0 var(--sp-3) var(--sp-3);
 }
 .mem-body {
   margin: 0;

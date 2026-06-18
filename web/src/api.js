@@ -60,6 +60,7 @@ export const api = {
     return body
   },
   memoryCore: () => jget('/api/memory/core'),
+  setMemoryCore: (target, content) => jpost('/api/memory/core', { target, content }),
   memorySearch: (q) => jget(`/api/memory/search?q=${encodeURIComponent(q)}`),
   setMemorySearch: (payload) => jput('/api/memory/search', payload),
   stats: () => jget('/api/stats'),

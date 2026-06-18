@@ -11,6 +11,7 @@ import (
 
 	"github.com/jelly-agent/jelly-agent/internal/config"
 	"github.com/jelly-agent/jelly-agent/internal/engine"
+	"github.com/jelly-agent/jelly-agent/internal/memory"
 	jellytool "github.com/jelly-agent/jelly-agent/internal/tool"
 )
 
@@ -236,6 +237,43 @@ func (s *Server) handleMemoryCore(w http.ResponseWriter, _ *http.Request) {
 		"search_enabled": s.engine().SearchEnabled(),
 		"search_top_k":   s.engine().Config().Memory.Search.TopK,
 	})
+}
+
+// memoryCoreInput sets one core-memory file's raw content from the web editor.
+type memoryCoreInput struct {
+	Target  string `json:"target"` // "user" | "memory"
+	Content string `json:"content"`
+}
+
+// handleSetMemoryCore overwrites USER.md or MEMORY.md with edited content. The
+// next agent turn reads it fresh (InstructionProvider), so it takes effect
+// immediately — this is the manual counterpart to the agent's remember/forget.
+func (s *Server) handleSetMemoryCore(w http.ResponseWriter, r *http.Request) {
+	var in memoryCoreInput
+	if err := decodeJSON(r, &in); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	var target memory.Target
+	switch in.Target {
+	case "user":
+		target = memory.TargetUser
+	case "memory", "":
+		target = memory.TargetMemory
+	default:
+		writeErr(w, http.StatusBadRequest, "target 仅支持 user / memory")
+		return
+	}
+	core, err := s.engine().Core()
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if err := core.Set(target, in.Content); err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
 // handleMemorySearch runs an L2 FTS5 query over indexed sessions. Returns an

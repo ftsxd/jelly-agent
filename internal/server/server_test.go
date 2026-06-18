@@ -95,6 +95,25 @@ func TestMemoryCore(t *testing.T) {
 	}
 }
 
+// TestMemoryCoreSetThenGet verifies the manual core-memory editor: POST writes
+// the file and a follow-up GET reflects it (isolated via newEmptyServer's HOME).
+func TestMemoryCoreSetThenGet(t *testing.T) {
+	s := newEmptyServer(t)
+	w := do(t, s, "POST", "/api/memory/core", `{"target":"user","content":"- 偏好简洁中文回答"}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("set status = %d: %s", w.Code, w.Body.String())
+	}
+	w = do(t, s, "GET", "/api/memory/core", "")
+	if m := decode(t, w); !strings.Contains(m["user"].(string), "偏好简洁中文回答") {
+		t.Fatalf("user memory = %q, want the saved line", m["user"])
+	}
+	// Unknown target rejected.
+	w = do(t, s, "POST", "/api/memory/core", `{"target":"bogus","content":"x"}`)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("bogus target status = %d, want 400", w.Code)
+	}
+}
+
 func TestMemorySearchDisabledByDefault(t *testing.T) {
 	s := newTestServer(t)
 	w := do(t, s, "GET", "/api/memory/search?q=anything", "")

@@ -169,6 +169,24 @@ func (c *Core) Forget(target Target, match string) (int, error) {
 	return removed, nil
 }
 
+// Set overwrites the target file with content (raw markdown), creating it if
+// needed. It backs the web console's manual memory editor — the agent uses the
+// finer-grained Remember/Forget. A trailing newline is normalized.
+func (c *Core) Set(target Target, content string) error {
+	name, err := fileFor(target)
+	if err != nil {
+		return err
+	}
+	content = strings.TrimRight(content, "\n")
+	if content != "" {
+		content += "\n"
+	}
+	if err := os.WriteFile(filepath.Join(c.dir, name), []byte(content), 0o644); err != nil {
+		return fmt.Errorf("write %s: %w", name, err)
+	}
+	return nil
+}
+
 // budgeted reads name and trims it to fit budget tokens, keeping the most
 // recent entries (files grow by appending). A marker notes any drop so the
 // model knows memory was truncated rather than absent.
