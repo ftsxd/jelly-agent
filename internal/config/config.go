@@ -25,6 +25,7 @@ type Config struct {
 	DefaultProvider string        `mapstructure:"default_provider" yaml:"default_provider"`
 	Providers       []Provider    `mapstructure:"providers" yaml:"providers"`
 	Memory          Memory        `mapstructure:"memory" yaml:"memory"`
+	Skills          Skills        `mapstructure:"skills" yaml:"skills,omitempty"`
 	MCP             []MCPServer    `mapstructure:"mcp" yaml:"mcp,omitempty"`
 	Platforms       []PlatformBot `mapstructure:"platforms" yaml:"platforms,omitempty"`
 
@@ -70,6 +71,13 @@ type PlatformBot struct {
 	// servers). Empty = no MCP tools for this bot. Lets each bot selectively load
 	// MCP instead of always injecting every enabled server.
 	MCP []string `mapstructure:"mcp" yaml:"mcp,omitempty"`
+}
+
+// Skills configures the Agent Skills subsystem (Markdown skill packages loaded
+// on demand via the use_skill tool). Dir is where skill files live; empty uses
+// the default ~/.jelly-agent/skills.
+type Skills struct {
+	Dir string `mapstructure:"dir" yaml:"dir,omitempty"`
 }
 
 // Memory configures the memory subsystem (PLAN §10.5): L1 core memory
@@ -141,10 +149,15 @@ func Save(c *Config, path string) error {
 		DefaultProvider string        `yaml:"default_provider,omitempty"`
 		Providers       []Provider    `yaml:"providers"`
 		Memory          *Memory       `yaml:"memory,omitempty"`
+		Skills          *Skills        `yaml:"skills,omitempty"`
 		MCP             []MCPServer    `yaml:"mcp,omitempty"`
 		Platforms       []PlatformBot `yaml:"platforms,omitempty"`
 	}
 	p := payload{DefaultProvider: c.DefaultProvider, Providers: c.Providers, MCP: c.MCP, Platforms: c.Platforms}
+	if c.Skills != (Skills{}) {
+		sk := c.Skills
+		p.Skills = &sk
+	}
 	if c.Memory != (Memory{}) {
 		m := c.Memory
 		p.Memory = &m

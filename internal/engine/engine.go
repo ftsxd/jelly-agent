@@ -20,6 +20,7 @@ import (
 	"github.com/jelly-agent/jelly-agent/internal/memory"
 	jellymodel "github.com/jelly-agent/jelly-agent/internal/model"
 	jellysession "github.com/jelly-agent/jelly-agent/internal/session"
+	"github.com/jelly-agent/jelly-agent/internal/skill"
 	jellytool "github.com/jelly-agent/jelly-agent/internal/tool"
 )
 
@@ -149,6 +150,11 @@ func (e *Engine) Tools(core *memory.Core, withSearch bool) ([]adktool.Tool, erro
 	return jellytool.Builtins(core, withSearch)
 }
 
+// Skills opens the Agent Skills store from config (or its default dir).
+func (e *Engine) Skills() (*skill.Store, error) {
+	return skill.NewStore(e.cfg.Skills.Dir)
+}
+
 // BuildAgent constructs the root agent for the named provider (empty = default)
 // loading every enabled MCP server. See BuildAgentWith for selective MCP.
 func (e *Engine) BuildAgent(provider string) (agent.Agent, config.Provider, *memory.Core, *memory.Search, error) {
@@ -188,14 +194,33 @@ func (e *Engine) BuildAgentWith(provider string, mcpNames []string) (agent.Agent
 		toolsets = e.ToolsetsFor(mcpNames) // selected subset (may be empty)
 	}
 
+	// Agent Skills: when any skill is enabled, add the use_skill tool so the
+	// agent can pull a skill's full body on demand. The catalog itself is
+	// injected per-turn by the InstructionProvider below (read fresh, so edits
+	// apply immediately without a rebuild).
+	if skills, err := e.Skills(); err == nil {
+		if cat, err := skills.Catalog(); err == nil && cat != "" {
+			if st, err := jellytool.SkillTool(skills); err == nil {
+				tools = append(tools, st)
+			}
+		}
+	}
+
 	a, err := llmagent.New(llmagent.Config{
 		Name:        "root",
 		Model:       llm,
 		Description: "jelly-agent root agent with web search and core memory.",
-		// InstructionProvider (not Instruction) so MEMORY.md/USER.md are read
-		// fresh each turn. Note: ADK then skips {} session-state substitution.
+		// InstructionProvider (not Instruction) so MEMORY.md/USER.md (and the
+		// skill catalog) are read fresh each turn. Note: ADK then skips {}
+		// session-state substitution.
 		InstructionProvider: func(agent.ReadonlyContext) (string, error) {
-			return core.Render(RootInstruction), nil
+			base := core.Render(RootInstruction)
+			if skills, err := e.Skills(); err == nil {
+				if cat, err := skills.Catalog(); err == nil && cat != "" {
+					return base + "\n\n" + cat, nil
+				}
+			}
+			return base, nil
 		},
 		Tools:    tools,
 		Toolsets: toolsets, // external MCP servers (all enabled, or a selected subset)

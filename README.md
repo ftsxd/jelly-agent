@@ -68,6 +68,24 @@ Agent 维护两份 markdown 长期记忆，每轮对话自动拼进 system promp
 
 模型在对话中通过 `remember` / `forget` 工具自行增删条目；目录与预算可在 `config.yaml` 的 `memory.core` 段覆盖。`/memory` 命令随时查看当前内容。
 
+## 技能（Skills）
+
+参考 Claude/Anthropic Agent Skills：每个技能是一份 Markdown（`name` + `description` + 详细指令）。Agent 平时只看到**技能清单**（名称 + 描述）注入到 system prompt，命中某项需求时调用 `use_skill` 工具拉取该技能**全文**再按步骤执行——渐进式披露，技能再多也不撑爆基础 prompt。
+
+- 在 Web **技能**页增删改：填 `name`（标识符，`[A-Za-z0-9_-]+`）、`description`（进清单）、正文（Markdown）、启停。
+- 技能存为 `~/.jelly-agent/skills/<name>.md`（frontmatter + 正文），可直接编辑文件；下一轮对话自动生效（无需重启）。
+- 仅启用的技能进清单；正文只在 `use_skill` 调用时返回。
+
+```markdown
+---
+name: weekly-report
+description: 把本周事项整理成结构化中文周报
+enabled: true
+---
+## 步骤
+1. 收集本周事项 …
+```
+
 ## 会话检索（L2，可选）
 
 设 `memory.search.enabled: true` 后开启——既可改 `config.yaml`，也可在 Web **记忆**页右上角的开关一键启停（保存即写入配置并热重载，即时生效、无需重启）。开启后每轮结束把会话文本写入 `state.db` 内的 FTS5 全文索引，Agent 据此获得 `load_memory` 工具，可在后续会话里检索过往对话（返回 top-K，永不回灌整段历史）。采用 trigram 分词，中英文均按子串匹配（查询需 ≥3 字符，更短自动回落 LIKE）。配置项见 `memory.search`（`top_k` 等）。向量语义检索（L3）属后续。
