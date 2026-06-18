@@ -37,7 +37,8 @@ func newServeCmd() *cobra.Command {
 			ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
 			defer stop()
 
-			go srv.Watch(ctx) // hot-reload on external config file edits
+			go srv.Watch(ctx)  // hot-reload on external config file edits
+			srv.StartBots(ctx) // launch enabled messaging-platform bots (DingTalk, …)
 
 			errc := make(chan error, 1)
 			go func() {

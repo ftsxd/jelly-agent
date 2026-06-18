@@ -29,6 +29,8 @@ type Server struct {
 
 	pollInterval time.Duration // config-watch poll interval; 0 = defaultConfigPoll
 	out          io.Writer     // hot-reload notices; nil = os.Stderr
+
+	bots botManager // running messaging-platform bots (DingTalk, …)
 }
 
 // New builds a server over the given engine. staticFS is the embedded frontend
@@ -66,6 +68,7 @@ func (s *Server) reload() error {
 	if old != nil {
 		old.Close() // terminate the previous engine's stdio MCP subprocesses
 	}
+	s.restartBots(cfg) // pick up platform changes; bots answer via the new engine
 	return nil
 }
 
@@ -89,6 +92,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/memory/search", s.handleMemorySearch)
 	mux.HandleFunc("PUT /api/memory/search", s.handleSetMemorySearch)
 	mux.HandleFunc("GET /api/stats", s.handleStats)
+	mux.HandleFunc("GET /api/platforms", s.handleListPlatforms)
+	mux.HandleFunc("POST /api/platforms", s.handleSavePlatform)
+	mux.HandleFunc("DELETE /api/platforms/{name}", s.handleDeletePlatform)
 	mux.HandleFunc("POST /api/chat/stream", s.handleChatStream)
 
 	if s.static != nil {

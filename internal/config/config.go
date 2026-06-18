@@ -22,10 +22,11 @@ type Provider struct {
 
 // Config is the top-level jelly-agent configuration.
 type Config struct {
-	DefaultProvider string      `mapstructure:"default_provider" yaml:"default_provider"`
-	Providers       []Provider  `mapstructure:"providers" yaml:"providers"`
-	Memory          Memory      `mapstructure:"memory" yaml:"memory"`
-	MCP             []MCPServer `mapstructure:"mcp" yaml:"mcp,omitempty"`
+	DefaultProvider string        `mapstructure:"default_provider" yaml:"default_provider"`
+	Providers       []Provider    `mapstructure:"providers" yaml:"providers"`
+	Memory          Memory        `mapstructure:"memory" yaml:"memory"`
+	MCP             []MCPServer    `mapstructure:"mcp" yaml:"mcp,omitempty"`
+	Platforms       []PlatformBot `mapstructure:"platforms" yaml:"platforms,omitempty"`
 
 	// SourcePath records where the config came from ("(env)" for the env
 	// fallback, "" when nothing was found). Not persisted.
@@ -45,6 +46,20 @@ type MCPServer struct {
 	URL       string            `mapstructure:"url" yaml:"url,omitempty"`
 	Headers   map[string]string `mapstructure:"headers" yaml:"headers,omitempty"`
 	Enabled   bool              `mapstructure:"enabled" yaml:"enabled"`
+}
+
+// PlatformBot binds an external messaging platform (currently DingTalk) as a
+// message entry point: incoming chats are answered by the same engine the web
+// console and CLI drive. DingTalk uses Stream mode (an outbound WebSocket), so
+// no public callback URL is needed — ClientID/ClientSecret are the bot's
+// AppKey/AppSecret. Provider selects which LLM to answer with (empty = default).
+type PlatformBot struct {
+	Name         string `mapstructure:"name" yaml:"name"`
+	Type         string `mapstructure:"type" yaml:"type"` // "dingtalk"
+	Enabled      bool   `mapstructure:"enabled" yaml:"enabled"`
+	ClientID     string `mapstructure:"client_id" yaml:"client_id,omitempty"`
+	ClientSecret string `mapstructure:"client_secret" yaml:"client_secret,omitempty"`
+	Provider     string `mapstructure:"provider" yaml:"provider,omitempty"`
 }
 
 // Memory configures the memory subsystem (PLAN §10.5): L1 core memory
@@ -113,12 +128,13 @@ func load(path string, expand bool) (*Config, error) {
 // freshly-created file stays minimal.
 func Save(c *Config, path string) error {
 	type payload struct {
-		DefaultProvider string      `yaml:"default_provider,omitempty"`
-		Providers       []Provider  `yaml:"providers"`
-		Memory          *Memory     `yaml:"memory,omitempty"`
-		MCP             []MCPServer `yaml:"mcp,omitempty"`
+		DefaultProvider string        `yaml:"default_provider,omitempty"`
+		Providers       []Provider    `yaml:"providers"`
+		Memory          *Memory       `yaml:"memory,omitempty"`
+		MCP             []MCPServer    `yaml:"mcp,omitempty"`
+		Platforms       []PlatformBot `yaml:"platforms,omitempty"`
 	}
-	p := payload{DefaultProvider: c.DefaultProvider, Providers: c.Providers, MCP: c.MCP}
+	p := payload{DefaultProvider: c.DefaultProvider, Providers: c.Providers, MCP: c.MCP, Platforms: c.Platforms}
 	if c.Memory != (Memory{}) {
 		m := c.Memory
 		p.Memory = &m

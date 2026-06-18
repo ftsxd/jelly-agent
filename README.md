@@ -82,9 +82,33 @@ Agent 维护两份 markdown 长期记忆，每轮对话自动拼进 system promp
 - **监控** —— 跨全部持久化会话聚合用量：会话/消息/工具调用/Token 总量 KPI、Token 构成、工具调用排行、每日 Token 趋势柱状图。
 - **记忆** —— L1 核心记忆（USER.md / MEMORY.md）快照 + L2 FTS5 会话全文检索。
 - **MCP** —— 接入外部 Model Context Protocol 服务器（stdio / http / sse），新建/编辑/启停/删除、一键测试连接并列出其工具；启用后其工具与内置工具一起注入 Agent。
+- **消息绑定** —— 把钉钉接入为消息入口：新建/编辑/启停/删除钉钉机器人，实时显示连接状态（在线/连接中/错误），启用即连接、无需重启。详见下方「消息绑定」。
 - **配置** —— 在线增删改 Provider（OpenAI 兼容端点）、设默认，保存即**热重载**，无需重启。
 
-配置（Provider / MCP）写入 `configs/config.yaml` 或 `~/.jelly-agent/config.yaml`（`0600`）；API Key 与 MCP 密钥脱敏展示，编辑时留空即保留原值，`${ENV}` 引用不会被改写成明文。直接编辑该文件也会被服务器监听并热重载，无需重启。
+配置（Provider / MCP / 消息绑定）写入 `configs/config.yaml` 或 `~/.jelly-agent/config.yaml`（`0600`）；API Key 与各类密钥脱敏展示，编辑时留空即保留原值，`${ENV}` 引用不会被改写成明文。直接编辑该文件也会被服务器监听并热重载，无需重启。
+
+## 消息绑定（钉钉）
+
+把钉钉作为消息入口接入同一套 Agent（含记忆 / 工具 / MCP）：在钉钉里 @机器人 发消息，jelly-agent 应答并回到钉钉。采用钉钉官方 **Stream 模式（出站 WebSocket）**，**无需公网 URL / 域名 / IP**，纯本地单二进制即可用。
+
+接入步骤：
+1. 钉钉开放平台建「企业内部应用」→ 机器人，开启 **Stream 模式**，拿到 ClientID（AppKey）与 ClientSecret（AppSecret）。
+2. `jelly serve` 启动控制台 → 「消息绑定」页 → 新建钉钉机器人，填凭据并启用 → 状态徽标变「在线」。
+3. 钉钉群 @机器人 提问即可；同一会话（`sessionID = "dingtalk-" + 钉钉会话ID`）跨消息保留多轮上下文，并随 L2 检索可被回忆。
+
+配置段示例（亦可直接写 `config.yaml`，密钥支持 `${ENV}`）：
+
+```yaml
+platforms:
+  - name: my-dingtalk
+    type: dingtalk
+    enabled: true
+    client_id: ${DINGTALK_CLIENT_ID}
+    client_secret: ${DINGTALK_CLIENT_SECRET}
+    provider: ""   # 留空=默认 Provider
+```
+
+> 微信（企业微信 / 公众号）需公网回调地址，列入后续批次。
 
 ```bash
 # 生产：先构建前端，再编译进二进制，单文件部署
