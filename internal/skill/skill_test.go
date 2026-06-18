@@ -1,6 +1,10 @@
 package skill
 
 import (
+	"archive/zip"
+	"bytes"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -63,6 +67,71 @@ func TestCatalogEmptyWhenNone(t *testing.T) {
 	cat, err := st.Catalog()
 	if err != nil || cat != "" {
 		t.Fatalf("catalog = %q err=%v, want empty", cat, err)
+	}
+}
+
+// makeZip builds an in-memory zip from name→content entries.
+func makeZip(t *testing.T, files map[string]string) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	for name, content := range files {
+		f, err := zw.Create(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := f.Write([]byte(content)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+func TestImportZip(t *testing.T) {
+	dir := t.TempDir()
+	st, _ := NewStore(dir)
+	zipBytes := makeZip(t, map[string]string{
+		// a skill folder with SKILL.md + a bundled resource + a zip-slip attempt
+		"my-skill/SKILL.md":      "---\nname: my-skill\ndescription: 测试技能\nenabled: false\n---\n## 步骤\n做事",
+		"my-skill/refs/note.txt": "reference",
+		"../evil.txt":            "should be skipped",
+	})
+
+	sk, err := st.ImportZip(bytes.NewReader(zipBytes), int64(len(zipBytes)))
+	if err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	if sk.Name != "my-skill" || !sk.Enabled { // import normalizes to enabled=true
+		t.Fatalf("imported skill = %+v, want name=my-skill enabled=true", sk)
+	}
+
+	// Get reads the directory-form skill.
+	got, ok, err := st.Get("my-skill")
+	if err != nil || !ok || !strings.Contains(got.Body, "做事") {
+		t.Fatalf("get after import: ok=%v body=%q err=%v", ok, got.Body, err)
+	}
+	// Bundled resource extracted; zip-slip entry NOT written outside the dir.
+	if _, err := os.Stat(filepath.Join(dir, "my-skill", "refs", "note.txt")); err != nil {
+		t.Fatalf("bundled resource missing: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "evil.txt")); err == nil {
+		t.Fatal("zip-slip escaped the skills dir")
+	}
+	// It shows up in List and Catalog (enabled).
+	cat, _ := st.Catalog()
+	if !strings.Contains(cat, "my-skill：测试技能") {
+		t.Fatalf("catalog missing imported skill: %q", cat)
+	}
+}
+
+func TestImportZipNoSkillMd(t *testing.T) {
+	st, _ := NewStore(t.TempDir())
+	zb := makeZip(t, map[string]string{"readme.txt": "hi"})
+	if _, err := st.ImportZip(bytes.NewReader(zb), int64(len(zb))); err == nil {
+		t.Fatal("expected error when zip has no SKILL.md")
 	}
 }
 

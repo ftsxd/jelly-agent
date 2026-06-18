@@ -13,6 +13,9 @@ const editing = ref(false) // false | 'new' | name
 const saving = ref(false)
 const form = reactive({ name: '', description: '', body: '', enabled: true })
 
+const fileInput = ref(null)
+const uploading = ref(false)
+
 onMounted(load)
 
 async function load() {
@@ -89,6 +92,27 @@ async function remove(s) {
     error.value = e.message
   }
 }
+
+function pickZip() {
+  fileInput.value?.click()
+}
+
+async function onZipPicked(e) {
+  const file = e.target.files?.[0]
+  e.target.value = '' // allow re-picking the same file
+  if (!file) return
+  uploading.value = true
+  error.value = ''
+  try {
+    const res = await api.uploadSkill(file)
+    notice.value = `已导入技能「${res.name}」`
+    await load()
+  } catch (err) {
+    error.value = err.message
+  } finally {
+    uploading.value = false
+  }
+}
 </script>
 
 <template>
@@ -98,9 +122,15 @@ async function remove(s) {
         <h1>技能</h1>
         <span class="muted sub">Agent Skills · 按需加载的能力包</span>
       </div>
-      <button class="btn btn-primary" @click="startNew" :disabled="editing === 'new'">
-        <Icon name="plus" :size="16" /> 新建技能
-      </button>
+      <div class="topbar-r">
+        <input ref="fileInput" type="file" accept=".zip" class="hidden-file" @change="onZipPicked" />
+        <button class="btn" @click="pickZip" :disabled="uploading">
+          <span v-if="uploading" class="spinner" /><Icon v-else name="plug" :size="16" /> 上传 ZIP
+        </button>
+        <button class="btn btn-primary" @click="startNew" :disabled="editing === 'new'">
+          <Icon name="plus" :size="16" /> 新建技能
+        </button>
+      </div>
     </header>
 
     <div class="body">
@@ -191,6 +221,13 @@ async function remove(s) {
 }
 .topbar-l h1 {
   font-size: 18px;
+}
+.topbar-r {
+  display: flex;
+  gap: var(--sp-2);
+}
+.hidden-file {
+  display: none;
 }
 .sub {
   font-size: 12px;

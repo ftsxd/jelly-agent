@@ -6,8 +6,11 @@
 package skill
 
 import (
+	"archive/zip"
 	"fmt"
+	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -68,9 +71,23 @@ func NewStore(dir string) (*Store, error) {
 // Dir reports the directory holding the skill files.
 func (s *Store) Dir() string { return s.dir }
 
-func (s *Store) path(name string) string { return filepath.Join(s.dir, name+".md") }
+// A skill lives in one of two layouts: a flat file <dir>/<name>.md (created via
+// the web form) or a directory <dir>/<name>/SKILL.md (imported from a zip, which
+// may also carry bundled resource files). resolve returns the backing file,
+// preferring the directory form when present.
+func (s *Store) flatPath(name string) string { return filepath.Join(s.dir, name+".md") }
+func (s *Store) dirSkillPath(name string) string {
+	return filepath.Join(s.dir, name, "SKILL.md")
+}
+func (s *Store) resolve(name string) string {
+	if _, err := os.Stat(s.dirSkillPath(name)); err == nil {
+		return s.dirSkillPath(name)
+	}
+	return s.flatPath(name)
+}
 
-// List returns all skills (with bodies), sorted by name.
+// List returns all skills (with bodies), sorted by name. It reads both flat
+// <name>.md files and <name>/SKILL.md directory skills.
 func (s *Store) List() ([]Skill, error) {
 	entries, err := os.ReadDir(s.dir)
 	if err != nil {
@@ -78,16 +95,26 @@ func (s *Store) List() ([]Skill, error) {
 	}
 	var out []Skill
 	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".md") {
-			continue
-		}
-		raw, err := os.ReadFile(filepath.Join(s.dir, e.Name()))
-		if err != nil {
+		var raw []byte
+		var fallback string
+		if e.IsDir() {
+			b, err := os.ReadFile(filepath.Join(s.dir, e.Name(), "SKILL.md"))
+			if err != nil {
+				continue // not a skill directory
+			}
+			raw, fallback = b, e.Name()
+		} else if strings.HasSuffix(e.Name(), ".md") {
+			b, err := os.ReadFile(filepath.Join(s.dir, e.Name()))
+			if err != nil {
+				continue
+			}
+			raw, fallback = b, strings.TrimSuffix(e.Name(), ".md")
+		} else {
 			continue
 		}
 		sk := parse(raw)
 		if sk.Name == "" {
-			sk.Name = strings.TrimSuffix(e.Name(), ".md")
+			sk.Name = fallback
 		}
 		out = append(out, sk)
 	}
@@ -95,12 +122,12 @@ func (s *Store) List() ([]Skill, error) {
 	return out, nil
 }
 
-// Get loads one skill by name.
+// Get loads one skill by name (directory form preferred).
 func (s *Store) Get(name string) (Skill, bool, error) {
 	if !ValidName(name) {
 		return Skill{}, false, nil
 	}
-	raw, err := os.ReadFile(s.path(name))
+	raw, err := os.ReadFile(s.resolve(name))
 	if err != nil {
 		if os.IsNotExist(err) {
 			return Skill{}, false, nil
@@ -114,32 +141,158 @@ func (s *Store) Get(name string) (Skill, bool, error) {
 	return sk, true, nil
 }
 
-// Save writes a skill to <name>.md (0600 like the rest of the user data).
+// Save writes a skill (0600). It updates the directory form in place when the
+// skill was imported as a directory, otherwise writes the flat <name>.md.
 func (s *Store) Save(sk Skill) error {
 	if !ValidName(sk.Name) {
 		return fmt.Errorf("技能名仅允许字母、数字、下划线、连字符")
 	}
-	fm, err := yaml.Marshal(frontmatter{Name: sk.Name, Description: sk.Description, Enabled: sk.Enabled})
-	if err != nil {
-		return err
+	target := s.flatPath(sk.Name)
+	if _, err := os.Stat(s.dirSkillPath(sk.Name)); err == nil {
+		target = s.dirSkillPath(sk.Name) // keep bundled resources, edit SKILL.md
 	}
-	body := strings.TrimRight(sk.Body, "\n")
-	content := "---\n" + string(fm) + "---\n\n" + body + "\n"
-	if err := os.WriteFile(s.path(sk.Name), []byte(content), 0o600); err != nil {
+	if err := os.WriteFile(target, []byte(render(sk)), 0o600); err != nil {
 		return fmt.Errorf("write skill %s: %w", sk.Name, err)
 	}
 	return nil
 }
 
-// Delete removes a skill file. Deleting a missing skill is not an error.
+// Delete removes a skill in either layout. Deleting a missing skill is not an
+// error.
 func (s *Store) Delete(name string) error {
 	if !ValidName(name) {
 		return fmt.Errorf("技能名非法")
 	}
-	if err := os.Remove(s.path(name)); err != nil && !os.IsNotExist(err) {
+	if err := os.Remove(s.flatPath(name)); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	if err := os.RemoveAll(filepath.Join(s.dir, name)); err != nil {
 		return err
 	}
 	return nil
+}
+
+// Zip import limits — a skill is markdown + small reference files, not a payload.
+const (
+	maxZipFiles    = 100
+	maxZipFileSize = 2 << 20  // 2 MiB per file
+	maxZipTotal    = 10 << 20 // 10 MiB extracted
+)
+
+// ImportZip extracts a skill package from a zip. The zip must contain a SKILL.md
+// (at the root or inside a single top-level folder); its frontmatter `name`
+// becomes the skill identifier. All files under that folder are extracted to
+// <dir>/<name>/ (preserving bundled resources), guarded against path traversal
+// and size abuse. The imported skill is normalized to enabled=true.
+func (s *Store) ImportZip(r io.ReaderAt, size int64) (Skill, error) {
+	zr, err := zip.NewReader(r, size)
+	if err != nil {
+		return Skill{}, fmt.Errorf("无效的 zip: %w", err)
+	}
+
+	// Locate the shallowest SKILL.md and the folder prefix to strip.
+	var skillFile *zip.File
+	for _, f := range zr.File {
+		if strings.EqualFold(path.Base(f.Name), "SKILL.md") {
+			if skillFile == nil || strings.Count(f.Name, "/") < strings.Count(skillFile.Name, "/") {
+				skillFile = f
+			}
+		}
+	}
+	if skillFile == nil {
+		return Skill{}, fmt.Errorf("zip 中未找到 SKILL.md")
+	}
+	prefix := path.Dir(skillFile.Name)
+	if prefix == "." {
+		prefix = ""
+	} else {
+		prefix += "/"
+	}
+
+	mdRaw, err := readZipEntry(skillFile)
+	if err != nil {
+		return Skill{}, err
+	}
+	sk := parse(mdRaw)
+	if !ValidName(sk.Name) {
+		return Skill{}, fmt.Errorf("SKILL.md 的 name 缺失或非法（仅允许字母、数字、下划线、连字符）")
+	}
+	sk.Enabled = true // a freshly uploaded skill is enabled by default
+
+	target := filepath.Join(s.dir, sk.Name)
+	if err := os.RemoveAll(target); err != nil {
+		return Skill{}, err
+	}
+	if err := os.MkdirAll(target, 0o755); err != nil {
+		return Skill{}, err
+	}
+
+	var total int64
+	count := 0
+	for _, f := range zr.File {
+		if f.FileInfo().IsDir() {
+			continue
+		}
+		rel := f.Name
+		if prefix != "" {
+			if !strings.HasPrefix(rel, prefix) {
+				continue // outside the skill folder
+			}
+			rel = strings.TrimPrefix(rel, prefix)
+		}
+		if rel == "" || strings.EqualFold(rel, "SKILL.md") {
+			continue // SKILL.md is written normalized below
+		}
+		dest := filepath.Join(target, filepath.FromSlash(rel))
+		if relPath, err := filepath.Rel(target, dest); err != nil || relPath == ".." || strings.HasPrefix(relPath, ".."+string(os.PathSeparator)) {
+			continue // zip-slip guard: skip anything escaping target
+		}
+		if count++; count > maxZipFiles {
+			return Skill{}, fmt.Errorf("zip 内文件过多（上限 %d）", maxZipFiles)
+		}
+		data, err := readZipEntry(f)
+		if err != nil {
+			return Skill{}, err
+		}
+		if total += int64(len(data)); total > maxZipTotal {
+			return Skill{}, fmt.Errorf("zip 解压内容过大（上限 %d MiB）", maxZipTotal>>20)
+		}
+		if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+			return Skill{}, err
+		}
+		if err := os.WriteFile(dest, data, 0o600); err != nil {
+			return Skill{}, err
+		}
+	}
+
+	// Write the normalized SKILL.md (consistent frontmatter, enabled=true).
+	if err := os.WriteFile(s.dirSkillPath(sk.Name), []byte(render(sk)), 0o600); err != nil {
+		return Skill{}, err
+	}
+	return sk, nil
+}
+
+// readZipEntry reads one zip file, rejecting oversized entries.
+func readZipEntry(f *zip.File) ([]byte, error) {
+	rc, err := f.Open()
+	if err != nil {
+		return nil, err
+	}
+	defer rc.Close()
+	data, err := io.ReadAll(io.LimitReader(rc, maxZipFileSize+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > maxZipFileSize {
+		return nil, fmt.Errorf("zip 内文件过大（上限 %d MiB）: %s", maxZipFileSize>>20, f.Name)
+	}
+	return data, nil
+}
+
+// render serializes a skill to its file form (YAML frontmatter + body).
+func render(sk Skill) string {
+	fm, _ := yaml.Marshal(frontmatter{Name: sk.Name, Description: sk.Description, Enabled: sk.Enabled})
+	return "---\n" + string(fm) + "---\n\n" + strings.TrimRight(sk.Body, "\n") + "\n"
 }
 
 // Catalog renders the enabled skills into an instruction block listing each

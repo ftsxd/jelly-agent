@@ -72,9 +72,11 @@ Agent 维护两份 markdown 长期记忆，每轮对话自动拼进 system promp
 
 参考 Claude/Anthropic Agent Skills：每个技能是一份 Markdown（`name` + `description` + 详细指令）。Agent 平时只看到**技能清单**（名称 + 描述）注入到 system prompt，命中某项需求时调用 `use_skill` 工具拉取该技能**全文**再按步骤执行——渐进式披露，技能再多也不撑爆基础 prompt。
 
-- 在 Web **技能**页增删改：填 `name`（标识符，`[A-Za-z0-9_-]+`）、`description`（进清单）、正文（Markdown）、启停。
-- 技能存为 `~/.jelly-agent/skills/<name>.md`（frontmatter + 正文），可直接编辑文件；下一轮对话自动生效（无需重启）。
+- 在 Web **技能**页增删改：填 `name`（标识符，`[A-Za-z0-9_-]+`）、`description`（进清单）、正文（Markdown）、启停；也可**上传 ZIP 包**导入。
+- 两种磁盘布局：手填的存为 `~/.jelly-agent/skills/<name>.md`；ZIP 导入的解压到 `~/.jelly-agent/skills/<name>/`（含 `SKILL.md` 与随包资源文件）。均可直接编辑，下一轮对话自动生效（无需重启）。
 - 仅启用的技能进清单；正文只在 `use_skill` 调用时返回。
+
+**ZIP 导入**：zip 内须有一个 `SKILL.md`（在根目录或某个顶层文件夹里），其 frontmatter 的 `name` 作为技能标识；该文件夹内的其它文件作为随包资源一并解压（带防 zip-slip 与大小限制）。导入后默认启用。
 
 ```markdown
 ---

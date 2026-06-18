@@ -1,11 +1,17 @@
 package server
 
 import (
+	"bytes"
+	"io"
 	"net/http"
 	"strings"
 
 	"github.com/jelly-agent/jelly-agent/internal/skill"
 )
+
+// maxSkillZipUpload caps the uploaded zip size (the extracted content is capped
+// separately inside skill.ImportZip).
+const maxSkillZipUpload = 10 << 20 // 10 MiB
 
 // skillInput is the body for POST /api/skills (create or update).
 type skillInput struct {
@@ -87,6 +93,44 @@ func (s *Server) handleSaveSkill(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "saved_to": store.Dir()})
+}
+
+// handleUploadSkill imports a skill from an uploaded .zip (multipart field
+// "file"): the zip must contain a SKILL.md whose frontmatter name becomes the
+// skill id; bundled files are extracted alongside it.
+func (s *Server) handleUploadSkill(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseMultipartForm(maxSkillZipUpload); err != nil {
+		writeErr(w, http.StatusBadRequest, "解析上传失败: "+err.Error())
+		return
+	}
+	f, _, err := r.FormFile("file")
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "缺少上传文件字段 file")
+		return
+	}
+	defer f.Close()
+
+	data, err := io.ReadAll(io.LimitReader(f, maxSkillZipUpload+1))
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if len(data) > maxSkillZipUpload {
+		writeErr(w, http.StatusRequestEntityTooLarge, "zip 文件过大（上限 10 MiB）")
+		return
+	}
+
+	store, err := s.engine().Skills()
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	sk, err := store.ImportZip(bytes.NewReader(data), int64(len(data)))
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "name": sk.Name, "description": sk.Description})
 }
 
 // handleDeleteSkill removes a skill file (idempotent).

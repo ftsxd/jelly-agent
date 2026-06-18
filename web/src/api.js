@@ -51,6 +51,14 @@ export const api = {
   skill: (name) => jget(`/api/skills/${encodeURIComponent(name)}`),
   saveSkill: (p) => jpost('/api/skills', p),
   deleteSkill: (name) => jdelete(`/api/skills/${encodeURIComponent(name)}`),
+  uploadSkill: async (file) => {
+    const fd = new FormData()
+    fd.append('file', file)
+    const res = await fetch('/api/skills/upload', { method: 'POST', body: fd })
+    const body = await res.json().catch(() => ({}))
+    if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`)
+    return body
+  },
   memoryCore: () => jget('/api/memory/core'),
   memorySearch: (q) => jget(`/api/memory/search?q=${encodeURIComponent(q)}`),
   setMemorySearch: (payload) => jput('/api/memory/search', payload),

@@ -92,6 +92,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/skills", s.handleListSkills)
 	mux.HandleFunc("GET /api/skills/{name}", s.handleSkillDetail)
 	mux.HandleFunc("POST /api/skills", s.handleSaveSkill)
+	mux.HandleFunc("POST /api/skills/upload", s.handleUploadSkill)
 	mux.HandleFunc("DELETE /api/skills/{name}", s.handleDeleteSkill)
 	mux.HandleFunc("GET /api/memory/core", s.handleMemoryCore)
 	mux.HandleFunc("GET /api/memory/search", s.handleMemorySearch)
