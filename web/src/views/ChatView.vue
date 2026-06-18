@@ -1,11 +1,13 @@
 <script setup>
-import { nextTick, onMounted, ref } from 'vue'
+import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import Icon from '../components/Icon.vue'
 import { api, streamChat } from '../api'
 
+const PROVIDER_KEY = 'jelly.provider' // remembers the last-used provider
+
 const providers = ref([])
 const provider = ref('')
-const messages = ref([]) // {role, text, tools: [{name,args,response}], usage}
+const messages = ref([]) // {role, text, tools: [{name,args,response}], usage, provider, model}
 const input = ref('')
 const sessionId = ref('')
 const busy = ref(false)
@@ -13,14 +15,30 @@ const error = ref('')
 const scroller = ref(null)
 let abort = null
 
+// Tag agent messages with the model that produced them only when there's a
+// choice to make — a single-provider setup needs no per-message label.
+const showProviderTag = computed(() => providers.value.length > 1)
+
+function modelOf(name) {
+  return providers.value.find((p) => p.name === name)?.model ?? ''
+}
+
 onMounted(async () => {
   try {
     const data = await api.providers()
     providers.value = data.providers
-    provider.value = data.default || (data.providers[0]?.name ?? '')
+    // Restore the remembered provider if it still exists, else fall back to the
+    // configured default (or the first provider).
+    const saved = localStorage.getItem(PROVIDER_KEY)
+    const valid = (n) => data.providers.some((p) => p.name === n)
+    provider.value = (saved && valid(saved) && saved) || data.default || (data.providers[0]?.name ?? '')
   } catch (e) {
     error.value = e.message
   }
+})
+
+watch(provider, (name) => {
+  if (name) localStorage.setItem(PROVIDER_KEY, name)
 })
 
 async function scrollDown() {
@@ -41,7 +59,14 @@ async function send() {
   error.value = ''
   input.value = ''
   messages.value.push({ role: 'user', text })
-  const agentMsg = { role: 'agent', text: '', tools: [], usage: null }
+  const agentMsg = {
+    role: 'agent',
+    text: '',
+    tools: [],
+    usage: null,
+    provider: provider.value,
+    model: modelOf(provider.value),
+  }
   messages.value.push(agentMsg)
   busy.value = true
   scrollDown()
@@ -118,7 +143,7 @@ function resultSummary(resp) {
         <select v-model="provider" class="input select" :disabled="busy" aria-label="选择 Provider">
           <option v-if="!providers.length" value="">（无 Provider）</option>
           <option v-for="p in providers" :key="p.name" :value="p.name">
-            {{ p.name }} · {{ p.model }}
+            {{ p.name }} · {{ p.model }}{{ p.is_default ? ' · 默认' : '' }}
           </option>
         </select>
         <button class="btn" @click="newChat" :disabled="busy">
@@ -149,6 +174,9 @@ function resultSummary(resp) {
           <Icon :name="m.role === 'user' ? 'user' : 'bot'" :size="16" />
         </div>
         <div class="bubble-wrap">
+          <div v-if="m.role === 'agent' && m.provider && showProviderTag" class="who mono dim">
+            <Icon name="bot" :size="12" /> {{ m.provider }}<span v-if="m.model"> · {{ m.model }}</span>
+          </div>
           <div v-for="(t, ti) in m.tools" :key="ti" class="tool-chip">
             <div class="tool-head">
               <Icon name="tool" :size="13" />
@@ -321,6 +349,14 @@ function resultSummary(resp) {
 }
 .tool-res.pending {
   color: var(--text-muted);
+}
+
+.who {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  padding-left: var(--sp-1);
 }
 
 .usage {
