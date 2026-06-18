@@ -46,6 +46,7 @@ export const api = {
   testTool: (query, max) => jpost('/api/tools/test', { query, max }),
   sessions: () => jget('/api/sessions'),
   session: (id) => jget(`/api/sessions/${encodeURIComponent(id)}`),
+  deleteSession: (id) => jdelete(`/api/sessions/${encodeURIComponent(id)}`),
   memoryCore: () => jget('/api/memory/core'),
   memorySearch: (q) => jget(`/api/memory/search?q=${encodeURIComponent(q)}`),
   setMemorySearch: (payload) => jput('/api/memory/search', payload),

@@ -173,6 +173,22 @@ func (s *Server) handleSessionDetail(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleDeleteSession removes one persisted session (and its events) from the
+// store. Deleting a missing session is treated as success (idempotent).
+func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	svc, err := s.engine().NewSessionService()
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if err := svc.Delete(r.Context(), &adksession.DeleteRequest{AppName: engine.AppName, UserID: engine.UserID, SessionID: id}); err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
 func eventToDTO(ev *adksession.Event) eventDTO {
 	dto := eventDTO{Author: ev.Author, Role: roleForAuthor(ev.Author), Timestamp: ev.Timestamp.Unix()}
 	if ev.Content == nil {

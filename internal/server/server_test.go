@@ -127,6 +127,18 @@ func TestStatsEmpty(t *testing.T) {
 	}
 }
 
+func TestDeleteSessionIdempotent(t *testing.T) {
+	s := newTestServer(t)
+	// Deleting an unknown session succeeds (idempotent) and returns ok.
+	w := do(t, s, "DELETE", "/api/sessions/does-not-exist", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", w.Code, w.Body.String())
+	}
+	if decode(t, w)["ok"] != true {
+		t.Fatalf("ok field = %v", decode(t, w)["ok"])
+	}
+}
+
 func TestChatRejectsEmptyMessage(t *testing.T) {
 	s := newTestServer(t)
 	w := do(t, s, "POST", "/api/chat/stream", `{"message":"  "}`)

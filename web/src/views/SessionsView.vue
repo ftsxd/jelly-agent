@@ -39,6 +39,20 @@ async function open(id) {
   }
 }
 
+async function remove(s) {
+  if (!confirm(`确认删除会话「${s.id}」？此操作不可恢复。`)) return
+  try {
+    await api.deleteSession(s.id)
+    if (selected.value === s.id) {
+      selected.value = null
+      detail.value = null
+    }
+    await load()
+  } catch (e) {
+    error.value = e.message
+  }
+}
+
 function fmtTime(unix) {
   if (!unix) return ''
   return new Date(unix * 1000).toLocaleString('zh-CN', { hour12: false })
@@ -69,19 +83,25 @@ function fmtArgs(args) {
           <Icon name="sessions" :size="28" />
           <span class="muted">暂无持久化会话</span>
         </div>
-        <button
+        <div
           v-for="s in sessions"
           :key="s.id"
           class="sess"
           :class="{ active: s.id === selected }"
+          role="button"
+          tabindex="0"
           @click="open(s.id)"
+          @keydown.enter="open(s.id)"
         >
-          <span class="mono sess-id">{{ s.id }}</span>
+          <div class="sess-top">
+            <span class="mono sess-id">{{ s.id }}</span>
+            <button class="del" title="删除会话" @click.stop="remove(s)"><Icon name="trash" :size="14" /></button>
+          </div>
           <span class="sess-meta">
             <span class="badge">{{ s.events }} 事件</span>
             <span class="muted time">{{ fmtTime(s.last_update) }}</span>
           </span>
-        </button>
+        </div>
       </aside>
 
       <section class="detail">
@@ -171,11 +191,39 @@ function fmtArgs(args) {
   border-color: var(--primary-border);
   background: var(--primary-tint);
 }
+.sess-top {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
 .sess-id {
   font-size: 12px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  flex: 1;
+  min-width: 0;
+}
+.del {
+  flex-shrink: 0;
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s ease, color 0.15s ease, background 0.15s ease;
+}
+.sess:hover .del {
+  opacity: 1;
+}
+.del:hover {
+  color: var(--danger);
+  background: var(--danger-tint);
 }
 .sess-meta {
   display: flex;
