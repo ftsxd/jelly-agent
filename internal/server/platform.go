@@ -102,14 +102,21 @@ func (s *Server) stopBots() {
 // engine turn keyed by the conversation.
 func (s *Server) buildBot(pb config.PlatformBot) (platform.Bot, error) {
 	provider := pb.Provider
-	// replyWith builds a ReplyFunc that runs an engine turn under a session id
-	// prefixed per platform (so the same person on different platforms is kept
-	// in separate conversations).
+	// replyWith / streamReplyWith build per-platform reply funcs that run an
+	// engine turn under a session id prefixed by platform (so the same person on
+	// different platforms is kept in separate conversations).
 	replyWith := func(prefix string) platform.ReplyFunc {
 		return func(ctx context.Context, sessionKey, text string) (string, error) {
 			tctx, cancel := context.WithTimeout(ctx, botReplyTimeout)
 			defer cancel()
 			return s.runTurnText(tctx, provider, prefix+sessionKey, text)
+		}
+	}
+	streamReplyWith := func(prefix string) platform.StreamReplyFunc {
+		return func(ctx context.Context, sessionKey, text string, onUpdate func(string)) (string, error) {
+			tctx, cancel := context.WithTimeout(ctx, botReplyTimeout)
+			defer cancel()
+			return s.runTurnStream(tctx, provider, prefix+sessionKey, text, onUpdate)
 		}
 	}
 
@@ -118,7 +125,7 @@ func (s *Server) buildBot(pb config.PlatformBot) (platform.Bot, error) {
 		if pb.ClientID == "" || pb.ClientSecret == "" {
 			return nil, fmt.Errorf("dingtalk 需要 client_id 与 client_secret")
 		}
-		return platform.NewDingTalkBot(pb.Name, pb.ClientID, pb.ClientSecret, replyWith("dingtalk-"), s.logf), nil
+		return platform.NewDingTalkBot(pb.Name, pb.ClientID, pb.ClientSecret, pb.Settings["card_template_id"], streamReplyWith("dingtalk-"), s.logf), nil
 	case "wechatpadpro":
 		if pb.Settings["wechatpad_url"] == "" || pb.Settings["wechatpad_ws"] == "" {
 			return nil, fmt.Errorf("wechatpadpro 需要 wechatpad_url 与 wechatpad_ws")
@@ -145,12 +152,17 @@ func (s *Server) botStatuses() map[string]platform.Status {
 	return out
 }
 
-// runTurnText runs one non-streaming engine turn for the given session id and
-// returns the assistant's final text. It is the non-SSE sibling of
-// handleChatStream: same BuildAgent → NewRunner → Run sequence, but it
-// accumulates the final (non-partial) text instead of streaming deltas, and
-// reuses or creates a deterministic session so multi-turn context persists.
+// runTurnText runs one engine turn and returns only the final assistant text.
 func (s *Server) runTurnText(ctx context.Context, provider, sessionID, text string) (string, error) {
+	return s.runTurnStream(ctx, provider, sessionID, text, nil)
+}
+
+// runTurnStream runs one engine turn for the given session id, streaming partial
+// text to onUpdate (called with the accumulated text as it grows; may be nil)
+// and returning the final full text. It is the platform-facing sibling of
+// handleChatStream: same BuildAgent → NewRunner → Run (SSE) sequence, reusing or
+// creating a deterministic session so multi-turn context persists.
+func (s *Server) runTurnStream(ctx context.Context, provider, sessionID, text string, onUpdate func(string)) (string, error) {
 	eng := s.engine()
 	a, _, _, search, err := eng.BuildAgent(provider)
 	if err != nil {
@@ -171,23 +183,47 @@ func (s *Server) runTurnText(ctx context.Context, provider, sessionID, text stri
 	}
 
 	msg := genai.NewContentFromText(text, genai.RoleUser)
-	var sb strings.Builder
-	for ev, runErr := range r2.Run(ctx, engine.UserID, sessionID, msg, agent.RunConfig{}) {
+	var deltas strings.Builder // accumulated partial text (the streamed answer)
+	var finalText string       // full text from the final event (non-streaming fallback)
+	for ev, runErr := range r2.Run(ctx, engine.UserID, sessionID, msg, agent.RunConfig{StreamingMode: agent.StreamingModeSSE}) {
 		if runErr != nil {
 			return "", runErr
 		}
-		if ev == nil || ev.Content == nil || ev.Partial {
+		if ev == nil || ev.Content == nil {
 			continue
 		}
+		if ev.Partial {
+			grew := false
+			for _, p := range ev.Content.Parts {
+				if p != nil && !p.Thought && p.Text != "" {
+					deltas.WriteString(p.Text)
+					grew = true
+				}
+			}
+			if grew && onUpdate != nil {
+				onUpdate(deltas.String())
+			}
+			continue
+		}
+		// Final aggregated event: capture its text as a fallback for models that
+		// don't stream partials (it duplicates the deltas otherwise, so it's only
+		// used when no partials arrived).
+		var fb strings.Builder
 		for _, p := range ev.Content.Parts {
 			if p != nil && !p.Thought && p.Text != "" {
-				sb.WriteString(p.Text)
+				fb.WriteString(p.Text)
 			}
+		}
+		if fb.Len() > 0 {
+			finalText = fb.String()
 		}
 	}
 
 	indexSession(ctx, svc, search, sessionID)
-	return sb.String(), nil
+	if deltas.Len() > 0 {
+		return deltas.String(), nil
+	}
+	return finalText, nil
 }
 
 // platformInput is the body for POST /api/platforms (create or update).
@@ -288,6 +324,9 @@ func (s *Server) handleSavePlatform(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusBadRequest, "新建钉钉机器人需填写 client_id 与 client_secret")
 			return
 		}
+		// card_template_id (optional, enables streaming AI-card replies) lives in
+		// Settings; empty submitted value keeps the stored one.
+		bot.Settings = mergeSecrets(existing.Settings, in.Settings)
 	case "wechatpadpro":
 		// Empty submitted values keep the stored ones (secrets survive edits).
 		bot.Settings = mergeSecrets(existing.Settings, in.Settings)

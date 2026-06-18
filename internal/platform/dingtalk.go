@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/open-dingtalk/dingtalk-stream-sdk-go/chatbot"
 	"github.com/open-dingtalk/dingtalk-stream-sdk-go/client"
@@ -15,11 +16,13 @@ import (
 // install. The conversation id keys the jelly session, so each DingTalk chat
 // keeps its own multi-turn context.
 type dingTalkBot struct {
-	name         string
-	clientID     string
-	clientSecret string
-	reply        ReplyFunc
-	logf         Logf
+	name           string
+	clientID       string
+	clientSecret   string
+	cardTemplateID string // when set, replies stream into a DingTalk AI card
+	stream         StreamReplyFunc
+	cards          *dingCardClient // non-nil iff cardTemplateID is set
+	logf           Logf
 
 	mu     sync.Mutex
 	cli    *client.StreamClient
@@ -27,13 +30,19 @@ type dingTalkBot struct {
 	detail string
 }
 
-// NewDingTalkBot builds a DingTalk bot. reply runs one engine turn for an
-// incoming message; logf receives operational notices.
-func NewDingTalkBot(name, clientID, clientSecret string, reply ReplyFunc, logf Logf) Bot {
-	return &dingTalkBot{
+// NewDingTalkBot builds a DingTalk bot. stream runs one engine turn for an
+// incoming message; logf receives operational notices. When cardTemplateID is
+// non-empty, replies stream incrementally into a DingTalk AI card bound to that
+// template; otherwise they're sent as a single Markdown message.
+func NewDingTalkBot(name, clientID, clientSecret, cardTemplateID string, stream StreamReplyFunc, logf Logf) Bot {
+	b := &dingTalkBot{
 		name: name, clientID: clientID, clientSecret: clientSecret,
-		reply: reply, logf: logf, state: StateStopped,
+		cardTemplateID: cardTemplateID, stream: stream, logf: logf, state: StateStopped,
 	}
+	if cardTemplateID != "" {
+		b.cards = newDingCardClient(clientID, clientSecret)
+	}
+	return b
 }
 
 func (b *dingTalkBot) setState(s State, detail string) {
@@ -85,21 +94,30 @@ func (b *dingTalkBot) Stop() {
 }
 
 // onMessage handles one inbound DingTalk chat: it runs an engine turn keyed by
-// the conversation and replies with Markdown. Errors are surfaced back into the
-// chat so the user isn't left waiting on silence.
+// the conversation and replies — streaming into an AI card when a template is
+// configured, otherwise as one Markdown message.
 func (b *dingTalkBot) onMessage(ctx context.Context, data *chatbot.BotCallbackDataModel) ([]byte, error) {
 	const ack = "" // empty body: the SDK only needs a non-error return
 	text := strings.TrimSpace(data.Text.Content)
 	if text == "" {
 		return []byte(ack), nil
 	}
-	replier := chatbot.NewChatbotReplier()
+	if b.cards != nil {
+		b.replyViaCard(ctx, data, text)
+	} else {
+		b.replyViaText(ctx, data, text)
+	}
+	return []byte(ack), nil
+}
 
-	answer, err := b.reply(ctx, data.ConversationId, text)
+// replyViaText runs the turn and sends the final answer as one Markdown message.
+func (b *dingTalkBot) replyViaText(ctx context.Context, data *chatbot.BotCallbackDataModel, text string) {
+	replier := chatbot.NewChatbotReplier()
+	answer, err := b.stream(ctx, data.ConversationId, text, nil)
 	if err != nil {
 		b.logf("钉钉机器人 %q 处理消息失败: %v", b.name, err)
 		_ = replier.SimpleReplyText(ctx, data.SessionWebhook, []byte("处理消息出错："+err.Error()))
-		return []byte(ack), nil
+		return
 	}
 	if strings.TrimSpace(answer) == "" {
 		answer = "（无回复）"
@@ -107,5 +125,37 @@ func (b *dingTalkBot) onMessage(ctx context.Context, data *chatbot.BotCallbackDa
 	if err := replier.SimpleReplyMarkdown(ctx, data.SessionWebhook, []byte("jelly-agent"), []byte(answer)); err != nil {
 		b.logf("钉钉机器人 %q 回复失败: %v", b.name, err)
 	}
-	return []byte(ack), nil
+}
+
+// replyViaCard creates a streaming AI card and feeds the answer into it as it's
+// generated; it falls back to a text reply if the card can't be created.
+func (b *dingTalkBot) replyViaCard(ctx context.Context, data *chatbot.BotCallbackDataModel, text string) {
+	trackID, err := b.cards.createCard(ctx, b.cardTemplateID, data.ConversationType, data.ConversationId, data.SenderStaffId, text)
+	if err != nil {
+		b.logf("钉钉机器人 %q 创建卡片失败，回退文本: %v", b.name, err)
+		b.replyViaText(ctx, data, text)
+		return
+	}
+	// Throttle card updates so we don't hammer the streaming API per token.
+	var lastPush time.Time
+	onUpdate := func(full string) {
+		if time.Since(lastPush) < 400*time.Millisecond {
+			return
+		}
+		lastPush = time.Now()
+		if err := b.cards.streamCard(ctx, trackID, full, false); err != nil {
+			b.logf("钉钉机器人 %q 卡片更新失败: %v", b.name, err)
+		}
+	}
+	answer, err := b.stream(ctx, data.ConversationId, text, onUpdate)
+	if err != nil {
+		b.logf("钉钉机器人 %q 处理消息失败: %v", b.name, err)
+		answer = "处理消息出错：" + err.Error()
+	}
+	if strings.TrimSpace(answer) == "" {
+		answer = "（无回复）"
+	}
+	if err := b.cards.streamCard(ctx, trackID, answer, true); err != nil {
+		b.logf("钉钉机器人 %q 卡片收尾失败: %v", b.name, err)
+	}
 }

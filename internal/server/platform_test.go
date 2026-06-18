@@ -93,6 +93,24 @@ func TestWeChatPadProRequiresSettings(t *testing.T) {
 	}
 }
 
+// TestDingTalkCardTemplatePersists checks the optional card_template_id (which
+// enables streaming AI-card replies) round-trips through settings and is shown.
+func TestDingTalkCardTemplatePersists(t *testing.T) {
+	s := newEmptyServer(t)
+	w := do(t, s, "POST", "/api/platforms",
+		`{"name":"dt","type":"dingtalk","client_id":"k","client_secret":"sec","enabled":true,"settings":{"card_template_id":"tpl-123.schema"}}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("create status = %d: %s", w.Code, w.Body.String())
+	}
+	if got := s.engine().Config().Platforms; len(got) != 1 || got[0].Settings["card_template_id"] != "tpl-123.schema" {
+		t.Fatalf("card_template_id not persisted: %+v", got)
+	}
+	w = do(t, s, "GET", "/api/platforms", "")
+	if !strings.Contains(w.Body.String(), "tpl-123.schema") {
+		t.Fatalf("card_template_id not surfaced in list: %s", w.Body.String())
+	}
+}
+
 func TestPlatformCreateRequiresCredentials(t *testing.T) {
 	s := newEmptyServer(t)
 	// Missing client_secret on create is rejected.

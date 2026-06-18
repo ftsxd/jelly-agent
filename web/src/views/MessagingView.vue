@@ -11,7 +11,7 @@ const notice = ref('')
 
 const editing = ref(false) // false | 'new' | name
 const saving = ref(false)
-const blankSettings = () => ({ wechatpad_url: '', wechatpad_ws: '', admin_key: '', token: '', wxid: '' })
+const blankSettings = () => ({ wechatpad_url: '', wechatpad_ws: '', admin_key: '', token: '', wxid: '', card_template_id: '' })
 const form = reactive({ name: '', type: 'dingtalk', client_id: '', client_secret: '', provider: '', enabled: true, settings: blankSettings() })
 
 let poll = null
@@ -85,10 +85,9 @@ async function submit() {
       provider: form.provider,
       enabled: form.enabled,
     }
-    if (form.type === 'wechatpadpro') {
-      // Only send non-empty settings; blank admin_key/token keeps the stored one.
-      body.settings = Object.fromEntries(Object.entries(form.settings).filter(([, v]) => String(v).trim() !== ''))
-    } else {
+    // Only send non-empty settings; blank secrets keep the stored value server-side.
+    body.settings = Object.fromEntries(Object.entries(form.settings).filter(([, v]) => String(v).trim() !== ''))
+    if (form.type !== 'wechatpadpro') {
       body.client_id = form.client_id.trim()
       body.client_secret = form.client_secret
     }
@@ -176,6 +175,10 @@ function stateClass(s) {
               <span class="label">ClientSecret（AppSecret）{{ editing === 'new' ? ' *' : '（留空=保留原值）' }}</span>
               <input v-model="form.client_secret" class="input mono" type="password" :placeholder="editing === 'new' ? '' : '••••••••（已设置）'" />
             </label>
+            <label class="field span2">
+              <span class="label">卡片模板 ID（可选，填写后启用流式 AI 卡片回复）</span>
+              <input v-model="form.settings.card_template_id" class="input mono" placeholder="xxxxxxxx-xxxx-xxxx.schema" />
+            </label>
           </template>
 
           <!-- WeChatPadPro (个人微信) -->
@@ -253,6 +256,7 @@ function stateClass(s) {
                 </template>
                 <template v-else>
                   {{ b.client_id || '（未设置 ClientID）' }} · {{ b.has_secret ? '密钥已设置' : '密钥未设置' }}
+                  <template v-if="b.settings && b.settings.card_template_id"> · 流式卡片</template>
                 </template>
                 <template v-if="b.provider"> · Provider: {{ b.provider }}</template>
               </div>

@@ -12,6 +12,12 @@ import "context"
 // text to send back to the platform.
 type ReplyFunc func(ctx context.Context, sessionKey, text string) (string, error)
 
+// StreamReplyFunc is like ReplyFunc but streams the answer: onUpdate is called
+// with the accumulated text as it grows (for platforms that can render a live,
+// updating reply such as a DingTalk AI card), and the final full text is
+// returned. onUpdate may be nil to ignore the stream and just take the result.
+type StreamReplyFunc func(ctx context.Context, sessionKey, text string, onUpdate func(full string)) (string, error)
+
 // Logf is the minimal logger the server passes in (its "[jelly]" notices).
 type Logf func(format string, args ...any)
 

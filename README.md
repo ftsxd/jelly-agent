@@ -97,8 +97,11 @@ Agent 维护两份 markdown 长期记忆，每轮对话自动拼进 system promp
 
 接入步骤：
 1. 钉钉开放平台建「企业内部应用」→ 机器人，开启 **Stream 模式**，拿到 ClientID（AppKey）与 ClientSecret（AppSecret）。
-2. `jelly serve` 启动控制台 → 「消息绑定」页 → 新建钉钉机器人，填凭据并启用 → 状态徽标变「在线」。
-3. 钉钉群 @机器人 提问即可；同一会话（`sessionID = "dingtalk-" + 钉钉会话ID`）跨消息保留多轮上下文，并随 L2 检索可被回忆。
+2. （可选，流式回复）在钉钉「卡片平台」建一个 **AI 卡片模板**，模板里放一个名为 `content` 的流式文本组件，拿到**卡片模板 ID**。
+3. `jelly serve` 启动控制台 → 「消息绑定」页 → 新建钉钉机器人，填凭据（可选填卡片模板 ID）并启用 → 状态徽标变「在线」。
+4. 钉钉群 @机器人 提问即可；同一会话（`sessionID = "dingtalk-" + 钉钉会话ID`）跨消息保留多轮上下文，并随 L2 检索可被回忆。
+
+**流式回复**：填了卡片模板 ID 后，回复会以钉钉 **AI 卡片**逐字流式呈现（创建卡片 → 随生成增量更新 → 收尾）；不填则回退为单条 Markdown 文本。
 
 配置段示例（亦可直接写 `config.yaml`，密钥支持 `${ENV}`）：
 
@@ -110,6 +113,8 @@ platforms:
     client_id: ${DINGTALK_CLIENT_ID}
     client_secret: ${DINGTALK_CLIENT_SECRET}
     provider: ""   # 留空=默认 Provider
+    settings:
+      card_template_id: ""   # 填卡片模板 ID 即启用流式 AI 卡片回复
 ```
 
 ### 个人微信（WeChatPadPro）
