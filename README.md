@@ -1,10 +1,10 @@
 # jelly-agent
 
-基于 [ADK-Go](https://pkg.go.dev/google.golang.org/adk) (v1.3.0) 的多模型 Agent 平台：纯 Go 单二进制，OpenAI 兼容统一接入（DeepSeek / OpenAI / Claude / Ollama …），支持流式对话与工具调用，规划中提供 Web Dashboard 与 Terminal CLI 双入口。
+基于 [ADK-Go](https://pkg.go.dev/google.golang.org/adk) (v1.3.0) 的多模型 Agent 平台：纯 Go 单二进制，OpenAI 兼容统一接入（DeepSeek / OpenAI / Claude / Ollama …），支持流式对话与工具调用。提供 Web Dashboard 与 Terminal CLI 双入口，内置记忆、技能（Skills）、MCP，并可接入钉钉 / 个人微信等聊天平台。
 
 ## 项目状态
 
-当前处于 **Phase 2（CLI 完善）→ Phase 4（Web 控制台）**。已验证可用：
+**Phase 4（Web 控制台）已完成，Phase 5（生产化）进行中**，并已扩展多平台消息接入。已验证可用：
 
 - 自写 `model.LLM` OpenAI 兼容适配器（流式 + 工具调用 + DeepSeek 思考模型 `reasoning_content` 往返）。
 - 单 Agent + `web_search` 工具，端到端跑通 DeepSeek。
@@ -13,8 +13,13 @@
 - **会话持久化**：纯 Go SQLite（无 CGO），落 `~/.jelly-agent/state.db`，可列出历史会话。
 - **L1 核心记忆**（Hermes 式）：`MEMORY.md` / `USER.md` 每轮注入 system prompt（带 token 预算裁剪），Agent 通过 `remember` / `forget` 工具跨会话增删长期事实。
 - **L2 会话检索**（可选）：历史会话文本索引进 SQLite FTS5（与 `state.db` 同库、纯 Go trigram 分词，中英文皆可子串检索），开启后 Agent 获得 `load_memory` 工具按需检索过往对话。
-- **Web 控制台**：`jelly serve` 启动深色主题 Dashboard（Vue 3 + Vite，`go:embed` 进二进制），含对话（SSE 流式 + 工具可视化）、工具测试台、会话浏览、记忆查看、用量监控、MCP 与 Provider 配置等页面。CLI 与 Web 共用 `internal/engine` 同一运行时。
-- **配置热重载**：Web 端增删改 Provider/MCP 保存即生效；直接编辑磁盘上的 `config.yaml`（编辑器、`git pull`、配置管理工具）也会被监听到并自动热重载，对话不中断、无需重启。
+- **Web 控制台**：`jelly serve` 启动深色主题 Dashboard（Vue 3 + Vite，`go:embed` 进二进制），含对话、工具测试台、会话浏览（可删除）、用量监控、记忆、技能、MCP、消息绑定、Provider 配置等页面。CLI 与 Web 共用 `internal/engine` 同一运行时。
+- **配置热重载**：Web 端增删改 Provider/MCP/消息绑定保存即生效；直接编辑磁盘上的 `config.yaml` 也会被监听到并自动热重载，对话不中断、无需重启。
+- **技能（Skills）**：Claude/Agent Skills 风格的 Markdown 能力包，清单注入 + `use_skill` 按需加载（渐进式披露）；Web 页增删改 + 上传 ZIP 包导入。
+- **消息绑定（多平台）**：把同一套 Agent 接入聊天平台，纯本地无需公网。
+  - **钉钉**：官方 Stream 模式（出站 WebSocket）；可绑定 AI 卡片模板实现**流式回复**。
+  - **个人微信**：经 WeChatPadPro 网关（iPad 协议）接入，Web 页扫码登录，文本收发（⚠️ 第三方协议有封号风险）。
+  - 每个机器人可**选择应答 Provider 与按需加载的 MCP**。
 
 > 详细实施依据见 `PLAN.md`（本地文档，不入库）。本 README 是仓库内唯一受 git 追踪的文档。
 
