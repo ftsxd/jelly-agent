@@ -50,7 +50,7 @@ type Engine struct {
 	mcpCtx    context.Context
 	mcpCancel context.CancelFunc
 	mcpOnce   sync.Once
-	mcpSets   []adktool.Toolset
+	mcpSets   map[string]adktool.Toolset // enabled MCP toolsets, keyed by server name
 }
 
 // New wraps a loaded config in an engine.
@@ -71,11 +71,13 @@ func (e *Engine) Close() {
 	}
 }
 
-// Toolsets builds the enabled MCP toolsets once and caches them, so repeated
-// agent builds reuse the same (lazily-connected) MCP sessions. A server whose
-// transport config is invalid is skipped rather than failing the whole set.
-func (e *Engine) Toolsets() []adktool.Toolset {
+// buildToolsets builds the enabled MCP toolsets once and caches them by server
+// name, so repeated agent builds reuse the same (lazily-connected) MCP sessions.
+// A server whose transport config is invalid is skipped rather than failing the
+// whole set.
+func (e *Engine) buildToolsets() {
 	e.mcpOnce.Do(func() {
+		e.mcpSets = map[string]adktool.Toolset{}
 		for _, srv := range e.cfg.MCP {
 			if !srv.Enabled {
 				continue
@@ -84,10 +86,35 @@ func (e *Engine) Toolsets() []adktool.Toolset {
 			if err != nil {
 				continue // bad config (e.g. missing command/url); skip this server
 			}
-			e.mcpSets = append(e.mcpSets, ts)
+			e.mcpSets[srv.Name] = ts
 		}
 	})
-	return e.mcpSets
+}
+
+// Toolsets returns every enabled MCP toolset (used by the web chat / default
+// agent, which loads all of them).
+func (e *Engine) Toolsets() []adktool.Toolset {
+	e.buildToolsets()
+	out := make([]adktool.Toolset, 0, len(e.mcpSets))
+	for _, srv := range e.cfg.MCP { // stable order = config order
+		if ts, ok := e.mcpSets[srv.Name]; ok {
+			out = append(out, ts)
+		}
+	}
+	return out
+}
+
+// ToolsetsFor returns only the named enabled MCP toolsets, in the given order —
+// the basis for a bot loading a selected subset of MCP servers.
+func (e *Engine) ToolsetsFor(names []string) []adktool.Toolset {
+	e.buildToolsets()
+	out := make([]adktool.Toolset, 0, len(names))
+	for _, n := range names {
+		if ts, ok := e.mcpSets[n]; ok {
+			out = append(out, ts)
+		}
+	}
+	return out
 }
 
 // SearchEnabled reports whether L2 session search is turned on in config.
@@ -122,10 +149,18 @@ func (e *Engine) Tools(core *memory.Core, withSearch bool) ([]adktool.Tool, erro
 	return jellytool.Builtins(core, withSearch)
 }
 
-// BuildAgent constructs the root agent for the named provider (empty = default),
-// returning the resolved provider plus the core store and search service so the
-// caller can render memory and index turns. search is nil when L2 is disabled.
+// BuildAgent constructs the root agent for the named provider (empty = default)
+// loading every enabled MCP server. See BuildAgentWith for selective MCP.
 func (e *Engine) BuildAgent(provider string) (agent.Agent, config.Provider, *memory.Core, *memory.Search, error) {
+	return e.BuildAgentWith(provider, nil)
+}
+
+// BuildAgentWith is like BuildAgent but controls which MCP servers are loaded:
+// nil mcpNames loads all enabled servers (the default), a non-nil slice loads
+// only those named (an empty slice loads none). Returns the resolved provider
+// plus the core store and search service so the caller can render memory and
+// index turns. search is nil when L2 is disabled.
+func (e *Engine) BuildAgentWith(provider string, mcpNames []string) (agent.Agent, config.Provider, *memory.Core, *memory.Search, error) {
 	llm, prov, err := e.reg.Get(provider)
 	if err != nil {
 		return nil, config.Provider{}, nil, nil, err
@@ -148,6 +183,11 @@ func (e *Engine) BuildAgent(provider string) (agent.Agent, config.Provider, *mem
 		return nil, prov, nil, nil, fmt.Errorf("build tools: %w", err)
 	}
 
+	toolsets := e.Toolsets() // nil mcpNames → all enabled MCP servers
+	if mcpNames != nil {
+		toolsets = e.ToolsetsFor(mcpNames) // selected subset (may be empty)
+	}
+
 	a, err := llmagent.New(llmagent.Config{
 		Name:        "root",
 		Model:       llm,
@@ -158,7 +198,7 @@ func (e *Engine) BuildAgent(provider string) (agent.Agent, config.Provider, *mem
 			return core.Render(RootInstruction), nil
 		},
 		Tools:    tools,
-		Toolsets: e.Toolsets(), // external MCP servers, if any are enabled
+		Toolsets: toolsets, // external MCP servers (all enabled, or a selected subset)
 	})
 	if err != nil {
 		if search != nil {

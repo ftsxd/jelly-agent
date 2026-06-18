@@ -65,6 +65,11 @@ type PlatformBot struct {
 	// common fields. WeChatPadPro (个人微信) uses it for wechatpad_url,
 	// wechatpad_ws, admin_key, token, wxid. Secret-ish keys are masked by the API.
 	Settings map[string]string `mapstructure:"settings" yaml:"settings,omitempty"`
+
+	// MCP names the MCP servers this bot's agent loads (a subset of the enabled
+	// servers). Empty = no MCP tools for this bot. Lets each bot selectively load
+	// MCP instead of always injecting every enabled server.
+	MCP []string `mapstructure:"mcp" yaml:"mcp,omitempty"`
 }
 
 // Memory configures the memory subsystem (PLAN §10.5): L1 core memory

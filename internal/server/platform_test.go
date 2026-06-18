@@ -111,6 +111,25 @@ func TestDingTalkCardTemplatePersists(t *testing.T) {
 	}
 }
 
+// TestPlatformMCPSelection checks a bot's selected MCP servers round-trip
+// through config and surface in the list (selective per-bot MCP loading).
+func TestPlatformMCPSelection(t *testing.T) {
+	s := newEmptyServer(t)
+	w := do(t, s, "POST", "/api/platforms",
+		`{"name":"dt","type":"dingtalk","client_id":"k","client_secret":"sec","enabled":true,"mcp":["filesystem","github"]}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("create status = %d: %s", w.Code, w.Body.String())
+	}
+	got := s.engine().Config().Platforms
+	if len(got) != 1 || len(got[0].MCP) != 2 || got[0].MCP[0] != "filesystem" || got[0].MCP[1] != "github" {
+		t.Fatalf("mcp selection not persisted: %+v", got)
+	}
+	w = do(t, s, "GET", "/api/platforms", "")
+	if !strings.Contains(w.Body.String(), `"mcp":["filesystem","github"]`) {
+		t.Fatalf("mcp not surfaced in list: %s", w.Body.String())
+	}
+}
+
 func TestPlatformCreateRequiresCredentials(t *testing.T) {
 	s := newEmptyServer(t)
 	// Missing client_secret on create is rejected.

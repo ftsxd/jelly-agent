@@ -102,6 +102,12 @@ func (s *Server) stopBots() {
 // engine turn keyed by the conversation.
 func (s *Server) buildBot(pb config.PlatformBot) (platform.Bot, error) {
 	provider := pb.Provider
+	// mcpNames is the bot's selected MCP servers; a non-nil (possibly empty) slice
+	// means "load exactly these" — so a bot with no selection gets no MCP tools.
+	mcpNames := pb.MCP
+	if mcpNames == nil {
+		mcpNames = []string{}
+	}
 	// replyWith / streamReplyWith build per-platform reply funcs that run an
 	// engine turn under a session id prefixed by platform (so the same person on
 	// different platforms is kept in separate conversations).
@@ -109,14 +115,14 @@ func (s *Server) buildBot(pb config.PlatformBot) (platform.Bot, error) {
 		return func(ctx context.Context, sessionKey, text string) (string, error) {
 			tctx, cancel := context.WithTimeout(ctx, botReplyTimeout)
 			defer cancel()
-			return s.runTurnText(tctx, provider, prefix+sessionKey, text)
+			return s.runTurnText(tctx, provider, mcpNames, prefix+sessionKey, text)
 		}
 	}
 	streamReplyWith := func(prefix string) platform.StreamReplyFunc {
 		return func(ctx context.Context, sessionKey, text string, onUpdate func(string)) (string, error) {
 			tctx, cancel := context.WithTimeout(ctx, botReplyTimeout)
 			defer cancel()
-			return s.runTurnStream(tctx, provider, prefix+sessionKey, text, onUpdate)
+			return s.runTurnStream(tctx, provider, mcpNames, prefix+sessionKey, text, onUpdate)
 		}
 	}
 
@@ -153,8 +159,8 @@ func (s *Server) botStatuses() map[string]platform.Status {
 }
 
 // runTurnText runs one engine turn and returns only the final assistant text.
-func (s *Server) runTurnText(ctx context.Context, provider, sessionID, text string) (string, error) {
-	return s.runTurnStream(ctx, provider, sessionID, text, nil)
+func (s *Server) runTurnText(ctx context.Context, provider string, mcpNames []string, sessionID, text string) (string, error) {
+	return s.runTurnStream(ctx, provider, mcpNames, sessionID, text, nil)
 }
 
 // runTurnStream runs one engine turn for the given session id, streaming partial
@@ -162,9 +168,9 @@ func (s *Server) runTurnText(ctx context.Context, provider, sessionID, text stri
 // and returning the final full text. It is the platform-facing sibling of
 // handleChatStream: same BuildAgent → NewRunner → Run (SSE) sequence, reusing or
 // creating a deterministic session so multi-turn context persists.
-func (s *Server) runTurnStream(ctx context.Context, provider, sessionID, text string, onUpdate func(string)) (string, error) {
+func (s *Server) runTurnStream(ctx context.Context, provider string, mcpNames []string, sessionID, text string, onUpdate func(string)) (string, error) {
 	eng := s.engine()
-	a, _, _, search, err := eng.BuildAgent(provider)
+	a, _, _, search, err := eng.BuildAgentWith(provider, mcpNames)
 	if err != nil {
 		return "", err
 	}
@@ -235,6 +241,7 @@ type platformInput struct {
 	Provider     string            `json:"provider"`
 	Enabled      bool              `json:"enabled"`
 	Settings     map[string]string `json:"settings,omitempty"` // platform-specific (wechatpadpro)
+	MCP          []string          `json:"mcp,omitempty"`      // MCP servers this bot loads
 }
 
 // handleListPlatforms lists configured platform bots with their live connection
@@ -249,6 +256,7 @@ func (s *Server) handleListPlatforms(w http.ResponseWriter, _ *http.Request) {
 		Enabled    bool              `json:"enabled"`
 		Settings   map[string]string `json:"settings,omitempty"`    // non-secret platform settings
 		SecretKeys []string          `json:"secret_keys,omitempty"` // secret settings that are set
+		MCP        []string          `json:"mcp,omitempty"`         // MCP servers this bot loads
 		State      string            `json:"state"`                 // online | connecting | error | stopped
 		Detail     string            `json:"detail,omitempty"`      // error message when state == error
 		QR         string            `json:"qr,omitempty"`          // login QR (data URI) while awaiting scan
@@ -261,7 +269,7 @@ func (s *Server) handleListPlatforms(w http.ResponseWriter, _ *http.Request) {
 		d := platformDTO{
 			Name: b.Name, Type: b.Type, ClientID: b.ClientID,
 			HasSecret: b.ClientSecret != "", Provider: b.Provider,
-			Enabled: b.Enabled, Settings: visible, SecretKeys: secretKeys,
+			Enabled: b.Enabled, Settings: visible, SecretKeys: secretKeys, MCP: b.MCP,
 			State: string(platform.StateStopped),
 		}
 		if st, ok := statuses[b.Name]; ok {
@@ -311,7 +319,7 @@ func (s *Server) handleSavePlatform(w http.ResponseWriter, r *http.Request) {
 	if idx >= 0 {
 		existing = raw.Platforms[idx]
 	}
-	bot := config.PlatformBot{Name: name, Type: typ, Provider: strings.TrimSpace(in.Provider), Enabled: in.Enabled}
+	bot := config.PlatformBot{Name: name, Type: typ, Provider: strings.TrimSpace(in.Provider), Enabled: in.Enabled, MCP: in.MCP}
 
 	switch typ {
 	case "dingtalk":

@@ -5,6 +5,7 @@ import { api } from '../api'
 
 const bots = ref([])
 const providers = ref([])
+const mcpServers = ref([]) // available MCP servers to choose from
 const loading = ref(true)
 const error = ref('')
 const notice = ref('')
@@ -12,7 +13,7 @@ const notice = ref('')
 const editing = ref(false) // false | 'new' | name
 const saving = ref(false)
 const blankSettings = () => ({ wechatpad_url: '', wechatpad_ws: '', admin_key: '', token: '', wxid: '', card_template_id: '' })
-const form = reactive({ name: '', type: 'dingtalk', client_id: '', client_secret: '', provider: '', enabled: true, settings: blankSettings() })
+const form = reactive({ name: '', type: 'dingtalk', client_id: '', client_secret: '', provider: '', enabled: true, settings: blankSettings(), mcp: [] })
 
 let poll = null
 
@@ -21,6 +22,11 @@ onMounted(async () => {
     providers.value = (await api.providers()).providers
   } catch {
     /* provider list is optional context */
+  }
+  try {
+    mcpServers.value = (await api.mcp()).servers
+  } catch {
+    /* mcp list is optional context */
   }
   await load()
   // Refresh connection state so a bot's badge moves connecting → online.
@@ -51,7 +57,7 @@ async function refresh() {
 
 function startNew() {
   editing.value = 'new'
-  Object.assign(form, { name: '', type: 'dingtalk', client_id: '', client_secret: '', provider: '', enabled: true, settings: blankSettings() })
+  Object.assign(form, { name: '', type: 'dingtalk', client_id: '', client_secret: '', provider: '', enabled: true, settings: blankSettings(), mcp: [] })
 }
 
 function startEdit(b) {
@@ -67,6 +73,7 @@ function startEdit(b) {
     provider: b.provider || '',
     enabled: b.enabled,
     settings: s,
+    mcp: [...(b.mcp || [])],
   })
 }
 
@@ -84,6 +91,7 @@ async function submit() {
       type: form.type,
       provider: form.provider,
       enabled: form.enabled,
+      mcp: form.mcp,
     }
     // Only send non-empty settings; blank secrets keep the stored value server-side.
     body.settings = Object.fromEntries(Object.entries(form.settings).filter(([, v]) => String(v).trim() !== ''))
@@ -105,7 +113,7 @@ async function submit() {
 async function toggle(b) {
   try {
     // Empty secrets/settings keep the stored ones server-side.
-    const body = { name: b.name, type: b.type, provider: b.provider || '', enabled: !b.enabled }
+    const body = { name: b.name, type: b.type, provider: b.provider || '', enabled: !b.enabled, mcp: b.mcp || [] }
     if (b.type !== 'wechatpadpro') {
       body.client_id = b.client_id || ''
       body.client_secret = ''
@@ -212,6 +220,18 @@ function stateClass(s) {
             </select>
           </label>
 
+          <div class="field span2">
+            <span class="label">加载的 MCP 工具（不勾=该机器人不加载任何 MCP）</span>
+            <div v-if="mcpServers.length" class="mcp-picker">
+              <label v-for="m in mcpServers" :key="m.name" class="mcp-opt">
+                <input type="checkbox" :value="m.name" v-model="form.mcp" />
+                <span class="mono">{{ m.name }}</span>
+                <span v-if="!m.enabled" class="muted">（已停用）</span>
+              </label>
+            </div>
+            <span v-else class="muted hint-sm">尚无 MCP 服务器，可在「MCP」页添加</span>
+          </div>
+
           <label class="check span2">
             <input type="checkbox" v-model="form.enabled" />
             <span>启用（保存后立即连接{{ form.type === 'wechatpadpro' ? '微信，需扫码登录' : '钉钉' }}）</span>
@@ -259,6 +279,7 @@ function stateClass(s) {
                   <template v-if="b.settings && b.settings.card_template_id"> · 流式卡片</template>
                 </template>
                 <template v-if="b.provider"> · Provider: {{ b.provider }}</template>
+                <template v-if="b.mcp && b.mcp.length"> · MCP: {{ b.mcp.join(', ') }}</template>
               </div>
               <div v-if="b.state === 'error' && b.detail" class="bot-err mono">{{ b.detail }}</div>
             </div>
@@ -348,6 +369,25 @@ function stateClass(s) {
   color: var(--text-dim);
   font-size: 13px;
   cursor: pointer;
+}
+.mcp-picker {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2) var(--sp-4);
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+}
+.mcp-opt {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  font-size: 13px;
+  cursor: pointer;
+}
+.hint-sm {
+  font-size: 12px;
 }
 .form-actions {
   display: flex;
