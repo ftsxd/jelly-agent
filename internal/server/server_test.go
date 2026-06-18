@@ -106,6 +106,27 @@ func TestMemorySearchDisabledByDefault(t *testing.T) {
 	}
 }
 
+func TestStatsEmpty(t *testing.T) {
+	s := newTestServer(t)
+	w := do(t, s, "GET", "/api/stats", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d", w.Code)
+	}
+	m := decode(t, w)
+	// The session store lives at a shared default path (not the temp dir), so we
+	// can't assume it's empty — just assert the field is present and numeric.
+	if _, ok := m["sessions"].(float64); !ok {
+		t.Fatalf("sessions missing or non-numeric: %v", m["sessions"])
+	}
+	prov, ok := m["providers"].(map[string]any)
+	if !ok || prov["default"] != "test" {
+		t.Fatalf("providers.default = %v, want test", m["providers"])
+	}
+	if mem, ok := m["memory"].(map[string]any); !ok || mem["search_enabled"] != false {
+		t.Fatalf("memory.search_enabled = %v, want false", m["memory"])
+	}
+}
+
 func TestChatRejectsEmptyMessage(t *testing.T) {
 	s := newTestServer(t)
 	w := do(t, s, "POST", "/api/chat/stream", `{"message":"  "}`)

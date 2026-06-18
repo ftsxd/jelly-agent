@@ -80,6 +80,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/sessions/{id}", s.handleSessionDetail)
 	mux.HandleFunc("GET /api/memory/core", s.handleMemoryCore)
 	mux.HandleFunc("GET /api/memory/search", s.handleMemorySearch)
+	mux.HandleFunc("GET /api/stats", s.handleStats)
 	mux.HandleFunc("POST /api/chat/stream", s.handleChatStream)
 
 	if s.static != nil {

@@ -37,6 +37,7 @@ export const api = {
   session: (id) => jget(`/api/sessions/${encodeURIComponent(id)}`),
   memoryCore: () => jget('/api/memory/core'),
   memorySearch: (q) => jget(`/api/memory/search?q=${encodeURIComponent(q)}`),
+  stats: () => jget('/api/stats'),
   mcp: () => jget('/api/mcp'),
   saveMCP: (s) => jpost('/api/mcp', s),
   testMCP: (s) => jpost('/api/mcp/test', s),
