@@ -6,9 +6,13 @@ package server
 
 import (
 	"encoding/json"
+	"fmt"
+	"io"
 	"io/fs"
 	"net/http"
+	"os"
 	"sync"
+	"time"
 
 	"github.com/jelly-agent/jelly-agent/internal/config"
 	"github.com/jelly-agent/jelly-agent/internal/engine"
@@ -22,6 +26,9 @@ type Server struct {
 	eng        *engine.Engine
 	static     fs.FS  // embedded SPA build (dist); nil disables static serving
 	configPath string // explicit --config path for reloads ("" = auto-resolve)
+
+	pollInterval time.Duration // config-watch poll interval; 0 = defaultConfigPoll
+	out          io.Writer     // hot-reload notices; nil = os.Stderr
 }
 
 // New builds a server over the given engine. staticFS is the embedded frontend
@@ -99,6 +106,16 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 // writeErr sends a JSON error envelope: {"error": "..."}.
 func writeErr(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg})
+}
+
+// logf writes an operational notice (e.g. config hot-reload events) to s.out,
+// defaulting to stderr. Tests redirect it to a buffer or io.Discard.
+func (s *Server) logf(format string, args ...any) {
+	w := s.out
+	if w == nil {
+		w = os.Stderr
+	}
+	fmt.Fprintf(w, "[jelly] "+format+"\n", args...)
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {

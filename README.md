@@ -13,7 +13,8 @@
 - **会话持久化**：纯 Go SQLite（无 CGO），落 `~/.jelly-agent/state.db`，可列出历史会话。
 - **L1 核心记忆**（Hermes 式）：`MEMORY.md` / `USER.md` 每轮注入 system prompt（带 token 预算裁剪），Agent 通过 `remember` / `forget` 工具跨会话增删长期事实。
 - **L2 会话检索**（可选）：历史会话文本索引进 SQLite FTS5（与 `state.db` 同库、纯 Go trigram 分词，中英文皆可子串检索），开启后 Agent 获得 `load_memory` 工具按需检索过往对话。
-- **Web 控制台**：`jelly serve` 启动深色主题 Dashboard（Vue 3 + Vite，`go:embed` 进二进制），含对话（SSE 流式 + 工具可视化）、工具测试台、会话浏览、记忆查看四个页面。CLI 与 Web 共用 `internal/engine` 同一运行时。
+- **Web 控制台**：`jelly serve` 启动深色主题 Dashboard（Vue 3 + Vite，`go:embed` 进二进制），含对话（SSE 流式 + 工具可视化）、工具测试台、会话浏览、记忆查看、用量监控、MCP 与 Provider 配置等页面。CLI 与 Web 共用 `internal/engine` 同一运行时。
+- **配置热重载**：Web 端增删改 Provider/MCP 保存即生效；直接编辑磁盘上的 `config.yaml`（编辑器、`git pull`、配置管理工具）也会被监听到并自动热重载，对话不中断、无需重启。
 
 > 详细实施依据见 `PLAN.md`（本地文档，不入库）。本 README 是仓库内唯一受 git 追踪的文档。
 
@@ -73,16 +74,17 @@ Agent 维护两份 markdown 长期记忆，每轮对话自动拼进 system promp
 
 ## Web 控制台
 
-面向开发者的测试台（Vue 3 + Vite，深色主题，`go:embed` 打包进二进制）。四个页面：
+面向开发者的测试台（Vue 3 + Vite，深色主题，`go:embed` 打包进二进制）。页面：
 
 - **对话** —— SSE 流式响应、工具调用过程可视化、逐轮 Token 统计、Provider 切换。
 - **工具** —— 列出内置工具，并内置 `web_search` 测试台（绕过模型直接调用）。
 - **会话** —— 列出持久化历史会话，查看完整 transcript。
+- **监控** —— 跨全部持久化会话聚合用量：会话/消息/工具调用/Token 总量 KPI、Token 构成、工具调用排行、每日 Token 趋势柱状图。
 - **记忆** —— L1 核心记忆（USER.md / MEMORY.md）快照 + L2 FTS5 会话全文检索。
 - **MCP** —— 接入外部 Model Context Protocol 服务器（stdio / http / sse），新建/编辑/启停/删除、一键测试连接并列出其工具；启用后其工具与内置工具一起注入 Agent。
 - **配置** —— 在线增删改 Provider（OpenAI 兼容端点）、设默认，保存即**热重载**，无需重启。
 
-配置（Provider / MCP）写入 `configs/config.yaml` 或 `~/.jelly-agent/config.yaml`（`0600`）；API Key 与 MCP 密钥脱敏展示，编辑时留空即保留原值，`${ENV}` 引用不会被改写成明文。
+配置（Provider / MCP）写入 `configs/config.yaml` 或 `~/.jelly-agent/config.yaml`（`0600`）；API Key 与 MCP 密钥脱敏展示，编辑时留空即保留原值，`${ENV}` 引用不会被改写成明文。直接编辑该文件也会被服务器监听并热重载，无需重启。
 
 ```bash
 # 生产：先构建前端，再编译进二进制，单文件部署

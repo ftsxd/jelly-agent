@@ -37,6 +37,8 @@ func newServeCmd() *cobra.Command {
 			ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
 			defer stop()
 
+			go srv.Watch(ctx) // hot-reload on external config file edits
+
 			errc := make(chan error, 1)
 			go func() {
 				front := "已嵌入前端"

@@ -42,6 +42,8 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	go srv.Watch(ctx) // hot-reload on external config file edits
+
 	go func() {
 		embedded := "已嵌入前端"
 		if web.DistFS() == nil {

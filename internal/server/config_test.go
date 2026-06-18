@@ -1,9 +1,14 @@
 package server
 
 import (
+	"context"
+	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jelly-agent/jelly-agent/internal/config"
 	"github.com/jelly-agent/jelly-agent/internal/engine"
@@ -55,6 +60,46 @@ func TestProviderCreateUpdateDelete(t *testing.T) {
 	}
 	if got := len(s.engine().Config().Providers); got != 0 {
 		t.Fatalf("providers after delete = %d, want 0", got)
+	}
+}
+
+// TestConfigFileHotReload verifies Watch picks up an edit made directly to the
+// config file (not via the web UI) and swaps the running engine.
+func TestConfigFileHotReload(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(path,
+		[]byte("default_provider: a\nproviders:\n  - {name: a, base_url: http://x, model: m}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := New(engine.New(cfg), nil).WithConfigPath(path)
+	s.pollInterval = 5 * time.Millisecond
+	s.out = io.Discard
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go s.Watch(ctx)
+	// Let the watcher capture its baseline signature before we edit, so the edit
+	// registers as a change rather than being folded into the initial read.
+	time.Sleep(50 * time.Millisecond)
+
+	// External edit: switch the default provider to b (and grow the file so the
+	// change is unmistakable even on a coarse-modtime filesystem).
+	if err := os.WriteFile(path,
+		[]byte("default_provider: b\nproviders:\n  - {name: a, base_url: http://x, model: m}\n  - {name: b, base_url: http://y, model: m}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for s.engine().Config().DefaultProvider != "b" {
+		if time.Now().After(deadline) {
+			t.Fatalf("hot reload did not apply; default = %q", s.engine().Config().DefaultProvider)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
