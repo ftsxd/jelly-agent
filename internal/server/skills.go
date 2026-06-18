@@ -43,7 +43,11 @@ func (s *Server) handleListSkills(w http.ResponseWriter, _ *http.Request) {
 	for _, sk := range all {
 		out = append(out, skillDTO{Name: sk.Name, Description: sk.Description, Enabled: sk.Enabled})
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"skills": out, "dir": store.Dir()})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"skills":        out,
+		"dir":           store.Dir(),
+		"allow_scripts": s.engine().Config().Skills.AllowScripts,
+	})
 }
 
 // handleSkillDetail returns one skill including its instruction body.
@@ -62,7 +66,17 @@ func (s *Server) handleSkillDetail(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, "技能不存在")
 		return
 	}
-	writeJSON(w, http.StatusOK, sk)
+	// var_keys lists configured variable names only (values masked); scripts
+	// lists runnable bundled files for directory-form skills.
+	cfg := s.engine().Config()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"name":        sk.Name,
+		"description": sk.Description,
+		"enabled":     sk.Enabled,
+		"body":        sk.Body,
+		"var_keys":    sortedKeys(cfg.SkillVars[sk.Name]),
+		"scripts":     store.Scripts(sk.Name),
+	})
 }
 
 // handleSaveSkill upserts a skill (writes <name>.md). No engine reload is
@@ -131,6 +145,102 @@ func (s *Server) handleUploadSkill(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "name": sk.Name, "description": sk.Description})
+}
+
+// skillVarsInput sets a skill's variables (key/value). An empty value keeps the
+// stored one (so editing without re-typing a secret preserves it).
+type skillVarsInput struct {
+	Vars map[string]string `json:"vars"`
+}
+
+// handleSetSkillVars merges variables into a skill's config-stored variable set
+// (config.yaml, 0600), then persists + hot-reloads. Secret values never go to
+// the model or the skill files — only into run_script's environment.
+func (s *Server) handleSetSkillVars(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	if !skill.ValidName(name) {
+		writeErr(w, http.StatusBadRequest, "技能名非法")
+		return
+	}
+	var in skillVarsInput
+	if err := decodeJSON(r, &in); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	path, err := s.writeTargetPath()
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	raw, err := loadRawOrEmpty(path)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if raw.SkillVars == nil {
+		raw.SkillVars = map[string]map[string]string{}
+	}
+	raw.SkillVars[name] = mergeSecrets(raw.SkillVars[name], in.Vars) // empty values keep existing
+	if len(raw.SkillVars[name]) == 0 {
+		delete(raw.SkillVars, name)
+	}
+	if err := s.persist(w, raw, path); err != nil {
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "var_keys": sortedKeys(raw.SkillVars[name])})
+}
+
+// handleDeleteSkillVar removes one variable from a skill.
+func (s *Server) handleDeleteSkillVar(w http.ResponseWriter, r *http.Request) {
+	name, key := r.PathValue("name"), r.PathValue("key")
+	path, err := s.writeTargetPath()
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	raw, err := loadRawOrEmpty(path)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if raw.SkillVars[name] != nil {
+		delete(raw.SkillVars[name], key)
+		if len(raw.SkillVars[name]) == 0 {
+			delete(raw.SkillVars, name)
+		}
+	}
+	if err := s.persist(w, raw, path); err != nil {
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// handleSetAllowScripts toggles whether skills may execute bundled scripts
+// (the run_script tool). Off by default — it runs code with the user's
+// privileges, so enabling is an explicit, persisted choice.
+func (s *Server) handleSetAllowScripts(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Enabled bool `json:"enabled"`
+	}
+	if err := decodeJSON(r, &in); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	path, err := s.writeTargetPath()
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	raw, err := loadRawOrEmpty(path)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	raw.Skills.AllowScripts = in.Enabled
+	if err := s.persist(w, raw, path); err != nil {
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "allow_scripts": s.engine().Config().Skills.AllowScripts})
 }
 
 // handleDeleteSkill removes a skill file (idempotent).

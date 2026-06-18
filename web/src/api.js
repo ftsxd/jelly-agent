@@ -51,6 +51,9 @@ export const api = {
   skill: (name) => jget(`/api/skills/${encodeURIComponent(name)}`),
   saveSkill: (p) => jpost('/api/skills', p),
   deleteSkill: (name) => jdelete(`/api/skills/${encodeURIComponent(name)}`),
+  setAllowScripts: (enabled) => jpost('/api/skills/allow-scripts', { enabled }),
+  setSkillVars: (name, vars) => jpost(`/api/skills/${encodeURIComponent(name)}/vars`, { vars }),
+  deleteSkillVar: (name, key) => jdelete(`/api/skills/${encodeURIComponent(name)}/vars/${encodeURIComponent(key)}`),
   uploadSkill: async (file) => {
     const fd = new FormData()
     fd.append('file', file)

@@ -197,11 +197,19 @@ func (e *Engine) BuildAgentWith(provider string, mcpNames []string) (agent.Agent
 	// Agent Skills: when any skill is enabled, add the use_skill tool so the
 	// agent can pull a skill's full body on demand. The catalog itself is
 	// injected per-turn by the InstructionProvider below (read fresh, so edits
-	// apply immediately without a rebuild).
+	// apply immediately without a rebuild). When script execution is enabled,
+	// also expose run_script (with per-skill variables as its environment).
+	allowScripts := e.cfg.Skills.AllowScripts
+	varsFor := func(name string) map[string]string { return e.cfg.SkillVars[name] }
 	if skills, err := e.Skills(); err == nil {
 		if cat, err := skills.Catalog(); err == nil && cat != "" {
-			if st, err := jellytool.SkillTool(skills); err == nil {
+			if st, err := jellytool.SkillTool(skills, varsFor, allowScripts); err == nil {
 				tools = append(tools, st)
+			}
+			if allowScripts {
+				if rs, err := jellytool.RunScriptTool(skills, varsFor); err == nil {
+					tools = append(tools, rs)
+				}
 			}
 		}
 	}
@@ -217,7 +225,10 @@ func (e *Engine) BuildAgentWith(provider string, mcpNames []string) (agent.Agent
 			base := core.Render(RootInstruction)
 			if skills, err := e.Skills(); err == nil {
 				if cat, err := skills.Catalog(); err == nil && cat != "" {
-					return base + "\n\n" + cat, nil
+					base += "\n\n" + cat
+					if allowScripts {
+						base += "目录型技能可能附带脚本；需要时用 run_script 运行（凭据已由系统注入环境变量，按 use_skill 给出的 var_keys 在脚本里引用，切勿向用户索要密钥）。\n"
+					}
 				}
 			}
 			return base, nil

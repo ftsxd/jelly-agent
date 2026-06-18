@@ -22,12 +22,16 @@ type Provider struct {
 
 // Config is the top-level jelly-agent configuration.
 type Config struct {
-	DefaultProvider string        `mapstructure:"default_provider" yaml:"default_provider"`
-	Providers       []Provider    `mapstructure:"providers" yaml:"providers"`
-	Memory          Memory        `mapstructure:"memory" yaml:"memory"`
-	Skills          Skills        `mapstructure:"skills" yaml:"skills,omitempty"`
-	MCP             []MCPServer    `mapstructure:"mcp" yaml:"mcp,omitempty"`
-	Platforms       []PlatformBot `mapstructure:"platforms" yaml:"platforms,omitempty"`
+	DefaultProvider string     `mapstructure:"default_provider" yaml:"default_provider"`
+	Providers       []Provider `mapstructure:"providers" yaml:"providers"`
+	Memory          Memory     `mapstructure:"memory" yaml:"memory"`
+	Skills          Skills     `mapstructure:"skills" yaml:"skills,omitempty"`
+	// SkillVars holds per-skill variables (skill name → KV), where secret-ish
+	// values are masked by the API and may use ${ENV}. Kept here (config, 0600)
+	// rather than in the skill files so sharing/exporting a skill omits secrets.
+	SkillVars map[string]map[string]string `mapstructure:"skill_vars" yaml:"skill_vars,omitempty"`
+	MCP       []MCPServer                  `mapstructure:"mcp" yaml:"mcp,omitempty"`
+	Platforms []PlatformBot                `mapstructure:"platforms" yaml:"platforms,omitempty"`
 
 	// SourcePath records where the config came from ("(env)" for the env
 	// fallback, "" when nothing was found). Not persisted.
@@ -78,6 +82,9 @@ type PlatformBot struct {
 // the default ~/.jelly-agent/skills.
 type Skills struct {
 	Dir string `mapstructure:"dir" yaml:"dir,omitempty"`
+	// AllowScripts enables the run_script tool (skills can execute bundled
+	// scripts). Off by default — it runs code with the user's privileges.
+	AllowScripts bool `mapstructure:"allow_scripts" yaml:"allow_scripts,omitempty"`
 }
 
 // Memory configures the memory subsystem (PLAN §10.5): L1 core memory
@@ -146,14 +153,15 @@ func load(path string, expand bool) (*Config, error) {
 // freshly-created file stays minimal.
 func Save(c *Config, path string) error {
 	type payload struct {
-		DefaultProvider string        `yaml:"default_provider,omitempty"`
-		Providers       []Provider    `yaml:"providers"`
-		Memory          *Memory       `yaml:"memory,omitempty"`
-		Skills          *Skills        `yaml:"skills,omitempty"`
-		MCP             []MCPServer    `yaml:"mcp,omitempty"`
-		Platforms       []PlatformBot `yaml:"platforms,omitempty"`
+		DefaultProvider string                       `yaml:"default_provider,omitempty"`
+		Providers       []Provider                   `yaml:"providers"`
+		Memory          *Memory                      `yaml:"memory,omitempty"`
+		Skills          *Skills                      `yaml:"skills,omitempty"`
+		SkillVars       map[string]map[string]string `yaml:"skill_vars,omitempty"`
+		MCP             []MCPServer                  `yaml:"mcp,omitempty"`
+		Platforms       []PlatformBot                `yaml:"platforms,omitempty"`
 	}
-	p := payload{DefaultProvider: c.DefaultProvider, Providers: c.Providers, MCP: c.MCP, Platforms: c.Platforms}
+	p := payload{DefaultProvider: c.DefaultProvider, Providers: c.Providers, MCP: c.MCP, Platforms: c.Platforms, SkillVars: c.SkillVars}
 	if c.Skills != (Skills{}) {
 		sk := c.Skills
 		p.Skills = &sk

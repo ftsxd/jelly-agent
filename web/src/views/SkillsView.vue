@@ -5,13 +5,14 @@ import { api } from '../api'
 
 const skills = ref([])
 const dir = ref('')
+const allowScripts = ref(false)
 const loading = ref(true)
 const error = ref('')
 const notice = ref('')
 
 const editing = ref(false) // false | 'new' | name
 const saving = ref(false)
-const form = reactive({ name: '', description: '', body: '', enabled: true })
+const form = reactive({ name: '', description: '', body: '', enabled: true, varKeys: [], scripts: [], varsText: '', savingVars: false })
 
 const fileInput = ref(null)
 const uploading = ref(false)
@@ -25,6 +26,7 @@ async function load() {
     const res = await api.skills()
     skills.value = res.skills
     dir.value = res.dir
+    allowScripts.value = !!res.allow_scripts
   } catch (e) {
     error.value = e.message
   } finally {
@@ -34,15 +36,72 @@ async function load() {
 
 function startNew() {
   editing.value = 'new'
-  Object.assign(form, { name: '', description: '', body: '', enabled: true })
+  Object.assign(form, { name: '', description: '', body: '', enabled: true, varKeys: [], scripts: [], varsText: '', savingVars: false })
 }
 
 async function startEdit(s) {
   error.value = ''
   try {
-    const full = await api.skill(s.name) // fetch body
+    const full = await api.skill(s.name) // fetch body + var_keys + scripts
     editing.value = s.name
-    Object.assign(form, { name: full.name, description: full.description || '', body: full.body || '', enabled: full.enabled })
+    Object.assign(form, {
+      name: full.name,
+      description: full.description || '',
+      body: full.body || '',
+      enabled: full.enabled,
+      varKeys: full.var_keys || [],
+      scripts: full.scripts || [],
+      // prefill existing keys with blank values (blank = keep server-side)
+      varsText: (full.var_keys || []).map((k) => `${k}=`).join('\n'),
+      savingVars: false,
+    })
+  } catch (e) {
+    error.value = e.message
+  }
+}
+
+function parseVars(text) {
+  const out = {}
+  for (const line of text.split('\n')) {
+    const t = line.trim()
+    if (!t) continue
+    const i = t.indexOf('=')
+    if (i < 0) continue
+    out[t.slice(0, i).trim()] = t.slice(i + 1).trim()
+  }
+  return out
+}
+
+async function saveVars() {
+  if (form.savingVars) return
+  form.savingVars = true
+  error.value = ''
+  try {
+    const res = await api.setSkillVars(form.name, parseVars(form.varsText))
+    form.varKeys = res.var_keys || []
+    form.varsText = form.varKeys.map((k) => `${k}=`).join('\n')
+    notice.value = '变量已保存（密钥已脱敏存储）'
+  } catch (e) {
+    error.value = e.message
+  } finally {
+    form.savingVars = false
+  }
+}
+
+async function removeVar(key) {
+  try {
+    await api.deleteSkillVar(form.name, key)
+    form.varKeys = form.varKeys.filter((k) => k !== key)
+    form.varsText = form.varKeys.map((k) => `${k}=`).join('\n')
+  } catch (e) {
+    error.value = e.message
+  }
+}
+
+async function toggleAllowScripts() {
+  try {
+    const res = await api.setAllowScripts(!allowScripts.value)
+    allowScripts.value = !!res.allow_scripts
   } catch (e) {
     error.value = e.message
   }
@@ -140,6 +199,16 @@ async function onZipPicked(e) {
         每个技能 = 一段 Markdown 指令。Agent 平时只看到技能的名称与描述，需要时调用 <code class="mono">use_skill</code> 拉取完整步骤再执行。
       </p>
 
+      <div class="card scripts-toggle">
+        <div class="st-text">
+          <div class="st-title">允许脚本执行（<code class="mono">run_script</code>）</div>
+          <div class="st-warn">⚠️ 开启后 Agent 可运行技能附带的脚本——以你的权限执行代码，仅对信任的技能开启。技能变量（密钥）只注入脚本环境，不进对话。</div>
+        </div>
+        <button class="switch" :class="{ on: allowScripts }" role="switch" :aria-checked="allowScripts" @click="toggleAllowScripts">
+          <span class="switch-knob" />
+        </button>
+      </div>
+
       <!-- create / edit form -->
       <div v-if="editing" class="card form">
         <h2 class="form-title">{{ editing === 'new' ? '新建技能' : `编辑 ${editing}` }}</h2>
@@ -162,6 +231,25 @@ async function onZipPicked(e) {
             <textarea v-model="form.body" class="textarea mono" rows="12" placeholder="## 步骤&#10;1. ...&#10;2. ...&#10;&#10;## 输出模板&#10;..." />
           </label>
         </div>
+
+        <!-- variables + scripts (existing skills only) -->
+        <div v-if="editing !== 'new'" class="vars-box">
+          <div class="vars-head">变量（密钥脱敏，作为脚本环境变量；值不显示、不进对话）</div>
+          <div v-if="form.varKeys.length" class="var-chips">
+            <span v-for="k in form.varKeys" :key="k" class="badge mono var-chip">
+              {{ k }} <button class="chip-x" title="删除变量" @click="removeVar(k)">✕</button>
+            </span>
+          </div>
+          <textarea v-model="form.varsText" class="textarea mono vars-text" rows="3" placeholder="KEY=VALUE，每行一个；已有变量留空值即保留，填新值则更新&#10;例如：API_TOKEN=sk-xxxx" />
+          <div class="vars-actions">
+            <span v-if="form.scripts.length" class="muted scripts-list mono">脚本：{{ form.scripts.join('、') }}</span>
+            <span v-else class="muted scripts-list">（无脚本；ZIP 导入的技能可附带脚本）</span>
+            <button class="btn btn-mini" @click="saveVars" :disabled="form.savingVars">
+              <span v-if="form.savingVars" class="spinner" /> 保存变量
+            </button>
+          </div>
+        </div>
+
         <div class="form-actions">
           <button class="btn" @click="cancel" :disabled="saving">取消</button>
           <button class="btn btn-primary" @click="submit" :disabled="saving">
@@ -249,6 +337,105 @@ async function onZipPicked(e) {
 }
 .hint code {
   color: var(--primary);
+}
+
+.scripts-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-4);
+  padding: var(--sp-3) var(--sp-4);
+}
+.st-title {
+  font-weight: 600;
+  font-size: 14px;
+}
+.st-warn {
+  font-size: 12px;
+  color: var(--warning);
+  margin-top: 2px;
+}
+.switch {
+  position: relative;
+  flex-shrink: 0;
+  width: 40px;
+  height: 22px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--surface-3);
+  cursor: pointer;
+  padding: 0;
+  transition: background 0.18s ease, border-color 0.18s ease;
+}
+.switch.on {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+.switch-knob {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #fff;
+  transition: transform 0.18s ease;
+}
+.switch.on .switch-knob {
+  transform: translateX(18px);
+}
+
+.vars-box {
+  border-top: 1px solid var(--border);
+  margin-top: var(--sp-4);
+  padding-top: var(--sp-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+.vars-head {
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.var-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-1);
+}
+.var-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.chip-x {
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 11px;
+  padding: 0;
+}
+.chip-x:hover {
+  color: var(--danger);
+}
+.vars-text {
+  width: 100%;
+}
+.vars-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+}
+.scripts-list {
+  font-size: 12px;
+}
+.btn-mini {
+  padding: 2px var(--sp-2);
+  font-size: 12px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
 }
 
 .form {

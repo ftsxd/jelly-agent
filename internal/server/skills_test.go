@@ -45,6 +45,54 @@ func TestSkillsCRUD(t *testing.T) {
 	}
 }
 
+// TestSkillVarsMasked verifies skill variables persist (in config) and that the
+// API never echoes their values — only the key names.
+func TestSkillVarsMasked(t *testing.T) {
+	s := newEmptyServer(t)
+	// Create the skill first so detail works.
+	if w := do(t, s, "POST", "/api/skills", `{"name":"deploy","description":"部署","body":"b","enabled":true}`); w.Code != http.StatusOK {
+		t.Fatalf("create skill: %d", w.Code)
+	}
+	w := do(t, s, "POST", "/api/skills/deploy/vars", `{"vars":{"API_TOKEN":"super-secret-xyz"}}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("set vars status = %d: %s", w.Code, w.Body.String())
+	}
+	if got := s.engine().Config().SkillVars["deploy"]["API_TOKEN"]; got != "super-secret-xyz" {
+		t.Fatalf("var not persisted: %q", got)
+	}
+	// Detail exposes the key, never the value.
+	w = do(t, s, "GET", "/api/skills/deploy", "")
+	body := w.Body.String()
+	if strings.Contains(body, "super-secret-xyz") {
+		t.Fatalf("var value leaked: %s", body)
+	}
+	if !strings.Contains(body, `"var_keys":["API_TOKEN"]`) {
+		t.Fatalf("var key not surfaced: %s", body)
+	}
+	// Delete the var.
+	if w := do(t, s, "DELETE", "/api/skills/deploy/vars/API_TOKEN", ""); w.Code != http.StatusOK {
+		t.Fatalf("delete var: %d", w.Code)
+	}
+	if _, ok := s.engine().Config().SkillVars["deploy"]; ok {
+		t.Fatalf("skill vars not cleaned up after last delete")
+	}
+}
+
+func TestAllowScriptsToggle(t *testing.T) {
+	s := newEmptyServer(t)
+	if s.engine().Config().Skills.AllowScripts {
+		t.Fatal("scripts should be off by default")
+	}
+	w := do(t, s, "POST", "/api/skills/allow-scripts", `{"enabled":true}`)
+	if w.Code != http.StatusOK || !s.engine().Config().Skills.AllowScripts {
+		t.Fatalf("enable failed: code=%d on=%v", w.Code, s.engine().Config().Skills.AllowScripts)
+	}
+	w = do(t, s, "GET", "/api/skills", "")
+	if !strings.Contains(w.Body.String(), `"allow_scripts":true`) {
+		t.Fatalf("list missing allow_scripts: %s", w.Body.String())
+	}
+}
+
 func TestSkillRejectsBadName(t *testing.T) {
 	s := newEmptyServer(t)
 	w := do(t, s, "POST", "/api/skills", `{"name":"bad name","description":"d","body":"b","enabled":true}`)
