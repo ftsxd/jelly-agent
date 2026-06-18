@@ -11,7 +11,8 @@ const notice = ref('')
 
 const editing = ref(false) // false | 'new' | name
 const saving = ref(false)
-const form = reactive({ name: '', type: 'dingtalk', client_id: '', client_secret: '', provider: '', enabled: true })
+const blankSettings = () => ({ wechatpad_url: '', wechatpad_ws: '', admin_key: '', token: '', wxid: '' })
+const form = reactive({ name: '', type: 'dingtalk', client_id: '', client_secret: '', provider: '', enabled: true, settings: blankSettings() })
 
 let poll = null
 
@@ -50,11 +51,14 @@ async function refresh() {
 
 function startNew() {
   editing.value = 'new'
-  Object.assign(form, { name: '', type: 'dingtalk', client_id: '', client_secret: '', provider: '', enabled: true })
+  Object.assign(form, { name: '', type: 'dingtalk', client_id: '', client_secret: '', provider: '', enabled: true, settings: blankSettings() })
 }
 
 function startEdit(b) {
   editing.value = b.name
+  // Prefill non-secret settings; secrets (admin_key/token) stay blank → kept server-side.
+  const s = blankSettings()
+  for (const [k, v] of Object.entries(b.settings || {})) s[k] = v
   Object.assign(form, {
     name: b.name,
     type: b.type || 'dingtalk',
@@ -62,6 +66,7 @@ function startEdit(b) {
     client_secret: '', // never prefilled; blank keeps the stored secret
     provider: b.provider || '',
     enabled: b.enabled,
+    settings: s,
   })
 }
 
@@ -74,14 +79,20 @@ async function submit() {
   error.value = ''
   saving.value = true
   try {
-    const res = await api.savePlatform({
+    const body = {
       name: form.name.trim(),
       type: form.type,
-      client_id: form.client_id.trim(),
-      client_secret: form.client_secret,
       provider: form.provider,
       enabled: form.enabled,
-    })
+    }
+    if (form.type === 'wechatpadpro') {
+      // Only send non-empty settings; blank admin_key/token keeps the stored one.
+      body.settings = Object.fromEntries(Object.entries(form.settings).filter(([, v]) => String(v).trim() !== ''))
+    } else {
+      body.client_id = form.client_id.trim()
+      body.client_secret = form.client_secret
+    }
+    const res = await api.savePlatform(body)
     notice.value = `已保存到 ${res.saved_to}（已热重载）`
     editing.value = false
     await load()
@@ -94,8 +105,13 @@ async function submit() {
 
 async function toggle(b) {
   try {
-    // Empty client_secret keeps the stored one server-side.
-    await api.savePlatform({ name: b.name, type: b.type, client_id: b.client_id || '', client_secret: '', provider: b.provider || '', enabled: !b.enabled })
+    // Empty secrets/settings keep the stored ones server-side.
+    const body = { name: b.name, type: b.type, provider: b.provider || '', enabled: !b.enabled }
+    if (b.type !== 'wechatpadpro') {
+      body.client_id = b.client_id || ''
+      body.client_secret = ''
+    }
+    await api.savePlatform(body)
     await load()
   } catch (e) {
     error.value = e.message
@@ -144,21 +160,47 @@ function stateClass(s) {
           </label>
           <label class="field">
             <span class="label">平台</span>
-            <select v-model="form.type" class="input">
+            <select v-model="form.type" class="input" :disabled="editing !== 'new'">
               <option value="dingtalk">钉钉（Stream 模式）</option>
+              <option value="wechatpadpro">个人微信（WeChatPadPro）</option>
             </select>
           </label>
 
-          <label class="field span2">
-            <span class="label">ClientID（AppKey）*</span>
-            <input v-model="form.client_id" class="input mono" placeholder="dingxxxxxxxxxxxx" />
-          </label>
-          <label class="field span2">
-            <span class="label">
-              ClientSecret（AppSecret）{{ editing === 'new' ? ' *' : '（留空=保留原值）' }}
-            </span>
-            <input v-model="form.client_secret" class="input mono" type="password" :placeholder="editing === 'new' ? '' : '••••••••（已设置）'" />
-          </label>
+          <!-- DingTalk -->
+          <template v-if="form.type === 'dingtalk'">
+            <label class="field span2">
+              <span class="label">ClientID（AppKey）*</span>
+              <input v-model="form.client_id" class="input mono" placeholder="dingxxxxxxxxxxxx" />
+            </label>
+            <label class="field span2">
+              <span class="label">ClientSecret（AppSecret）{{ editing === 'new' ? ' *' : '（留空=保留原值）' }}</span>
+              <input v-model="form.client_secret" class="input mono" type="password" :placeholder="editing === 'new' ? '' : '••••••••（已设置）'" />
+            </label>
+          </template>
+
+          <!-- WeChatPadPro (个人微信) -->
+          <template v-else-if="form.type === 'wechatpadpro'">
+            <div class="warn-bar span2">
+              <Icon name="alert" :size="14" /> 个人微信走第三方协议，违反微信使用条款，有封号风险，建议用小号。需自建 WeChatPadPro 网关。
+            </div>
+            <label class="field span2">
+              <span class="label">WeChatPadPro HTTP 地址 *</span>
+              <input v-model="form.settings.wechatpad_url" class="input mono" placeholder="http://127.0.0.1:9090" />
+            </label>
+            <label class="field span2">
+              <span class="label">WebSocket 地址 *</span>
+              <input v-model="form.settings.wechatpad_ws" class="input mono" placeholder="ws://127.0.0.1:9090/ws" />
+            </label>
+            <label class="field">
+              <span class="label">admin_key{{ editing === 'new' ? ' *' : '（留空=保留）' }}</span>
+              <input v-model="form.settings.admin_key" class="input mono" type="password" :placeholder="editing === 'new' ? '' : '••••••（已设置）'" />
+            </label>
+            <label class="field">
+              <span class="label">token（可选，留空自动生成）</span>
+              <input v-model="form.settings.token" class="input mono" type="password" placeholder="" />
+            </label>
+          </template>
+
           <label class="field span2">
             <span class="label">应答 Provider（留空=默认）</span>
             <select v-model="form.provider" class="input">
@@ -169,7 +211,7 @@ function stateClass(s) {
 
           <label class="check span2">
             <input type="checkbox" v-model="form.enabled" />
-            <span>启用（保存后立即连接钉钉）</span>
+            <span>启用（保存后立即连接{{ form.type === 'wechatpadpro' ? '微信，需扫码登录' : '钉钉' }}）</span>
           </label>
         </div>
 
@@ -193,27 +235,40 @@ function stateClass(s) {
         </div>
       </div>
       <div v-else class="list">
-        <div v-for="b in bots" :key="b.name" class="card bot" :class="{ off: !b.enabled }">
-          <div class="bot-main">
-            <div class="bot-head">
-              <span class="bot-name">{{ b.name }}</span>
-              <span class="badge">{{ b.type }}</span>
-              <span class="badge" :class="stateClass(b.state)">
-                <span class="dot" :class="b.state" /> {{ stateLabel[b.state] || b.state }}
-              </span>
-              <span v-if="!b.enabled" class="badge">已停用</span>
+        <div v-for="b in bots" :key="b.name" class="card bot-card" :class="{ off: !b.enabled }">
+          <div class="bot">
+            <div class="bot-main">
+              <div class="bot-head">
+                <span class="bot-name">{{ b.name }}</span>
+                <span class="badge">{{ b.type }}</span>
+                <span class="badge" :class="stateClass(b.state)">
+                  <span class="dot" :class="b.state" /> {{ stateLabel[b.state] || b.state }}
+                </span>
+                <span v-if="!b.enabled" class="badge">已停用</span>
+              </div>
+              <div class="bot-meta mono dim">
+                <template v-if="b.type === 'wechatpadpro'">
+                  {{ (b.settings && b.settings.wechatpad_url) || '（未设置网关）' }} ·
+                  {{ (b.secret_keys && b.secret_keys.length) ? '密钥已设置' : '密钥未设置' }}
+                </template>
+                <template v-else>
+                  {{ b.client_id || '（未设置 ClientID）' }} · {{ b.has_secret ? '密钥已设置' : '密钥未设置' }}
+                </template>
+                <template v-if="b.provider"> · Provider: {{ b.provider }}</template>
+              </div>
+              <div v-if="b.state === 'error' && b.detail" class="bot-err mono">{{ b.detail }}</div>
             </div>
-            <div class="bot-meta mono dim">
-              {{ b.client_id || '（未设置 ClientID）' }} ·
-              {{ b.has_secret ? '密钥已设置' : '密钥未设置' }}
-              <template v-if="b.provider"> · Provider: {{ b.provider }}</template>
+            <div class="bot-actions">
+              <button class="btn" @click="toggle(b)" :title="b.enabled ? '停用' : '启用'"><Icon name="power" :size="15" /></button>
+              <button class="btn" @click="startEdit(b)" title="编辑"><Icon name="settings" :size="15" /></button>
+              <button class="btn danger" @click="remove(b)" title="删除"><Icon name="trash" :size="15" /></button>
             </div>
-            <div v-if="b.state === 'error' && b.detail" class="bot-err mono">{{ b.detail }}</div>
           </div>
-          <div class="bot-actions">
-            <button class="btn" @click="toggle(b)" :title="b.enabled ? '停用' : '启用'"><Icon name="power" :size="15" /></button>
-            <button class="btn" @click="startEdit(b)" title="编辑"><Icon name="settings" :size="15" /></button>
-            <button class="btn danger" @click="remove(b)" title="删除"><Icon name="trash" :size="15" /></button>
+
+          <!-- WeChat QR login: shown while awaiting scan -->
+          <div v-if="b.qr" class="qr-box">
+            <img :src="b.qr" alt="微信登录二维码" class="qr-img" />
+            <span class="muted">用手机微信「扫一扫」登录；登录后状态会自动变为「在线」。</span>
           </div>
         </div>
       </div>
@@ -302,15 +357,44 @@ function stateClass(s) {
   flex-direction: column;
   gap: var(--sp-2);
 }
-.bot {
+.bot-card {
   padding: var(--sp-3) var(--sp-4);
+}
+.bot-card.off {
+  opacity: 0.6;
+}
+.bot {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: var(--sp-3);
 }
-.bot.off {
-  opacity: 0.6;
+.warn-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  background: rgba(240, 180, 84, 0.12);
+  color: var(--warning);
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+}
+.qr-box {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--sp-2);
+  margin-top: var(--sp-3);
+  padding-top: var(--sp-3);
+  border-top: 1px solid var(--border);
+  font-size: 12px;
+}
+.qr-img {
+  width: 200px;
+  height: 200px;
+  border-radius: var(--radius-sm);
+  background: #fff;
+  padding: var(--sp-2);
 }
 .bot-main {
   min-width: 0;

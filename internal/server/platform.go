@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -100,18 +101,32 @@ func (s *Server) stopBots() {
 // buildBot constructs one bot from its config, wiring a ReplyFunc that runs an
 // engine turn keyed by the conversation.
 func (s *Server) buildBot(pb config.PlatformBot) (platform.Bot, error) {
+	provider := pb.Provider
+	// replyWith builds a ReplyFunc that runs an engine turn under a session id
+	// prefixed per platform (so the same person on different platforms is kept
+	// in separate conversations).
+	replyWith := func(prefix string) platform.ReplyFunc {
+		return func(ctx context.Context, sessionKey, text string) (string, error) {
+			tctx, cancel := context.WithTimeout(ctx, botReplyTimeout)
+			defer cancel()
+			return s.runTurnText(tctx, provider, prefix+sessionKey, text)
+		}
+	}
+
 	switch pb.Type {
 	case "dingtalk":
 		if pb.ClientID == "" || pb.ClientSecret == "" {
 			return nil, fmt.Errorf("dingtalk 需要 client_id 与 client_secret")
 		}
-		provider := pb.Provider
-		reply := func(ctx context.Context, sessionKey, text string) (string, error) {
-			tctx, cancel := context.WithTimeout(ctx, botReplyTimeout)
-			defer cancel()
-			return s.runTurnText(tctx, provider, "dingtalk-"+sessionKey, text)
+		return platform.NewDingTalkBot(pb.Name, pb.ClientID, pb.ClientSecret, replyWith("dingtalk-"), s.logf), nil
+	case "wechatpadpro":
+		if pb.Settings["wechatpad_url"] == "" || pb.Settings["wechatpad_ws"] == "" {
+			return nil, fmt.Errorf("wechatpadpro 需要 wechatpad_url 与 wechatpad_ws")
 		}
-		return platform.NewDingTalkBot(pb.Name, pb.ClientID, pb.ClientSecret, reply, s.logf), nil
+		if pb.Settings["admin_key"] == "" && pb.Settings["token"] == "" {
+			return nil, fmt.Errorf("wechatpadpro 需要 admin_key 或 token")
+		}
+		return platform.NewWeChatPadProBot(pb.Name, pb.Settings, replyWith("wechat-"), s.logf), nil
 	default:
 		return nil, fmt.Errorf("不支持的平台类型 %q", pb.Type)
 	}
@@ -177,38 +192,44 @@ func (s *Server) runTurnText(ctx context.Context, provider, sessionID, text stri
 
 // platformInput is the body for POST /api/platforms (create or update).
 type platformInput struct {
-	Name         string `json:"name"`
-	Type         string `json:"type"`
-	ClientID     string `json:"client_id"`
-	ClientSecret string `json:"client_secret"` // empty on update keeps the stored secret
-	Provider     string `json:"provider"`
-	Enabled      bool   `json:"enabled"`
+	Name         string            `json:"name"`
+	Type         string            `json:"type"`
+	ClientID     string            `json:"client_id"`
+	ClientSecret string            `json:"client_secret"`    // empty on update keeps the stored secret
+	Provider     string            `json:"provider"`
+	Enabled      bool              `json:"enabled"`
+	Settings     map[string]string `json:"settings,omitempty"` // platform-specific (wechatpadpro)
 }
 
 // handleListPlatforms lists configured platform bots with their live connection
 // state. The client secret is never sent — only whether one is set.
 func (s *Server) handleListPlatforms(w http.ResponseWriter, _ *http.Request) {
 	type platformDTO struct {
-		Name      string `json:"name"`
-		Type      string `json:"type"`
-		ClientID  string `json:"client_id,omitempty"`
-		HasSecret bool   `json:"has_secret"`
-		Provider  string `json:"provider,omitempty"`
-		Enabled   bool   `json:"enabled"`
-		State     string `json:"state"`            // online | connecting | error | stopped
-		Detail    string `json:"detail,omitempty"` // error message when state == error
+		Name       string            `json:"name"`
+		Type       string            `json:"type"`
+		ClientID   string            `json:"client_id,omitempty"`
+		HasSecret  bool              `json:"has_secret"`
+		Provider   string            `json:"provider,omitempty"`
+		Enabled    bool              `json:"enabled"`
+		Settings   map[string]string `json:"settings,omitempty"`    // non-secret platform settings
+		SecretKeys []string          `json:"secret_keys,omitempty"` // secret settings that are set
+		State      string            `json:"state"`                 // online | connecting | error | stopped
+		Detail     string            `json:"detail,omitempty"`      // error message when state == error
+		QR         string            `json:"qr,omitempty"`          // login QR (data URI) while awaiting scan
 	}
 	bots := s.engine().Config().Platforms
 	statuses := s.botStatuses()
 	out := make([]platformDTO, 0, len(bots))
 	for _, b := range bots {
+		visible, secretKeys := splitSettings(b.Settings)
 		d := platformDTO{
 			Name: b.Name, Type: b.Type, ClientID: b.ClientID,
 			HasSecret: b.ClientSecret != "", Provider: b.Provider,
-			Enabled: b.Enabled, State: string(platform.StateStopped),
+			Enabled: b.Enabled, Settings: visible, SecretKeys: secretKeys,
+			State: string(platform.StateStopped),
 		}
 		if st, ok := statuses[b.Name]; ok {
-			d.State, d.Detail = string(st.State), st.Detail
+			d.State, d.Detail, d.QR = string(st.State), st.Detail, st.QR
 		}
 		out = append(out, d)
 	}
@@ -233,8 +254,8 @@ func (s *Server) handleSavePlatform(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "name 不能为空")
 		return
 	}
-	if typ != "dingtalk" {
-		writeErr(w, http.StatusBadRequest, "目前仅支持 dingtalk")
+	if typ != "dingtalk" && typ != "wechatpadpro" {
+		writeErr(w, http.StatusBadRequest, "目前支持 dingtalk / wechatpadpro")
 		return
 	}
 
@@ -249,23 +270,36 @@ func (s *Server) handleSavePlatform(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	bot := config.PlatformBot{
-		Name: name, Type: typ,
-		ClientID:     strings.TrimSpace(in.ClientID),
-		ClientSecret: in.ClientSecret,
-		Provider:     strings.TrimSpace(in.Provider),
-		Enabled:      in.Enabled,
+	idx := indexOfPlatform(raw.Platforms, name)
+	var existing config.PlatformBot
+	if idx >= 0 {
+		existing = raw.Platforms[idx]
 	}
-	if idx := indexOfPlatform(raw.Platforms, name); idx >= 0 {
+	bot := config.PlatformBot{Name: name, Type: typ, Provider: strings.TrimSpace(in.Provider), Enabled: in.Enabled}
+
+	switch typ {
+	case "dingtalk":
+		bot.ClientID = strings.TrimSpace(in.ClientID)
+		bot.ClientSecret = in.ClientSecret
 		if strings.TrimSpace(bot.ClientSecret) == "" {
-			bot.ClientSecret = raw.Platforms[idx].ClientSecret // keep stored secret
+			bot.ClientSecret = existing.ClientSecret // keep stored secret
 		}
-		raw.Platforms[idx] = bot
-	} else {
-		if bot.ClientID == "" || strings.TrimSpace(bot.ClientSecret) == "" {
+		if idx < 0 && (bot.ClientID == "" || strings.TrimSpace(bot.ClientSecret) == "") {
 			writeErr(w, http.StatusBadRequest, "新建钉钉机器人需填写 client_id 与 client_secret")
 			return
 		}
+	case "wechatpadpro":
+		// Empty submitted values keep the stored ones (secrets survive edits).
+		bot.Settings = mergeSecrets(existing.Settings, in.Settings)
+		if bot.Settings["wechatpad_url"] == "" || bot.Settings["wechatpad_ws"] == "" || (bot.Settings["admin_key"] == "" && bot.Settings["token"] == "") {
+			writeErr(w, http.StatusBadRequest, "微信需填写 wechatpad_url、wechatpad_ws 与 admin_key（或 token）")
+			return
+		}
+	}
+
+	if idx >= 0 {
+		raw.Platforms[idx] = bot
+	} else {
 		raw.Platforms = append(raw.Platforms, bot)
 	}
 
@@ -302,6 +336,31 @@ func (s *Server) handleDeletePlatform(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "saved_to": path})
+}
+
+// splitSettings separates platform settings into values safe to echo back
+// (url/ws/wxid) and the names of secret-ish keys (admin_key/token) that are set
+// — so the API can show what's configured without ever returning a secret.
+func splitSettings(m map[string]string) (visible map[string]string, secretKeys []string) {
+	for k, v := range m {
+		if isSecretSettingKey(k) {
+			if strings.TrimSpace(v) != "" {
+				secretKeys = append(secretKeys, k)
+			}
+			continue
+		}
+		if visible == nil {
+			visible = map[string]string{}
+		}
+		visible[k] = v
+	}
+	sort.Strings(secretKeys)
+	return visible, secretKeys
+}
+
+func isSecretSettingKey(k string) bool {
+	k = strings.ToLower(k)
+	return strings.Contains(k, "key") || strings.Contains(k, "secret") || strings.Contains(k, "token")
 }
 
 func indexOfPlatform(ps []config.PlatformBot, name string) int {

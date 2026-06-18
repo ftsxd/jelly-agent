@@ -87,9 +87,13 @@ Agent 维护两份 markdown 长期记忆，每轮对话自动拼进 system promp
 
 配置（Provider / MCP / 消息绑定）写入 `configs/config.yaml` 或 `~/.jelly-agent/config.yaml`（`0600`）；API Key 与各类密钥脱敏展示，编辑时留空即保留原值，`${ENV}` 引用不会被改写成明文。直接编辑该文件也会被服务器监听并热重载，无需重启。
 
-## 消息绑定（钉钉）
+## 消息绑定
 
-把钉钉作为消息入口接入同一套 Agent（含记忆 / 工具 / MCP）：在钉钉里 @机器人 发消息，jelly-agent 应答并回到钉钉。采用钉钉官方 **Stream 模式（出站 WebSocket）**，**无需公网 URL / 域名 / IP**，纯本地单二进制即可用。
+把外部聊天平台接入同一套 Agent（含记忆 / 工具 / MCP）。已支持**钉钉**与**个人微信**，均**无需公网**，纯本地即可用。会话键 `"<平台>-<会话ID>"` 持久化，跨消息保留多轮上下文。
+
+### 钉钉
+
+在钉钉里 @机器人 发消息，jelly-agent 应答并回到钉钉。采用钉钉官方 **Stream 模式（出站 WebSocket）**，**无需公网 URL / 域名 / IP**。
 
 接入步骤：
 1. 钉钉开放平台建「企业内部应用」→ 机器人，开启 **Stream 模式**，拿到 ClientID（AppKey）与 ClientSecret（AppSecret）。
@@ -108,7 +112,33 @@ platforms:
     provider: ""   # 留空=默认 Provider
 ```
 
-> 微信（企业微信 / 公众号）需公网回调地址，列入后续批次。
+### 个人微信（WeChatPadPro）
+
+> ⚠️ **风险提示**：个人微信自动化走第三方 iPad 协议（参考 AstrBot/LangBot），**违反微信使用条款，有封号风险**，强烈建议用小号。
+
+个人微信无官方协议，需自建第三方协议网关 **WeChatPadPro**（gewechat 已停更）。jelly-agent 连接它的 HTTP + WebSocket，**纯本地、无需公网**；当前支持**文本**收发（媒体后续）。
+
+接入步骤：
+1. 用 Docker 自建 [WeChatPadPro](https://github.com/WeChatPadPro/WeChatPadPro)，记下其 HTTP 地址（如 `http://127.0.0.1:9090`）、WebSocket 地址与 `admin_key`。
+2. `jelly serve` → 「消息绑定」页 → 新建「个人微信（WeChatPadPro）」，填 `wechatpad_url` / `wechatpad_ws` / `admin_key` 并启用。
+3. 页面出现**登录二维码** → 手机微信「扫一扫」登录 → 状态徽标变「在线」。
+4. 给该微信发消息（群里需 @机器人）即可；会话键 `"wechat-" + 微信会话ID`。
+
+配置段示例：
+
+```yaml
+platforms:
+  - name: my-wechat
+    type: wechatpadpro
+    enabled: true
+    settings:
+      wechatpad_url: http://127.0.0.1:9090
+      wechatpad_ws: ws://127.0.0.1:9090/ws
+      admin_key: ${WECHATPAD_ADMIN_KEY}
+    provider: ""   # 留空=默认 Provider
+```
+
+> 企业微信 / 公众号（需公网回调）列入后续批次。
 
 ```bash
 # 生产：先构建前端，再编译进二进制，单文件部署

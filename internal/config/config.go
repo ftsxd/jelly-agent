@@ -55,11 +55,16 @@ type MCPServer struct {
 // AppKey/AppSecret. Provider selects which LLM to answer with (empty = default).
 type PlatformBot struct {
 	Name         string `mapstructure:"name" yaml:"name"`
-	Type         string `mapstructure:"type" yaml:"type"` // "dingtalk"
+	Type         string `mapstructure:"type" yaml:"type"` // "dingtalk" | "wechatpadpro"
 	Enabled      bool   `mapstructure:"enabled" yaml:"enabled"`
-	ClientID     string `mapstructure:"client_id" yaml:"client_id,omitempty"`
-	ClientSecret string `mapstructure:"client_secret" yaml:"client_secret,omitempty"`
+	ClientID     string `mapstructure:"client_id" yaml:"client_id,omitempty"`         // dingtalk AppKey
+	ClientSecret string `mapstructure:"client_secret" yaml:"client_secret,omitempty"` // dingtalk AppSecret
 	Provider     string `mapstructure:"provider" yaml:"provider,omitempty"`
+
+	// Settings carries platform-specific configuration that doesn't fit the
+	// common fields. WeChatPadPro (个人微信) uses it for wechatpad_url,
+	// wechatpad_ws, admin_key, token, wxid. Secret-ish keys are masked by the API.
+	Settings map[string]string `mapstructure:"settings" yaml:"settings,omitempty"`
 }
 
 // Memory configures the memory subsystem (PLAN §10.5): L1 core memory

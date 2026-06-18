@@ -31,6 +31,7 @@ type Status struct {
 	Type   string `json:"type"`
 	State  State  `json:"state"`
 	Detail string `json:"detail,omitempty"` // error message when State == StateError
+	QR     string `json:"qr,omitempty"`     // login QR as a data: image URI, set while awaiting scan
 }
 
 // Bot is a running platform connection. Start connects and begins receiving,
