@@ -6,6 +6,7 @@
   "description": "jelly-agent web dashboard (Vue 3 + Vite), embedded into the Go binary",
   "scripts": {
     "dev": "vite",
+    "prebuild": "find dist -mindepth 1 ! -name .gitkeep -delete",
     "build": "vite build",
     "preview": "vite preview"
   },

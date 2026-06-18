@@ -10,7 +10,8 @@ export default defineConfig({
   build: {
     outDir: 'dist',
     // Keep dist/.gitkeep (committed so `//go:embed all:dist` compiles on a fresh
-    // clone). emptyOutDir would delete it, so we clear stale assets ourselves.
+    // clone). emptyOutDir would delete it; instead the `prebuild` npm script
+    // clears stale hashed assets while preserving .gitkeep before each build.
     emptyOutDir: false,
   },
   server: {

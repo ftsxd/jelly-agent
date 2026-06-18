@@ -50,16 +50,16 @@ type MCPServer struct {
 // Memory configures the memory subsystem (PLAN §10.5): L1 core memory
 // (always on) and L2 session search (opt-in, FTS5-backed).
 type Memory struct {
-	Core   MemoryCore   `mapstructure:"core" yaml:"core"`
-	Search MemorySearch `mapstructure:"search" yaml:"search"`
+	Core   MemoryCore   `mapstructure:"core" yaml:"core,omitempty"`
+	Search MemorySearch `mapstructure:"search" yaml:"search,omitempty"`
 }
 
 // MemoryCore configures L1 core memory. Zero values are fine: the memory layer
 // substitutes its defaults (~/.jelly-agent/memory, 800/500 token budgets).
 type MemoryCore struct {
-	Dir                string `mapstructure:"dir" yaml:"dir"`
-	MemoryBudgetTokens int    `mapstructure:"memory_budget_tokens" yaml:"memory_budget_tokens"`
-	UserBudgetTokens   int    `mapstructure:"user_budget_tokens" yaml:"user_budget_tokens"`
+	Dir                string `mapstructure:"dir" yaml:"dir,omitempty"`
+	MemoryBudgetTokens int    `mapstructure:"memory_budget_tokens" yaml:"memory_budget_tokens,omitempty"`
+	UserBudgetTokens   int    `mapstructure:"user_budget_tokens" yaml:"user_budget_tokens,omitempty"`
 }
 
 // MemorySearch configures L2 session search (PLAN §10.5). Disabled by default;
@@ -69,10 +69,10 @@ type MemoryCore struct {
 // (later). Summarize is reserved — model-side compression of results is not
 // yet wired.
 type MemorySearch struct {
-	Enabled   bool   `mapstructure:"enabled" yaml:"enabled"`
-	Backend   string `mapstructure:"backend" yaml:"backend"`
-	TopK      int    `mapstructure:"top_k" yaml:"top_k"`
-	Summarize bool   `mapstructure:"summarize" yaml:"summarize"`
+	Enabled   bool   `mapstructure:"enabled" yaml:"enabled,omitempty"`
+	Backend   string `mapstructure:"backend" yaml:"backend,omitempty"`
+	TopK      int    `mapstructure:"top_k" yaml:"top_k,omitempty"`
+	Summarize bool   `mapstructure:"summarize" yaml:"summarize,omitempty"`
 }
 
 // Load reads and parses a YAML config file, expanding ${ENV} references in its
