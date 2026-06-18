@@ -26,7 +26,9 @@ vendor/
 
 # 前端
 web/node_modules/
-web/dist/
+# dist 是构建产物，不入库；保留 .gitkeep 让 //go:embed all:dist 在未构建时也能编译
+web/dist/*
+!web/dist/.gitkeep
 
 # 编辑器 / 系统
 .DS_Store

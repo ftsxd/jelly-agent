@@ -9,26 +9,42 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/spf13/viper"
+	"gopkg.in/yaml.v3"
 )
 
 // Provider is one OpenAI-compatible model endpoint.
 type Provider struct {
 	Name    string `mapstructure:"name" yaml:"name"`
-	BaseURL string `mapstructure:"base_url" yaml:"base_url"`
-	APIKey  string `mapstructure:"api_key" yaml:"api_key"`
-	Model   string `mapstructure:"model" yaml:"model"`
+	BaseURL string `mapstructure:"base_url" yaml:"base_url,omitempty"`
+	APIKey  string `mapstructure:"api_key" yaml:"api_key,omitempty"`
+	Model   string `mapstructure:"model" yaml:"model,omitempty"`
 }
 
 // Config is the top-level jelly-agent configuration.
 type Config struct {
-	DefaultProvider string     `mapstructure:"default_provider" yaml:"default_provider"`
-	Providers       []Provider `mapstructure:"providers" yaml:"providers"`
-	Memory          Memory     `mapstructure:"memory" yaml:"memory"`
+	DefaultProvider string      `mapstructure:"default_provider" yaml:"default_provider"`
+	Providers       []Provider  `mapstructure:"providers" yaml:"providers"`
+	Memory          Memory      `mapstructure:"memory" yaml:"memory"`
+	MCP             []MCPServer `mapstructure:"mcp" yaml:"mcp,omitempty"`
 
 	// SourcePath records where the config came from ("(env)" for the env
 	// fallback, "" when nothing was found). Not persisted.
 	SourcePath string `mapstructure:"-" yaml:"-"`
+}
+
+// MCPServer is one Model Context Protocol server whose tools are merged into the
+// agent's tool set. Transport selects how to reach it: "stdio" launches a local
+// command and talks over its stdin/stdout; "http" (streamable) and "sse" connect
+// to a remote endpoint. Disabled servers are kept in config but not loaded.
+type MCPServer struct {
+	Name      string            `mapstructure:"name" yaml:"name"`
+	Transport string            `mapstructure:"transport" yaml:"transport"`
+	Command   string            `mapstructure:"command" yaml:"command,omitempty"`
+	Args      []string          `mapstructure:"args" yaml:"args,omitempty"`
+	Env       map[string]string `mapstructure:"env" yaml:"env,omitempty"`
+	URL       string            `mapstructure:"url" yaml:"url,omitempty"`
+	Headers   map[string]string `mapstructure:"headers" yaml:"headers,omitempty"`
+	Enabled   bool              `mapstructure:"enabled" yaml:"enabled"`
 }
 
 // Memory configures the memory subsystem (PLAN §10.5): L1 core memory
@@ -60,25 +76,74 @@ type MemorySearch struct {
 }
 
 // Load reads and parses a YAML config file, expanding ${ENV} references in its
-// contents before parsing.
+// contents before parsing. This is what the runtime uses (keys are real).
 func Load(path string) (*Config, error) {
+	return load(path, true)
+}
+
+// LoadRaw parses a config file WITHOUT ${ENV} expansion, preserving references
+// like ${DEEPSEEK_API_KEY} verbatim. It is the basis for editing/saving config
+// from the web UI so an unrelated edit never bakes a secret into the file.
+func LoadRaw(path string) (*Config, error) {
+	return load(path, false)
+}
+
+func load(path string, expand bool) (*Config, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
-	expanded := os.ExpandEnv(string(raw))
-
-	v := viper.New()
-	v.SetConfigType("yaml")
-	if err := v.ReadConfig(strings.NewReader(expanded)); err != nil {
-		return nil, fmt.Errorf("parse %s: %w", path, err)
+	content := raw
+	if expand {
+		content = []byte(os.ExpandEnv(string(raw)))
 	}
+
+	// yaml.v3 (not viper) so map keys keep their case — viper lowercases them,
+	// which would corrupt case-sensitive MCP env var names like GITHUB_TOKEN.
 	var c Config
-	if err := v.Unmarshal(&c); err != nil {
-		return nil, fmt.Errorf("unmarshal %s: %w", path, err)
+	if err := yaml.Unmarshal(content, &c); err != nil {
+		return nil, fmt.Errorf("parse %s: %w", path, err)
 	}
 	c.SourcePath = path
 	return &c, nil
+}
+
+// Save writes the config as YAML to path (0600 — it may hold API keys),
+// creating parent directories. The memory section is omitted when empty so a
+// freshly-created file stays minimal.
+func Save(c *Config, path string) error {
+	type payload struct {
+		DefaultProvider string      `yaml:"default_provider,omitempty"`
+		Providers       []Provider  `yaml:"providers"`
+		Memory          *Memory     `yaml:"memory,omitempty"`
+		MCP             []MCPServer `yaml:"mcp,omitempty"`
+	}
+	p := payload{DefaultProvider: c.DefaultProvider, Providers: c.Providers, MCP: c.MCP}
+	if c.Memory != (Memory{}) {
+		m := c.Memory
+		p.Memory = &m
+	}
+	out, err := yaml.Marshal(p)
+	if err != nil {
+		return fmt.Errorf("marshal config: %w", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("create config dir: %w", err)
+	}
+	if err := os.WriteFile(path, out, 0o600); err != nil {
+		return fmt.Errorf("write config %s: %w", path, err)
+	}
+	return nil
+}
+
+// DefaultUserConfigPath is where the web UI writes config when none exists yet:
+// ~/.jelly-agent/config.yaml (always resolvable, no cwd dependency).
+func DefaultUserConfigPath() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve home dir: %w", err)
+	}
+	return filepath.Join(home, ".jelly-agent", "config.yaml"), nil
 }
 
 // LoadOrEnv resolves a config file (explicit path, $JELLY_CONFIG, then default

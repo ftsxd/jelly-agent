@@ -26,19 +26,19 @@ func newAgentRunCmd() *cobra.Command {
 		Short: "运行 Agent（默认进入交互式多轮；--once 单次问答后退出）",
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			reg, err := loadRegistry()
+			eng, err := loadEngine()
 			if err != nil {
 				return err
 			}
-			a, prov, search, err := buildAgent(reg, provider)
+			a, prov, _, search, err := eng.BuildAgent(provider)
 			if err != nil {
 				return err
 			}
 
 			if question := strings.TrimSpace(once); question != "" {
-				return runOnce(cmd.Context(), a, prov, search, newSessionID(), question)
+				return runOnce(cmd.Context(), eng, a, prov, search, newSessionID(), question)
 			}
-			return runInteractive(cmd.Context(), a, prov, search)
+			return runInteractive(cmd.Context(), eng, a, prov, search)
 		},
 	}
 	cmd.Flags().StringVarP(&provider, "provider", "p", "", "使用的 Provider 名称（默认用配置的 default_provider）")

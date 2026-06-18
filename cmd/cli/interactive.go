@@ -12,17 +12,18 @@ import (
 	adksession "google.golang.org/adk/session"
 
 	"github.com/jelly-agent/jelly-agent/internal/config"
+	"github.com/jelly-agent/jelly-agent/internal/engine"
 	"github.com/jelly-agent/jelly-agent/internal/memory"
 )
 
 // runInteractive starts a multi-turn REPL on a single persisted session.
 // Inline commands (prefixed with /) control the session; Ctrl+D exits. When
 // search is non-nil each turn is indexed into L2 memory for later retrieval.
-func runInteractive(ctx context.Context, a agent.Agent, prov config.Provider, search *memory.Search) error {
+func runInteractive(ctx context.Context, eng *engine.Engine, a agent.Agent, prov config.Provider, search *memory.Search) error {
 	if search != nil {
 		defer search.Close()
 	}
-	r, svc, err := newRunner(a, search)
+	r, svc, err := eng.NewRunner(a, search)
 	if err != nil {
 		return err
 	}

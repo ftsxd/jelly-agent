@@ -6,98 +6,22 @@ import (
 	"os"
 
 	"google.golang.org/adk/agent"
-	"google.golang.org/adk/agent/llmagent"
 	"google.golang.org/adk/runner"
 	adksession "google.golang.org/adk/session"
 	"google.golang.org/genai"
 
 	"github.com/jelly-agent/jelly-agent/internal/config"
+	"github.com/jelly-agent/jelly-agent/internal/engine"
 	"github.com/jelly-agent/jelly-agent/internal/memory"
-	jellymodel "github.com/jelly-agent/jelly-agent/internal/model"
-	jellysession "github.com/jelly-agent/jelly-agent/internal/session"
-	jellytool "github.com/jelly-agent/jelly-agent/internal/tool"
 )
-
-const (
-	appName = "jelly-agent"
-	userID  = "local-user"
-
-	// rootInstruction is the static base instruction. L1 core memory is
-	// prepended to it each turn via the InstructionProvider (PLAN §10.1).
-	rootInstruction = "你是 jelly-agent，一个用 Go + ADK-Go 构建的助手。" +
-		"需要实时或外部信息时调用 web_search 工具，再用中文简洁作答。" +
-		"当用户表达偏好、身份或重要约定，值得跨会话记住时，调用 remember 工具；" +
-		"信息过时或用户要求忘记时，调用 forget。不要重复记录上文「长期记忆」中已有的内容。"
-)
-
-// buildAgent constructs the root agent for the given provider, returning the
-// resolved provider for display and the L2 search service (nil when memory
-// search is disabled) for the runner to wire and turns to index into. The
-// agent's instruction is generated per turn so it always reflects the latest
-// core-memory files.
-func buildAgent(reg *jellymodel.Registry, providerName string) (agent.Agent, config.Provider, *memory.Search, error) {
-	llm, prov, err := reg.Get(providerName)
-	if err != nil {
-		return nil, config.Provider{}, nil, err
-	}
-
-	core, search, err := loadMemorySetup()
-	if err != nil {
-		return nil, prov, nil, fmt.Errorf("init memory: %w", err)
-	}
-
-	tools, err := jellytool.Builtins(core, search != nil)
-	if err != nil {
-		return nil, prov, nil, fmt.Errorf("build tools: %w", err)
-	}
-
-	a, err := llmagent.New(llmagent.Config{
-		Name:        "root",
-		Model:       llm,
-		Description: "jelly-agent root agent with web search and core memory.",
-		// InstructionProvider (not Instruction) so MEMORY.md/USER.md are read
-		// fresh each turn. Note: ADK then skips {} session-state substitution.
-		InstructionProvider: func(agent.ReadonlyContext) (string, error) {
-			return core.Render(rootInstruction), nil
-		},
-		Tools: tools,
-	})
-	if err != nil {
-		return nil, prov, nil, fmt.Errorf("create agent: %w", err)
-	}
-	return a, prov, search, nil
-}
-
-// newRunner builds a runner backed by the persistent SQLite session store. When
-// search is non-nil it is wired as the runner's MemoryService, backing the
-// load_memory tool (PLAN §10.1).
-func newRunner(a agent.Agent, search *memory.Search) (*runner.Runner, adksession.Service, error) {
-	svc, err := jellysession.NewSQLite("")
-	if err != nil {
-		return nil, nil, err
-	}
-	cfg := runner.Config{
-		AppName:        appName,
-		Agent:          a,
-		SessionService: svc,
-	}
-	if search != nil {
-		cfg.MemoryService = search
-	}
-	r, err := runner.New(cfg)
-	if err != nil {
-		return nil, nil, fmt.Errorf("create runner: %w", err)
-	}
-	return r, svc, nil
-}
 
 // runOnce runs a single question in a fresh persisted session, then indexes it
 // for future L2 search.
-func runOnce(ctx context.Context, a agent.Agent, prov config.Provider, search *memory.Search, sessionID, question string) error {
+func runOnce(ctx context.Context, eng *engine.Engine, a agent.Agent, prov config.Provider, search *memory.Search, sessionID, question string) error {
 	if search != nil {
 		defer search.Close()
 	}
-	r, svc, err := newRunner(a, search)
+	r, svc, err := eng.NewRunner(a, search)
 	if err != nil {
 		return err
 	}

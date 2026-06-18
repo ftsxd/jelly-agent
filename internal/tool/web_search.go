@@ -56,26 +56,34 @@ func NewWebSearchTool() (adktool.Tool, error) {
 			Description: "搜索互联网获取实时信息。传入查询关键词，返回若干条标题/摘要/链接。",
 		},
 		func(tc adktool.Context, args WebSearchArgs) (WebSearchResult, error) {
-			query := strings.TrimSpace(args.Query)
-			if query == "" {
-				return WebSearchResult{}, fmt.Errorf("query 不能为空")
-			}
-			max := args.MaxNum
-			switch {
-			case max <= 0:
-				max = defaultMaxResults
-			case max > maxSearchResults:
-				max = maxSearchResults
-			}
 			// tc is itself a context.Context (via ADK ReadonlyContext), so the
 			// tool's HTTP request is cancelled when the upstream call / SSE
 			// connection is cancelled.
-			if key := os.Getenv("TAVILY_API_KEY"); key != "" {
-				return tavilySearch(tc, key, query, max)
-			}
-			return duckDuckGoSearch(tc, query, max)
+			return Search(tc, args.Query, args.MaxNum)
 		},
 	)
+}
+
+// Search runs a web search with the same backend selection as the web_search
+// tool (Tavily when TAVILY_API_KEY is set, else key-free DuckDuckGo). It is
+// exported so the web server's tool-test endpoint can exercise the tool without
+// going through the model. A non-positive max uses the default; an oversized max
+// is clamped.
+func Search(ctx context.Context, query string, max int) (WebSearchResult, error) {
+	query = strings.TrimSpace(query)
+	if query == "" {
+		return WebSearchResult{}, fmt.Errorf("query 不能为空")
+	}
+	switch {
+	case max <= 0:
+		max = defaultMaxResults
+	case max > maxSearchResults:
+		max = maxSearchResults
+	}
+	if key := os.Getenv("TAVILY_API_KEY"); key != "" {
+		return tavilySearch(ctx, key, query, max)
+	}
+	return duckDuckGoSearch(ctx, query, max)
 }
 
 // tavilySearch queries the Tavily search API.
