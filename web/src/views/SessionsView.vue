@@ -1,15 +1,30 @@
 <script setup>
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import Icon from '../components/Icon.vue'
 import { api } from '../api'
 
-const sessions = ref([])
+const PAGE = 50 // sessions per page
+
+const sessions = ref([]) // accumulated across loaded pages
+const total = ref(0)
+const hasMore = ref(false)
 const loading = ref(true)
+const loadingMore = ref(false)
 const error = ref('')
 
-const selected = ref(null) // session id
+const selected = ref(null) // session id of the open detail
 const detail = ref(null)
 const detailLoading = ref(false)
+
+const checked = ref([]) // session ids ticked for batch delete
+const deleting = ref(false)
+
+// allLoadedChecked: every currently-loaded row is ticked (drives 全选 state and
+// the "select all N across pages" affordance).
+const allLoadedChecked = computed(() => sessions.value.length > 0 && sessions.value.every((s) => checked.value.includes(s.id)))
+const someChecked = computed(() => checked.value.length > 0 && !allLoadedChecked.value)
+// More matching rows exist than are loaded/ticked — offer to select them all.
+const canSelectAll = computed(() => allLoadedChecked.value && checked.value.length < total.value)
 
 onMounted(load)
 
@@ -17,12 +32,69 @@ async function load() {
   loading.value = true
   error.value = ''
   try {
-    sessions.value = (await api.sessions()).sessions
+    const res = await api.sessions(PAGE, 0)
+    sessions.value = res.sessions
+    total.value = res.total ?? res.sessions.length
+    hasMore.value = !!res.has_more
+    // Drop ticks for sessions that no longer exist after a reload.
+    const ids = new Set(sessions.value.map((s) => s.id))
+    checked.value = checked.value.filter((id) => ids.has(id))
     if (sessions.value.length && !selected.value) open(sessions.value[0].id)
   } catch (e) {
     error.value = e.message
   } finally {
     loading.value = false
+  }
+}
+
+async function loadMore() {
+  if (loadingMore.value || !hasMore.value) return
+  loadingMore.value = true
+  error.value = ''
+  try {
+    const res = await api.sessions(PAGE, sessions.value.length)
+    const known = new Set(sessions.value.map((s) => s.id))
+    sessions.value.push(...res.sessions.filter((s) => !known.has(s.id)))
+    total.value = res.total ?? total.value
+    hasMore.value = !!res.has_more
+  } catch (e) {
+    error.value = e.message
+  } finally {
+    loadingMore.value = false
+  }
+}
+
+function toggleAll() {
+  // Toggle the loaded rows; clears any prior "select all matching" superset too.
+  checked.value = allLoadedChecked.value ? [] : sessions.value.map((s) => s.id)
+}
+
+async function selectAllMatching() {
+  try {
+    checked.value = (await api.sessionIds()).ids
+  } catch (e) {
+    error.value = e.message
+  }
+}
+
+async function removeChecked() {
+  if (!checked.value.length || deleting.value) return
+  if (!confirm(`确认删除选中的 ${checked.value.length} 个会话？此操作不可恢复。`)) return
+  deleting.value = true
+  error.value = ''
+  try {
+    const ids = [...checked.value]
+    await api.deleteSessions(ids)
+    if (selected.value && ids.includes(selected.value)) {
+      selected.value = null
+      detail.value = null
+    }
+    checked.value = []
+    await load()
+  } catch (e) {
+    error.value = e.message
+  } finally {
+    deleting.value = false
   }
 }
 
@@ -47,6 +119,7 @@ async function remove(s) {
       selected.value = null
       detail.value = null
     }
+    checked.value = checked.value.filter((id) => id !== s.id)
     await load()
   } catch (e) {
     error.value = e.message
@@ -77,6 +150,29 @@ function fmtArgs(args) {
 
     <div class="body">
       <aside class="list">
+        <div v-if="sessions.length" class="list-bar">
+          <label class="selall" title="全选本页 / 取消">
+            <input
+              type="checkbox"
+              :checked="allLoadedChecked"
+              :indeterminate.prop="someChecked"
+              @change="toggleAll"
+            />
+            <span>{{ checked.length ? `已选 ${checked.length}` : '全选' }} / {{ total }}</span>
+          </label>
+          <button
+            v-if="checked.length"
+            class="btn btn-danger btn-sm"
+            :disabled="deleting"
+            @click="removeChecked"
+          >
+            <span v-if="deleting" class="spinner" /><Icon v-else name="trash" :size="14" /> 删除选中
+          </button>
+        </div>
+        <div v-if="canSelectAll" class="selectall-bar">
+          已选本页 {{ checked.length }} 个，
+          <button class="link" @click="selectAllMatching">选择全部 {{ total }} 个会话</button>
+        </div>
         <div v-if="loading" class="empty"><span class="spinner" /></div>
         <div v-else-if="error && !sessions.length" class="error-bar"><Icon name="alert" :size="16" /> {{ error }}</div>
         <div v-else-if="!sessions.length" class="empty">
@@ -87,13 +183,21 @@ function fmtArgs(args) {
           v-for="s in sessions"
           :key="s.id"
           class="sess"
-          :class="{ active: s.id === selected }"
+          :class="{ active: s.id === selected, picked: checked.includes(s.id) }"
           role="button"
           tabindex="0"
           @click="open(s.id)"
           @keydown.enter="open(s.id)"
         >
           <div class="sess-top">
+            <input
+              class="pick"
+              type="checkbox"
+              :value="s.id"
+              v-model="checked"
+              title="选择以批量删除"
+              @click.stop
+            />
             <span class="mono sess-id">{{ s.id }}</span>
             <button class="del" title="删除会话" @click.stop="remove(s)"><Icon name="trash" :size="14" /></button>
           </div>
@@ -102,6 +206,9 @@ function fmtArgs(args) {
             <span class="muted time">{{ fmtTime(s.last_update) }}</span>
           </span>
         </div>
+        <button v-if="hasMore" class="loadmore" :disabled="loadingMore" @click="loadMore">
+          <span v-if="loadingMore" class="spinner" /> 加载更多（还有 {{ total - sessions.length }} 个）
+        </button>
       </aside>
 
       <section class="detail">
@@ -170,6 +277,82 @@ function fmtArgs(args) {
   flex-direction: column;
   gap: var(--sp-2);
 }
+.list-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
+  padding: 2px var(--sp-1) var(--sp-2);
+  border-bottom: 1px solid var(--border);
+  margin-bottom: var(--sp-1);
+}
+.selall {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  font-size: 12px;
+  color: var(--text-dim);
+  cursor: pointer;
+  user-select: none;
+}
+.selall input {
+  cursor: pointer;
+}
+.btn-sm {
+  padding: 4px 10px;
+  font-size: 12px;
+}
+.btn-danger {
+  border-color: var(--danger-border, var(--danger));
+  color: var(--danger);
+}
+.btn-danger:hover {
+  background: var(--danger-tint);
+}
+.pick {
+  flex-shrink: 0;
+  cursor: pointer;
+  margin: 0;
+}
+.selectall-bar {
+  padding: var(--sp-2) var(--sp-3);
+  background: var(--accent-tint);
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  color: var(--text-dim);
+  text-align: center;
+}
+.link {
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--accent);
+  cursor: pointer;
+  font: inherit;
+  text-decoration: underline;
+}
+.loadmore {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-2);
+  padding: var(--sp-3);
+  margin-top: var(--sp-1);
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 13px;
+  cursor: pointer;
+}
+.loadmore:hover:not(:disabled) {
+  background: var(--surface-2);
+  color: var(--text);
+}
+.loadmore:disabled {
+  cursor: default;
+  opacity: 0.7;
+}
 .sess {
   display: flex;
   flex-direction: column;
@@ -190,6 +373,9 @@ function fmtArgs(args) {
 .sess.active {
   border-color: var(--primary-border);
   background: var(--primary-tint);
+}
+.sess.picked {
+  border-color: var(--accent);
 }
 .sess-top {
   display: flex;

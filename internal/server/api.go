@@ -1,8 +1,9 @@
 package server
 
 import (
+	"fmt"
 	"net/http"
-	"sort"
+	"strconv"
 	"strings"
 
 	adkmemory "google.golang.org/adk/memory"
@@ -12,6 +13,7 @@ import (
 	"github.com/jelly-agent/jelly-agent/internal/config"
 	"github.com/jelly-agent/jelly-agent/internal/engine"
 	"github.com/jelly-agent/jelly-agent/internal/memory"
+	jellysession "github.com/jelly-agent/jelly-agent/internal/session"
 	jellytool "github.com/jelly-agent/jelly-agent/internal/tool"
 )
 
@@ -92,29 +94,63 @@ type sessionDTO struct {
 	LastUpdate int64  `json:"last_update"` // unix seconds
 }
 
-// handleSessions lists persisted sessions, newest first.
+// handleSessions lists persisted sessions, newest first, with limit/offset
+// pagination. It reads a lightweight projection (id + event count + last update)
+// straight from the store, so listing stays cheap as history grows — and unlike
+// ADK's session.List it reports the real per-session event count.
 func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
-	svc, err := s.engine().NewSessionService()
+	limit := queryInt(r, "limit", 50, 1, 200)
+	offset := queryInt(r, "offset", 0, 0, 1<<30)
+	rows, total, err := jellysession.ListPage("", engine.AppName, engine.UserID, limit, offset)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	resp, err := svc.List(r.Context(), &adksession.ListRequest{AppName: engine.AppName, UserID: engine.UserID})
+	out := make([]sessionDTO, 0, len(rows))
+	for _, m := range rows {
+		out = append(out, sessionDTO{ID: m.ID, Events: m.Events, LastUpdate: m.LastUpdate})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"sessions": out,
+		"total":    total,
+		"limit":    limit,
+		"offset":   offset,
+		"has_more": offset+len(out) < total,
+	})
+}
+
+// handleSessionIDs returns every session id (newest first) for the "select all
+// across pages" action, so batch delete can target the full set without paging.
+func (s *Server) handleSessionIDs(w http.ResponseWriter, _ *http.Request) {
+	ids, err := jellysession.AllIDs("", engine.AppName, engine.UserID)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	out := make([]sessionDTO, 0, len(resp.Sessions))
-	for _, sess := range resp.Sessions {
-		out = append(out, sessionDTO{
-			ID:         sess.ID(),
-			Events:     sess.Events().Len(),
-			LastUpdate: sess.LastUpdateTime().Unix(),
-		})
+	if ids == nil {
+		ids = []string{}
 	}
-	// List order is storage-defined; sort newest-first for the UI.
-	sort.Slice(out, func(i, j int) bool { return out[i].LastUpdate > out[j].LastUpdate })
-	writeJSON(w, http.StatusOK, map[string]any{"sessions": out})
+	writeJSON(w, http.StatusOK, map[string]any{"ids": ids, "total": len(ids)})
+}
+
+// queryInt parses a query parameter as an int, clamping to [min, max] and
+// falling back to def when absent or unparseable.
+func queryInt(r *http.Request, key string, def, min, max int) int {
+	v := strings.TrimSpace(r.URL.Query().Get(key))
+	if v == "" {
+		return def
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		return def
+	}
+	if n < min {
+		return min
+	}
+	if n > max {
+		return max
+	}
+	return n
 }
 
 // eventDTO is one rendered transcript entry.
@@ -178,16 +214,34 @@ func (s *Server) handleSessionDetail(w http.ResponseWriter, r *http.Request) {
 // store. Deleting a missing session is treated as success (idempotent).
 func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	svc, err := s.engine().NewSessionService()
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	if err := svc.Delete(r.Context(), &adksession.DeleteRequest{AppName: engine.AppName, UserID: engine.UserID, SessionID: id}); err != nil {
+	if _, err := jellysession.DeleteSessions("", engine.AppName, engine.UserID, []string{id}); err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// handleDeleteSessions removes several sessions in one request (batch delete on
+// the Sessions page). Deleting a missing session is fine (idempotent); the first
+// hard error aborts and reports how many were already removed.
+func (s *Server) handleDeleteSessions(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		IDs []string `json:"ids"`
+	}
+	if err := decodeJSON(r, &in); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if len(in.IDs) == 0 {
+		writeErr(w, http.StatusBadRequest, "ids 不能为空")
+		return
+	}
+	deleted, err := jellysession.DeleteSessions("", engine.AppName, engine.UserID, in.IDs)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, fmt.Sprintf("批量删除失败（已删除 %d 个）: %v", deleted, err))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "deleted": deleted})
 }
 
 func eventToDTO(ev *adksession.Event) eventDTO {

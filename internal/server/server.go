@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log"
 	"net/http"
 	"os"
 	"sync"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/jelly-agent/jelly-agent/internal/config"
 	"github.com/jelly-agent/jelly-agent/internal/engine"
+	jellysession "github.com/jelly-agent/jelly-agent/internal/session"
 )
 
 // Server wires the engine and embedded frontend assets to an HTTP handler. The
@@ -37,6 +39,12 @@ type Server struct {
 // build rooted at the dir holding index.html (pass nil to serve API only, e.g.
 // during frontend dev with Vite's proxy).
 func New(eng *engine.Engine, staticFS fs.FS) *Server {
+	// One-time cleanup of event rows orphaned by deletes that ran before sessions
+	// and events were removed together (SQLite foreign keys are off, so ADK's
+	// cascade never fired). Best-effort: a fresh/empty DB simply has none.
+	if n, err := jellysession.PurgeOrphanEvents(""); err == nil && n > 0 {
+		log.Printf("[session] 清理孤儿事件 %d 条", n)
+	}
 	return &Server{eng: eng, static: staticFS}
 }
 
@@ -87,7 +95,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/mcp/test", s.handleTestMCP)
 	mux.HandleFunc("DELETE /api/mcp/{name}", s.handleDeleteMCP)
 	mux.HandleFunc("GET /api/sessions", s.handleSessions)
+	mux.HandleFunc("GET /api/sessions/ids", s.handleSessionIDs)
 	mux.HandleFunc("GET /api/sessions/{id}", s.handleSessionDetail)
+	mux.HandleFunc("POST /api/sessions/delete", s.handleDeleteSessions)
 	mux.HandleFunc("DELETE /api/sessions/{id}", s.handleDeleteSession)
 	mux.HandleFunc("GET /api/skills", s.handleListSkills)
 	mux.HandleFunc("GET /api/skills/{name}", s.handleSkillDetail)
