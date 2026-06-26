@@ -135,9 +135,60 @@ func toolParameters(decl *genai.FunctionDeclaration) any {
 		return decl.ParametersJsonSchema
 	}
 	if decl.Parameters != nil {
-		return decl.Parameters
+		return genaiSchemaToJSON(decl.Parameters)
 	}
 	return map[string]any{"type": "object", "properties": map[string]any{}}
+}
+
+// genaiSchemaToJSON converts a genai.Schema into a plain JSON Schema map with
+// lowercase type names ("string", "object", …). genai.Type marshals as
+// uppercase ("STRING", "OBJECT"), which OpenAI-compatible providers reject as
+// invalid JSON Schema (e.g. ADK's load_memory tool). Recurses through
+// properties, items and anyOf. Returns nil for a nil schema.
+func genaiSchemaToJSON(s *genai.Schema) map[string]any {
+	if s == nil {
+		return nil
+	}
+	out := map[string]any{}
+	if s.Type != "" {
+		out["type"] = strings.ToLower(string(s.Type))
+	}
+	if s.Description != "" {
+		out["description"] = s.Description
+	}
+	if s.Format != "" {
+		out["format"] = s.Format
+	}
+	if len(s.Enum) > 0 {
+		out["enum"] = s.Enum
+	}
+	if s.Default != nil {
+		out["default"] = s.Default
+	}
+	if s.Nullable != nil && *s.Nullable {
+		out["nullable"] = true
+	}
+	if len(s.Properties) > 0 {
+		props := make(map[string]any, len(s.Properties))
+		for k, v := range s.Properties {
+			props[k] = genaiSchemaToJSON(v)
+		}
+		out["properties"] = props
+	}
+	if len(s.Required) > 0 {
+		out["required"] = s.Required
+	}
+	if s.Items != nil {
+		out["items"] = genaiSchemaToJSON(s.Items)
+	}
+	if len(s.AnyOf) > 0 {
+		anyOf := make([]any, 0, len(s.AnyOf))
+		for _, v := range s.AnyOf {
+			anyOf = append(anyOf, genaiSchemaToJSON(v))
+		}
+		out["anyOf"] = anyOf
+	}
+	return out
 }
 
 // partsText concatenates the text of all text parts in a genai content.

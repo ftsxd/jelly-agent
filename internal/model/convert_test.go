@@ -164,3 +164,39 @@ func TestToOpenAITools(t *testing.T) {
 		t.Errorf("tool = %+v", tools[0])
 	}
 }
+
+// TestToolParameters_GenaiSchemaLowercased guards the load_memory regression:
+// a tool declared with the genai Schema form (uppercase "OBJECT"/"STRING") must
+// be emitted as lowercase JSON-Schema types, else providers reject it with
+// "STRING is not valid under any of the schemas in 'anyOf'".
+func TestToolParameters_GenaiSchemaLowercased(t *testing.T) {
+	decl := &genai.FunctionDeclaration{
+		Name: "load_memory",
+		Parameters: &genai.Schema{
+			Type: "OBJECT",
+			Properties: map[string]*genai.Schema{
+				"query": {Type: "STRING", Description: "the query"},
+			},
+			Required: []string{"query"},
+		},
+	}
+
+	params, ok := toolParameters(decl).(map[string]any)
+	if !ok {
+		t.Fatalf("want map params, got %T", toolParameters(decl))
+	}
+	if params["type"] != "object" {
+		t.Errorf("top type = %v, want object", params["type"])
+	}
+	props, ok := params["properties"].(map[string]any)
+	if !ok {
+		t.Fatalf("want properties map, got %T", params["properties"])
+	}
+	q, ok := props["query"].(map[string]any)
+	if !ok {
+		t.Fatalf("want query schema map, got %T", props["query"])
+	}
+	if q["type"] != "string" {
+		t.Errorf("query type = %v, want string", q["type"])
+	}
+}
