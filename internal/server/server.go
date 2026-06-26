@@ -17,6 +17,7 @@ import (
 
 	"github.com/jelly-agent/jelly-agent/internal/config"
 	"github.com/jelly-agent/jelly-agent/internal/engine"
+	"github.com/jelly-agent/jelly-agent/internal/memory"
 	jellysession "github.com/jelly-agent/jelly-agent/internal/session"
 )
 
@@ -44,6 +45,11 @@ func New(eng *engine.Engine, staticFS fs.FS) *Server {
 	// cascade never fired). Best-effort: a fresh/empty DB simply has none.
 	if n, err := jellysession.PurgeOrphanEvents(""); err == nil && n > 0 {
 		log.Printf("[session] 清理孤儿事件 %d 条", n)
+	}
+	// Same for the L2 search index: drop rows whose session was deleted before
+	// the index was purged alongside it, so load_memory can't surface them.
+	if n, err := memory.PurgeOrphanIndex(""); err == nil && n > 0 {
+		log.Printf("[memory] 清理孤儿检索索引 %d 条", n)
 	}
 	return &Server{eng: eng, static: staticFS}
 }

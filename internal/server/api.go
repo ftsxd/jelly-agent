@@ -218,6 +218,9 @@ func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	// Also drop the session's L2 search-index rows, else load_memory could still
+	// surface the deleted conversation.
+	_, _ = memory.PurgeSessions("", []string{id})
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
@@ -241,6 +244,8 @@ func (s *Server) handleDeleteSessions(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, fmt.Sprintf("批量删除失败（已删除 %d 个）: %v", deleted, err))
 		return
 	}
+	// Also drop the sessions' L2 search-index rows (see handleDeleteSession).
+	_, _ = memory.PurgeSessions("", in.IDs)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "deleted": deleted})
 }
 
