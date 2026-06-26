@@ -15,7 +15,8 @@
 - **L2 会话检索**（可选）：历史会话文本索引进 SQLite FTS5（与 `state.db` 同库、纯 Go trigram 分词，中英文皆可子串检索），开启后 Agent 获得 `load_memory` 工具按需检索过往对话。
 - **Web 控制台**：`jelly serve` 启动深色主题 Dashboard（Vue 3 + Vite，`go:embed` 进二进制），含对话、工具测试台、会话浏览（可删除）、用量监控、记忆、技能、MCP、消息绑定、Provider 配置等页面。CLI 与 Web 共用 `internal/engine` 同一运行时。
 - **配置热重载**：Web 端增删改 Provider/MCP/消息绑定保存即生效；直接编辑磁盘上的 `config.yaml` 也会被监听到并自动热重载，对话不中断、无需重启。
-- **技能（Skills）**：Claude/Agent Skills 风格的 Markdown 能力包，清单注入 + `use_skill` 按需加载（渐进式披露）；Web 页增删改 + 上传 ZIP 包导入。
+- **技能（Skills）**：Claude/Agent Skills 风格的 Markdown 能力包，清单注入 + `use_skill` 按需加载（渐进式披露）；Web 页增删改 + 上传 ZIP 包导入。技能可附带脚本，经 `run_script` 在**沙箱**中执行。
+- **沙箱执行**：脚本运行走 `internal/sandbox`，两套后端——`native`（纯 Go 零依赖、尽力而为加固：清洗环境不泄漏宿主密钥、限工作目录、超时杀整进程组、CPU 时长 + 输出截断）与可选 `docker`（强隔离：无网络、只读 rootfs、内存/PID 限额、仅挂载工作目录）；每次执行写审计日志（见 `configs/config.example.yaml` 的 `sandbox` 段）。
 - **消息绑定（多平台）**：把同一套 Agent 接入聊天平台，纯本地无需公网。
   - **钉钉**：官方 Stream 模式（出站 WebSocket）；可绑定 AI 卡片模板实现**流式回复**。
   - **个人微信**：经 WeChatPadPro 网关（iPad 协议）接入，Web 页扫码登录，文本收发（⚠️ 第三方协议有封号风险）。

@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/jelly-agent/jelly-agent/internal/sandbox"
 )
 
 // writeDirSkill creates a directory-form skill with a SKILL.md and the given
@@ -40,7 +42,7 @@ func TestRunScriptInjectsEnv(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	out, err := st.RunScript(ctx, "greeter", "run.sh", nil, map[string]string{"WHO": "jelly"})
+	out, err := st.RunScript(ctx, "greeter", "run.sh", nil, map[string]string{"WHO": "jelly"}, sandbox.Policy{})
 	if err != nil {
 		t.Fatalf("run: %v (out=%q)", err, out)
 	}
@@ -58,10 +60,10 @@ func TestRunScriptRejectsTraversal(t *testing.T) {
 	st, _ := NewStore(t.TempDir())
 	writeDirSkill(t, st, "s", nil)
 	ctx := context.Background()
-	if _, err := st.RunScript(ctx, "s", "../../etc/passwd", nil, nil); err == nil {
+	if _, err := st.RunScript(ctx, "s", "../../etc/passwd", nil, nil, sandbox.Policy{}); err == nil {
 		t.Fatal("expected path-traversal rejection")
 	}
-	if _, err := st.RunScript(ctx, "s", "nope.sh", nil, nil); err == nil {
+	if _, err := st.RunScript(ctx, "s", "nope.sh", nil, nil, sandbox.Policy{}); err == nil {
 		t.Fatal("expected missing-script error")
 	}
 }
@@ -69,9 +71,9 @@ func TestRunScriptRejectsTraversal(t *testing.T) {
 func TestRunScriptTimeout(t *testing.T) {
 	st, _ := NewStore(t.TempDir())
 	writeDirSkill(t, st, "slow", map[string]string{"loop.sh": "#!/bin/sh\nsleep 5"})
-	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
-	defer cancel()
-	if _, err := st.RunScript(ctx, "slow", "loop.sh", nil, nil); err == nil {
+	// Exercise the policy-level timeout (not just the ctx deadline).
+	if _, err := st.RunScript(context.Background(), "slow", "loop.sh", nil, nil,
+		sandbox.Policy{Timeout: 200 * time.Millisecond}); err == nil {
 		t.Fatal("expected timeout error")
 	}
 }

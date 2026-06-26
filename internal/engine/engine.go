@@ -7,7 +7,9 @@ package engine
 import (
 	"context"
 	"fmt"
+	"log"
 	"sync"
+	"time"
 
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
@@ -19,10 +21,26 @@ import (
 	jellymcp "github.com/jelly-agent/jelly-agent/internal/mcp"
 	"github.com/jelly-agent/jelly-agent/internal/memory"
 	jellymodel "github.com/jelly-agent/jelly-agent/internal/model"
+	"github.com/jelly-agent/jelly-agent/internal/sandbox"
 	jellysession "github.com/jelly-agent/jelly-agent/internal/session"
 	"github.com/jelly-agent/jelly-agent/internal/skill"
 	jellytool "github.com/jelly-agent/jelly-agent/internal/tool"
 )
+
+// Wire a default audit sink so every sandboxed script run leaves a log line for
+// review (PLAN §8 risk 6). The app may override sandbox.Audit to redirect it.
+func init() {
+	sandbox.Audit = func(ev sandbox.AuditEvent) {
+		status := "exit=" + fmt.Sprint(ev.ExitCode)
+		if ev.TimedOut {
+			status = "timeout"
+		} else if ev.Err != "" {
+			status = "start-error: " + ev.Err
+		}
+		log.Printf("[sandbox] backend=%s file=%q args=%v %s dur=%s",
+			ev.Backend, ev.File, ev.Args, status, ev.Duration.Round(time.Millisecond))
+	}
+}
 
 const (
 	// AppName and UserID scope sessions and memory. The CLI is single-user, so
@@ -155,6 +173,28 @@ func (e *Engine) Skills() (*skill.Store, error) {
 	return skill.NewStore(e.cfg.Skills.Dir)
 }
 
+// sandboxPolicy translates the config's sandbox section into a sandbox.Policy
+// for script execution. Zero fields keep the sandbox package's own defaults.
+func (e *Engine) sandboxPolicy() sandbox.Policy {
+	sb := e.cfg.Sandbox
+	p := sandbox.Policy{
+		Backend:     sb.Backend,
+		AllowDocker: sb.AllowDocker,
+		Network:     sb.Network,
+		Image:       sb.Image,
+		CPUSeconds:  sb.CPUSeconds,
+		MaxProcs:    sb.MaxProcs,
+		MemoryMB:    sb.MemoryMB,
+	}
+	if sb.TimeoutSec > 0 {
+		p.Timeout = time.Duration(sb.TimeoutSec) * time.Second
+	}
+	if sb.MaxOutputKB > 0 {
+		p.MaxOutput = sb.MaxOutputKB << 10
+	}
+	return p
+}
+
 // BuildAgent constructs the root agent for the named provider (empty = default)
 // loading every enabled MCP server. See BuildAgentWith for selective MCP.
 func (e *Engine) BuildAgent(provider string) (agent.Agent, config.Provider, *memory.Core, *memory.Search, error) {
@@ -207,7 +247,7 @@ func (e *Engine) BuildAgentWith(provider string, mcpNames []string) (agent.Agent
 				tools = append(tools, st)
 			}
 			if allowScripts {
-				if rs, err := jellytool.RunScriptTool(skills, varsFor); err == nil {
+				if rs, err := jellytool.RunScriptTool(skills, varsFor, e.sandboxPolicy()); err == nil {
 					tools = append(tools, rs)
 				}
 			}

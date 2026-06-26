@@ -42,3 +42,22 @@ memory:
     backend: fts5               # 目前仅 fts5；向量后端属 L3（后续）
     top_k: 5                    # 每次检索返回的最大条数
     summarize: false            # 预留：检索结果经模型压缩（尚未接线）
+
+# 技能脚本执行（可选）。仅当信任技能时开启。
+skills:
+  # dir: ~/.jelly-agent/skills    # 技能目录，留空用默认
+  allow_scripts: false          # 开启 run_script 工具（在沙箱中执行技能脚本）
+
+# 沙箱：run_script（及后续 run_code）的执行隔离与资源上限。整段省略即用默认值。
+# ⚠️ native 后端是“尽力而为”加固（清洗环境、限工作目录、超时杀进程组、限 CPU 时长 +
+#    输出截断），不限制文件系统/网络，不是安全边界；需要强隔离请用 docker 后端。
+sandbox:
+  backend: ""                   # ""=自动（有 docker 且 allow_docker 时用 docker，否则 native）；可显式填 native / docker
+  allow_docker: false           # 允许自动/显式选用 docker 强隔离后端
+  network: false                # docker 后端是否放开网络（false=--network none；native 无法限制）
+  image: python:3.12-slim       # docker 后端使用的镜像
+  timeout_sec: 60               # 单次执行墙钟超时
+  max_output_kb: 8              # 捕获的 stdout+stderr 上限
+  cpu_seconds: 30               # native：CPU 时长上限（best-effort）
+  max_procs: 64                 # docker：--pids-limit（native 无法按沙箱限制）
+  memory_mb: 512                # docker：--memory（native 无法可靠限制）

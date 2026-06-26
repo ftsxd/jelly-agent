@@ -1,13 +1,12 @@
 package tool
 
 import (
-	"context"
 	"sort"
-	"time"
 
 	adktool "google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/functiontool"
 
+	"github.com/jelly-agent/jelly-agent/internal/sandbox"
 	"github.com/jelly-agent/jelly-agent/internal/skill"
 )
 
@@ -67,27 +66,22 @@ type runScriptResult struct {
 	Error  string `json:"error,omitempty"`
 }
 
-// runScriptTimeout bounds one script invocation.
-const runScriptTimeout = 60 * time.Second
-
 // RunScriptTool builds the run_script tool: it runs a skill's bundled script
-// with that skill's configured variables injected as environment (the secret
-// values never enter the prompt). Register this ONLY when script execution is
-// enabled. store must be non-nil; varsFor may be nil.
-func RunScriptTool(store *skill.Store, varsFor func(skill string) map[string]string) (adktool.Tool, error) {
+// inside the sandbox (pol), with that skill's configured variables injected as
+// environment (the secret values never enter the prompt). Register this ONLY
+// when script execution is enabled. store must be non-nil; varsFor may be nil.
+func RunScriptTool(store *skill.Store, varsFor func(skill string) map[string]string, pol sandbox.Policy) (adktool.Tool, error) {
 	return functiontool.New(
 		functiontool.Config{
 			Name:        "run_script",
-			Description: "运行某个技能附带的脚本（凭据已由系统注入为环境变量，按 use_skill 给出的 var_keys 在脚本里用环境变量引用即可，切勿向用户索要密钥）。返回脚本的输出。",
+			Description: "运行某个技能附带的脚本（在沙箱中执行；凭据已由系统注入为环境变量，按 use_skill 给出的 var_keys 在脚本里用环境变量引用即可，切勿向用户索要密钥）。返回脚本的输出。",
 		},
 		func(tc adktool.Context, args runScriptArgs) (runScriptResult, error) {
-			ctx, cancel := context.WithTimeout(tc, runScriptTimeout)
-			defer cancel()
 			var env map[string]string
 			if varsFor != nil {
 				env = varsFor(args.Skill)
 			}
-			out, err := store.RunScript(ctx, args.Skill, args.Script, args.Args, env)
+			out, err := store.RunScript(tc, args.Skill, args.Script, args.Args, env, pol)
 			if err != nil {
 				return runScriptResult{OK: false, Output: out, Error: err.Error()}, nil
 			}

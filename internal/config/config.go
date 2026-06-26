@@ -26,6 +26,7 @@ type Config struct {
 	Providers       []Provider `mapstructure:"providers" yaml:"providers"`
 	Memory          Memory     `mapstructure:"memory" yaml:"memory"`
 	Skills          Skills     `mapstructure:"skills" yaml:"skills,omitempty"`
+	Sandbox         Sandbox    `mapstructure:"sandbox" yaml:"sandbox,omitempty"`
 	// SkillVars holds per-skill variables (skill name → KV), where secret-ish
 	// values are masked by the API and may use ${ENV}. Kept here (config, 0600)
 	// rather than in the skill files so sharing/exporting a skill omits secrets.
@@ -85,6 +86,29 @@ type Skills struct {
 	// AllowScripts enables the run_script tool (skills can execute bundled
 	// scripts). Off by default — it runs code with the user's privileges.
 	AllowScripts bool `mapstructure:"allow_scripts" yaml:"allow_scripts,omitempty"`
+}
+
+// Sandbox configures the execution envelope for skill scripts (and future
+// run_code). The zero value is valid: the sandbox package applies its defaults
+// (60s timeout, 8 KiB output, native best-effort confinement). See PLAN §8
+// risk 6.
+type Sandbox struct {
+	// Backend selects the isolation backend: "" (auto), "native", or "docker".
+	// Auto uses native unless AllowDocker is set and a docker binary is found.
+	Backend string `mapstructure:"backend" yaml:"backend,omitempty"`
+	// AllowDocker permits the auto/explicit docker backend (strong isolation).
+	AllowDocker bool `mapstructure:"allow_docker" yaml:"allow_docker,omitempty"`
+	// Network allows network access in the docker backend (native cannot
+	// restrict it either way). Default false ⇒ docker runs with --network none.
+	Network bool `mapstructure:"network" yaml:"network,omitempty"`
+	// Image is the docker image used by the docker backend ("" ⇒ python:3-slim).
+	Image string `mapstructure:"image" yaml:"image,omitempty"`
+	// Resource caps (zero ⇒ sandbox defaults).
+	TimeoutSec  int `mapstructure:"timeout_sec" yaml:"timeout_sec,omitempty"`
+	MaxOutputKB int `mapstructure:"max_output_kb" yaml:"max_output_kb,omitempty"`
+	CPUSeconds  int `mapstructure:"cpu_seconds" yaml:"cpu_seconds,omitempty"`
+	MaxProcs    int `mapstructure:"max_procs" yaml:"max_procs,omitempty"`
+	MemoryMB    int `mapstructure:"memory_mb" yaml:"memory_mb,omitempty"`
 }
 
 // Memory configures the memory subsystem (PLAN §10.5): L1 core memory
@@ -157,6 +181,7 @@ func Save(c *Config, path string) error {
 		Providers       []Provider                   `yaml:"providers"`
 		Memory          *Memory                      `yaml:"memory,omitempty"`
 		Skills          *Skills                      `yaml:"skills,omitempty"`
+		Sandbox         *Sandbox                     `yaml:"sandbox,omitempty"`
 		SkillVars       map[string]map[string]string `yaml:"skill_vars,omitempty"`
 		MCP             []MCPServer                  `yaml:"mcp,omitempty"`
 		Platforms       []PlatformBot                `yaml:"platforms,omitempty"`
@@ -165,6 +190,10 @@ func Save(c *Config, path string) error {
 	if c.Skills != (Skills{}) {
 		sk := c.Skills
 		p.Skills = &sk
+	}
+	if c.Sandbox != (Sandbox{}) {
+		sb := c.Sandbox
+		p.Sandbox = &sb
 	}
 	if c.Memory != (Memory{}) {
 		m := c.Memory
