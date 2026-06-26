@@ -24,6 +24,14 @@ func dockerAvailable() bool {
 	return dockerOK
 }
 
+// DockerAvailable reports whether a docker binary is on PATH, so callers (e.g.
+// the web UI) can warn before selecting the docker backend. Uses a fresh PATH
+// lookup rather than the cached probe so it reflects the current environment.
+func DockerAvailable() bool {
+	_, err := exec.LookPath("docker")
+	return err == nil
+}
+
 // runDocker executes the script inside an ephemeral container. The working
 // directory is bind-mounted at /work (the only writable host path); the root
 // filesystem is read-only, /tmp is a small tmpfs, and — unless Policy.Network is

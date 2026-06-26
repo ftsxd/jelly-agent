@@ -52,6 +52,11 @@ export const api = {
   saveSkill: (p) => jpost('/api/skills', p),
   deleteSkill: (name) => jdelete(`/api/skills/${encodeURIComponent(name)}`),
   setAllowScripts: (enabled) => jpost('/api/skills/allow-scripts', { enabled }),
+  sandbox: () => jget('/api/sandbox'),
+  setSandbox: (p) => jpost('/api/sandbox', p),
+  agents: () => jget('/api/agents'),
+  saveAgent: (a) => jpost('/api/agents', a),
+  deleteAgent: (name) => jdelete(`/api/agents/${encodeURIComponent(name)}`),
   setSkillVars: (name, vars) => jpost(`/api/skills/${encodeURIComponent(name)}/vars`, { vars }),
   deleteSkillVar: (name, key) => jdelete(`/api/skills/${encodeURIComponent(name)}/vars/${encodeURIComponent(key)}`),
   uploadSkill: async (file) => {
@@ -79,11 +84,11 @@ export const api = {
 // streamChat POSTs a message and parses the SSE response. onEvent receives each
 // decoded event ({type, ...}). Returns a promise that resolves when the stream
 // closes. Pass an AbortSignal to cancel mid-stream.
-export async function streamChat({ message, sessionId, provider }, onEvent, signal) {
+export async function streamChat({ message, sessionId, provider, agent }, onEvent, signal) {
   const res = await fetch('/api/chat/stream', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ message, session_id: sessionId || '', provider: provider || '' }),
+    body: JSON.stringify({ message, session_id: sessionId || '', provider: provider || '', agent: agent || '' }),
     signal,
   })
   if (!res.ok) {

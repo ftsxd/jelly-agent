@@ -23,6 +23,7 @@ type chatRequest struct {
 	Message   string `json:"message"`
 	SessionID string `json:"session_id,omitempty"` // empty = start a new session
 	Provider  string `json:"provider,omitempty"`   // empty = default provider
+	Agent     string `json:"agent,omitempty"`      // named multi-agent root; empty = default/legacy
 }
 
 // sessionSeq disambiguates web session ids created within the same nanosecond.
@@ -51,7 +52,22 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 	}
 
 	eng := s.engine() // pin one engine for this whole turn
-	a, _, _, search, err := eng.BuildAgent(req.Provider)
+	// Pick a named agent tree when one is requested or configured by default;
+	// otherwise fall back to the legacy single agent on the chosen provider.
+	agentName := strings.TrimSpace(req.Agent)
+	if agentName == "" && eng.HasAgents() {
+		agentName = eng.DefaultAgentName()
+	}
+	var (
+		a      agent.Agent
+		search *memory.Search
+		err    error
+	)
+	if agentName != "" {
+		a, _, _, search, err = eng.BuildAgentByName(agentName)
+	} else {
+		a, _, _, search, err = eng.BuildAgent(req.Provider)
+	}
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
@@ -94,7 +110,7 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 		if ev.Partial {
 			for _, p := range ev.Content.Parts {
 				if p != nil && !p.Thought && p.Text != "" {
-					sse.send("text_delta", map[string]any{"text": p.Text})
+					sse.send("text_delta", map[string]any{"text": p.Text, "agent": ev.Author})
 				}
 			}
 			continue
@@ -115,9 +131,9 @@ func emitFinal(sse *sseWriter, ev *adksession.Event) {
 		case p == nil:
 			continue
 		case p.FunctionCall != nil:
-			sse.send("tool_call", map[string]any{"name": p.FunctionCall.Name, "args": p.FunctionCall.Args})
+			sse.send("tool_call", map[string]any{"name": p.FunctionCall.Name, "args": p.FunctionCall.Args, "agent": ev.Author})
 		case p.FunctionResponse != nil:
-			sse.send("tool_result", map[string]any{"name": p.FunctionResponse.Name, "response": p.FunctionResponse.Response})
+			sse.send("tool_result", map[string]any{"name": p.FunctionResponse.Name, "response": p.FunctionResponse.Response, "agent": ev.Author})
 		}
 	}
 	if ev.UsageMetadata != nil {

@@ -4,9 +4,12 @@ import Icon from '../components/Icon.vue'
 import { api, streamChat } from '../api'
 
 const PROVIDER_KEY = 'jelly.provider' // remembers the last-used provider
+const AGENT_KEY = 'jelly.agent' // remembers the last-used agent (multi-agent)
 
 const providers = ref([])
 const provider = ref('')
+const agents = ref([]) // enabled named agents (multi-agent); empty = single-agent mode
+const agentName = ref('') // '' = single agent on the chosen provider
 const messages = ref([]) // {role, text, tools: [{name,args,response}], usage, provider, model}
 const input = ref('')
 const sessionId = ref('')
@@ -35,10 +38,26 @@ onMounted(async () => {
   } catch (e) {
     error.value = e.message
   }
+  try {
+    const data = await api.agents()
+    agents.value = (data.agents || []).filter((a) => a.enabled)
+    if (agents.value.length) {
+      const saved = localStorage.getItem(AGENT_KEY)
+      const valid = (n) => agents.value.some((a) => a.name === n)
+      // Default to the saved/configured-default agent so multi-agent is used out
+      // of the box once defined; '' falls back to single-agent mode.
+      agentName.value = (saved && valid(saved) && saved) || (valid(data.default_agent) && data.default_agent) || agents.value[0].name
+    }
+  } catch {
+    /* agents are optional; ignore when unavailable */
+  }
 })
 
 watch(provider, (name) => {
   if (name) localStorage.setItem(PROVIDER_KEY, name)
+})
+watch(agentName, (name) => {
+  localStorage.setItem(AGENT_KEY, name || '')
 })
 
 async function scrollDown() {
@@ -66,6 +85,7 @@ async function send() {
     usage: null,
     provider: provider.value,
     model: modelOf(provider.value),
+    author: '', // which (sub-)agent produced the latest text, for multi-agent
   }
   messages.value.push(agentMsg)
   busy.value = true
@@ -74,7 +94,7 @@ async function send() {
   abort = new AbortController()
   try {
     await streamChat(
-      { message: text, sessionId: sessionId.value, provider: provider.value },
+      { message: text, sessionId: sessionId.value, provider: provider.value, agent: agentName.value },
       (ev) => {
         switch (ev.type) {
           case 'session':
@@ -82,6 +102,7 @@ async function send() {
             break
           case 'text_delta':
             agentMsg.text += ev.text
+            if (ev.agent) agentMsg.author = ev.agent
             scrollDown()
             break
           case 'tool_call':
@@ -140,7 +161,13 @@ function resultSummary(resp) {
         <span v-if="sessionId" class="badge mono">{{ sessionId }}</span>
       </div>
       <div class="topbar-r">
-        <select v-model="provider" class="input select" :disabled="busy" aria-label="选择 Provider">
+        <select v-if="agents.length" v-model="agentName" class="input select" :disabled="busy" aria-label="选择 Agent">
+          <option value="">单 Agent（默认）</option>
+          <option v-for="a in agents" :key="a.name" :value="a.name">
+            🤖 {{ a.name }}{{ (a.sub_agents || []).length ? ` · ${a.sub_agents.length} 子` : '' }}
+          </option>
+        </select>
+        <select v-model="provider" class="input select" :disabled="busy || !!agentName" :title="agentName ? 'Agent 自带 Provider，此选择仅用于单 Agent 模式' : ''" aria-label="选择 Provider">
           <option v-if="!providers.length" value="">（无 Provider）</option>
           <option v-for="p in providers" :key="p.name" :value="p.name">
             {{ p.name }} · {{ p.model }}{{ p.is_default ? ' · 默认' : '' }}
@@ -174,7 +201,10 @@ function resultSummary(resp) {
           <Icon :name="m.role === 'user' ? 'user' : 'bot'" :size="16" />
         </div>
         <div class="bubble-wrap">
-          <div v-if="m.role === 'agent' && m.provider && showProviderTag" class="who mono dim">
+          <div v-if="m.role === 'agent' && m.author && m.author !== 'root'" class="who mono dim">
+            <Icon name="bot" :size="12" /> {{ m.author }}
+          </div>
+          <div v-else-if="m.role === 'agent' && m.provider && showProviderTag" class="who mono dim">
             <Icon name="bot" :size="12" /> {{ m.provider }}<span v-if="m.model"> · {{ m.model }}</span>
           </div>
           <div v-for="(t, ti) in m.tools" :key="ti" class="tool-chip">

@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 	"time"
 
@@ -195,10 +196,118 @@ func (e *Engine) sandboxPolicy() sandbox.Policy {
 	return p
 }
 
+// maxAgentDepth bounds recursion when assembling a coordinator/sub-agent tree,
+// a backstop against a misconfigured cycle that path-based detection misses.
+const maxAgentDepth = 8
+
+// HasAgents reports whether any named agent is defined in config (multi-agent
+// mode). When false the engine builds the legacy single "root" agent.
+func (e *Engine) HasAgents() bool {
+	for _, a := range e.cfg.Agents {
+		if a.Enabled {
+			return true
+		}
+	}
+	return false
+}
+
+// DefaultAgentName returns the configured default agent name (or "" when none /
+// unset / disabled), so callers can pick a root when the request omits one.
+func (e *Engine) DefaultAgentName() string {
+	if e.cfg.DefaultAgent != "" {
+		if def, ok := e.agentDef(e.cfg.DefaultAgent); ok && def.Enabled {
+			return e.cfg.DefaultAgent
+		}
+	}
+	for _, a := range e.cfg.Agents { // fall back to the first enabled agent
+		if a.Enabled {
+			return a.Name
+		}
+	}
+	return ""
+}
+
+func (e *Engine) agentDef(name string) (config.AgentDef, bool) {
+	for _, a := range e.cfg.Agents {
+		if a.Name == name {
+			return a, true
+		}
+	}
+	return config.AgentDef{}, false
+}
+
 // BuildAgent constructs the root agent for the named provider (empty = default)
 // loading every enabled MCP server. See BuildAgentWith for selective MCP.
 func (e *Engine) BuildAgent(provider string) (agent.Agent, config.Provider, *memory.Core, *memory.Search, error) {
 	return e.BuildAgentWith(provider, nil)
+}
+
+// BuildAgentByName assembles the coordinator/sub-agent tree rooted at the named
+// agent (delegation via ADK's transfer_to_agent). Each node uses its own
+// provider/instruction/MCP; sub-agents are attached recursively with cycle and
+// depth guards. Returns the root agent plus the resolved root provider, the
+// shared core store and the search service (nil when L2 is off). The caller owns
+// search.Close.
+func (e *Engine) BuildAgentByName(name string) (agent.Agent, config.Provider, *memory.Core, *memory.Search, error) {
+	core, err := e.Core()
+	if err != nil {
+		return nil, config.Provider{}, nil, nil, fmt.Errorf("init memory: %w", err)
+	}
+	search, err := e.Search()
+	if err != nil {
+		return nil, config.Provider{}, nil, nil, err
+	}
+	a, prov, err := e.buildAgentTree(name, core, search != nil, map[string]bool{}, 0)
+	if err != nil {
+		if search != nil {
+			search.Close()
+		}
+		return nil, prov, nil, nil, err
+	}
+	return a, prov, core, search, nil
+}
+
+// buildAgentTree recursively builds the agent rooted at name. visited is the
+// current path (cycle detection); diamonds (a child shared by two parents) build
+// distinct instances, which is fine.
+func (e *Engine) buildAgentTree(name string, core *memory.Core, withSearch bool, visited map[string]bool, depth int) (agent.Agent, config.Provider, error) {
+	if depth > maxAgentDepth {
+		return nil, config.Provider{}, fmt.Errorf("agent 树过深（>%d）：%q 处疑似存在环", maxAgentDepth, name)
+	}
+	if visited[name] {
+		return nil, config.Provider{}, fmt.Errorf("agent 转交存在环：%q", name)
+	}
+	def, ok := e.agentDef(name)
+	if !ok {
+		return nil, config.Provider{}, fmt.Errorf("agent %q 未定义", name)
+	}
+	if !def.Enabled {
+		return nil, config.Provider{}, fmt.Errorf("agent %q 已禁用", name)
+	}
+	visited[name] = true
+	defer delete(visited, name)
+
+	var subs []agent.Agent
+	for _, child := range def.SubAgents {
+		sub, _, err := e.buildAgentTree(child, core, withSearch, visited, depth+1)
+		if err != nil {
+			return nil, config.Provider{}, fmt.Errorf("构建子 agent %q: %w", child, err)
+		}
+		subs = append(subs, sub)
+	}
+
+	instruction := def.Instruction
+	if strings.TrimSpace(instruction) == "" {
+		instruction = RootInstruction
+	}
+	desc := def.Description
+	if desc == "" {
+		desc = "jelly-agent agent " + name
+	}
+	// Named agents load only the MCP servers they list (empty ⇒ none), matching
+	// PlatformBot semantics — explicit selection in the UI.
+	toolsets := e.ToolsetsFor(def.MCP)
+	return e.buildNode(name, desc, def.Provider, instruction, toolsets, subs, core, withSearch)
 }
 
 // BuildAgentWith is like BuildAgent but controls which MCP servers are loaded:
@@ -207,31 +316,46 @@ func (e *Engine) BuildAgent(provider string) (agent.Agent, config.Provider, *mem
 // plus the core store and search service so the caller can render memory and
 // index turns. search is nil when L2 is disabled.
 func (e *Engine) BuildAgentWith(provider string, mcpNames []string) (agent.Agent, config.Provider, *memory.Core, *memory.Search, error) {
-	llm, prov, err := e.reg.Get(provider)
-	if err != nil {
-		return nil, config.Provider{}, nil, nil, err
-	}
-
 	core, err := e.Core()
 	if err != nil {
-		return nil, prov, nil, nil, fmt.Errorf("init memory: %w", err)
+		return nil, config.Provider{}, nil, nil, fmt.Errorf("init memory: %w", err)
 	}
 	search, err := e.Search()
 	if err != nil {
-		return nil, prov, nil, nil, err
-	}
-
-	tools, err := e.Tools(core, search != nil)
-	if err != nil {
-		if search != nil {
-			search.Close()
-		}
-		return nil, prov, nil, nil, fmt.Errorf("build tools: %w", err)
+		return nil, config.Provider{}, nil, nil, err
 	}
 
 	toolsets := e.Toolsets() // nil mcpNames → all enabled MCP servers
 	if mcpNames != nil {
 		toolsets = e.ToolsetsFor(mcpNames) // selected subset (may be empty)
+	}
+
+	a, prov, err := e.buildNode("root", "jelly-agent root agent with web search and core memory.",
+		provider, RootInstruction, toolsets, nil, core, search != nil)
+	if err != nil {
+		if search != nil {
+			search.Close()
+		}
+		return nil, prov, nil, nil, err
+	}
+	return a, prov, core, search, nil
+}
+
+// buildNode constructs a single llmagent: it resolves the provider's model,
+// assembles the built-in + skill tools, and attaches the given MCP toolsets and
+// sub-agents (which give ADK its transfer_to_agent delegation). The instruction
+// is rendered fresh each turn (core memory + skill catalog prepended) via an
+// InstructionProvider. Shared by the legacy single agent and the multi-agent
+// tree so both behave identically.
+func (e *Engine) buildNode(name, description, provider, instruction string, toolsets []adktool.Toolset, subAgents []agent.Agent, core *memory.Core, withSearch bool) (agent.Agent, config.Provider, error) {
+	llm, prov, err := e.reg.Get(provider)
+	if err != nil {
+		return nil, prov, err
+	}
+
+	tools, err := e.Tools(core, withSearch)
+	if err != nil {
+		return nil, prov, fmt.Errorf("build tools: %w", err)
 	}
 
 	// Agent Skills: when any skill is enabled, add the use_skill tool so the
@@ -255,14 +379,14 @@ func (e *Engine) BuildAgentWith(provider string, mcpNames []string) (agent.Agent
 	}
 
 	a, err := llmagent.New(llmagent.Config{
-		Name:        "root",
+		Name:        name,
 		Model:       llm,
-		Description: "jelly-agent root agent with web search and core memory.",
+		Description: description,
 		// InstructionProvider (not Instruction) so MEMORY.md/USER.md (and the
 		// skill catalog) are read fresh each turn. Note: ADK then skips {}
 		// session-state substitution.
 		InstructionProvider: func(agent.ReadonlyContext) (string, error) {
-			base := core.Render(RootInstruction)
+			base := core.Render(instruction)
 			if skills, err := e.Skills(); err == nil {
 				if cat, err := skills.Catalog(); err == nil && cat != "" {
 					base += "\n\n" + cat
@@ -273,16 +397,14 @@ func (e *Engine) BuildAgentWith(provider string, mcpNames []string) (agent.Agent
 			}
 			return base, nil
 		},
-		Tools:    tools,
-		Toolsets: toolsets, // external MCP servers (all enabled, or a selected subset)
+		Tools:     tools,
+		Toolsets:  toolsets,  // external MCP servers (all enabled, or a selected subset)
+		SubAgents: subAgents, // delegation targets (transfer_to_agent), nil for a leaf
 	})
 	if err != nil {
-		if search != nil {
-			search.Close()
-		}
-		return nil, prov, nil, nil, fmt.Errorf("create agent: %w", err)
+		return nil, prov, fmt.Errorf("create agent: %w", err)
 	}
-	return a, prov, core, search, nil
+	return a, prov, nil
 }
 
 // NewSessionService opens the persistent SQLite session store at the default

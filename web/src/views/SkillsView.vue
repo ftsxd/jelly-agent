@@ -17,7 +17,73 @@ const form = reactive({ name: '', description: '', body: '', enabled: true, varK
 const fileInput = ref(null)
 const uploading = ref(false)
 
-onMounted(load)
+// Sandbox: the execution envelope for skill scripts (run_script). Blank/zero
+// numeric fields fall back to the backend defaults shown as placeholders.
+const sandboxOpen = ref(false)
+const savingSandbox = ref(false)
+const sandboxMeta = reactive({ dockerAvailable: false, defaults: {} })
+const sandbox = reactive({
+  backend: '',
+  allow_docker: false,
+  network: false,
+  image: '',
+  timeout_sec: 0,
+  max_output_kb: 0,
+  cpu_seconds: 0,
+  max_procs: 0,
+  memory_mb: 0,
+})
+
+onMounted(() => {
+  load()
+  loadSandbox()
+})
+
+async function loadSandbox() {
+  try {
+    const res = await api.sandbox()
+    Object.assign(sandbox, {
+      backend: res.backend || '',
+      allow_docker: !!res.allow_docker,
+      network: !!res.network,
+      image: res.image || '',
+      timeout_sec: res.timeout_sec || 0,
+      max_output_kb: res.max_output_kb || 0,
+      cpu_seconds: res.cpu_seconds || 0,
+      max_procs: res.max_procs || 0,
+      memory_mb: res.memory_mb || 0,
+    })
+    sandboxMeta.dockerAvailable = !!res.docker_available
+    sandboxMeta.defaults = res.defaults || {}
+  } catch (e) {
+    error.value = e.message
+  }
+}
+
+async function saveSandbox() {
+  if (savingSandbox.value) return
+  savingSandbox.value = true
+  error.value = ''
+  try {
+    await api.setSandbox({
+      backend: sandbox.backend,
+      allow_docker: sandbox.allow_docker,
+      network: sandbox.network,
+      image: sandbox.image.trim(),
+      timeout_sec: Number(sandbox.timeout_sec) || 0,
+      max_output_kb: Number(sandbox.max_output_kb) || 0,
+      cpu_seconds: Number(sandbox.cpu_seconds) || 0,
+      max_procs: Number(sandbox.max_procs) || 0,
+      memory_mb: Number(sandbox.memory_mb) || 0,
+    })
+    notice.value = '沙箱设置已保存（即时热重载）'
+    await loadSandbox()
+  } catch (e) {
+    error.value = e.message
+  } finally {
+    savingSandbox.value = false
+  }
+}
 
 async function load() {
   loading.value = true
@@ -209,6 +275,68 @@ async function onZipPicked(e) {
         </button>
       </div>
 
+      <!-- sandbox: execution envelope for run_script -->
+      <div class="card sandbox-card">
+        <button class="sandbox-head" @click="sandboxOpen = !sandboxOpen">
+          <span class="caret" :class="{ open: sandboxOpen }">▸</span>
+          <Icon name="settings" :size="16" />
+          <span class="st-title">脚本沙箱设置</span>
+          <span class="sb-badge">{{ sandbox.backend || '自动' }}</span>
+        </button>
+        <div v-if="sandboxOpen" class="sandbox-body">
+          <p class="muted hint">脚本的隔离与资源上限。改动保存即热重载，无需重启。</p>
+          <div class="grid">
+            <label class="field">
+              <span class="label">后端</span>
+              <select v-model="sandbox.backend" class="input">
+                <option value="">自动（有 docker 且允许时用 docker，否则 native）</option>
+                <option value="native">native（纯 Go，尽力而为加固）</option>
+                <option value="docker">docker（强隔离）</option>
+              </select>
+            </label>
+            <label class="field">
+              <span class="check-wrap">
+                <input type="checkbox" v-model="sandbox.allow_docker" /> 允许使用 docker 后端
+              </span>
+              <span v-if="!sandboxMeta.dockerAvailable" class="muted tiny">⚠️ 本机未检测到 docker 命令，docker 后端将回落到 native</span>
+            </label>
+            <label class="field span2" v-if="sandbox.backend === 'docker' || (sandbox.backend === '' && sandbox.allow_docker)">
+              <span class="check-wrap">
+                <input type="checkbox" v-model="sandbox.network" /> 放开网络（默认 <code class="mono">--network none</code>，仅 docker 后端有效）
+              </span>
+            </label>
+            <label class="field span2" v-if="sandbox.backend === 'docker' || (sandbox.backend === '' && sandbox.allow_docker)">
+              <span class="label">docker 镜像</span>
+              <input v-model="sandbox.image" class="input mono" :placeholder="sandboxMeta.defaults.image || 'python:3.12-slim'" />
+            </label>
+            <label class="field">
+              <span class="label">墙钟超时（秒）</span>
+              <input v-model.number="sandbox.timeout_sec" type="number" min="0" class="input" :placeholder="String(sandboxMeta.defaults.timeout_sec || '')" />
+            </label>
+            <label class="field">
+              <span class="label">输出上限（KB）</span>
+              <input v-model.number="sandbox.max_output_kb" type="number" min="0" class="input" :placeholder="String(sandboxMeta.defaults.max_output_kb || '')" />
+            </label>
+            <label class="field">
+              <span class="label">CPU 时长（秒，native）</span>
+              <input v-model.number="sandbox.cpu_seconds" type="number" min="0" class="input" :placeholder="String(sandboxMeta.defaults.cpu_seconds || '')" />
+            </label>
+            <label class="field">
+              <span class="label">进程数上限（docker）</span>
+              <input v-model.number="sandbox.max_procs" type="number" min="0" class="input" :placeholder="String(sandboxMeta.defaults.max_procs || '')" />
+            </label>
+            <label class="field">
+              <span class="label">内存上限（MB，docker）</span>
+              <input v-model.number="sandbox.memory_mb" type="number" min="0" class="input" :placeholder="String(sandboxMeta.defaults.memory_mb || '')" />
+            </label>
+          </div>
+          <p class="muted tiny">数值留空/为 0 表示使用默认值（占位符所示）。native 无法限制网络/进程数/内存，仅 docker 后端可强制。</p>
+          <div class="form-actions">
+            <button class="btn btn-primary" :disabled="savingSandbox" @click="saveSandbox">{{ savingSandbox ? '保存中…' : '保存沙箱设置' }}</button>
+          </div>
+        </div>
+      </div>
+
       <!-- create / edit form -->
       <div v-if="editing" class="card form">
         <h2 class="form-title">{{ editing === 'new' ? '新建技能' : `编辑 ${editing}` }}</h2>
@@ -354,6 +482,54 @@ async function onZipPicked(e) {
   font-size: 12px;
   color: var(--warning);
   margin-top: 2px;
+}
+.sandbox-card {
+  padding: 0;
+  overflow: hidden;
+}
+.sandbox-head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  width: 100%;
+  padding: var(--sp-3) var(--sp-4);
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--text);
+  text-align: left;
+}
+.sandbox-head:hover {
+  background: var(--surface-2);
+}
+.caret {
+  display: inline-block;
+  transition: transform 0.15s ease;
+  color: var(--text-muted);
+}
+.caret.open {
+  transform: rotate(90deg);
+}
+.sb-badge {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--text-muted);
+  background: var(--surface-3);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 1px 8px;
+  font-family: var(--font-mono);
+}
+.sandbox-body {
+  padding: 0 var(--sp-4) var(--sp-4);
+  border-top: 1px solid var(--border);
+}
+.sandbox-body .grid {
+  margin-top: var(--sp-3);
+}
+.tiny {
+  font-size: 11px;
+  margin-top: 4px;
 }
 .switch {
   position: relative;

@@ -61,3 +61,21 @@ sandbox:
   cpu_seconds: 30               # native：CPU 时长上限（best-effort）
   max_procs: 64                 # docker：--pids-limit（native 无法按沙箱限制）
   memory_mb: 512                # docker：--memory（native 无法可靠限制）
+
+# 多 Agent（可选）。整段省略即用默认单 Agent。给协调者填 sub_agents 即开启
+# ADK 的 transfer_to_agent 转交：协调者按子 Agent 的 description 判断委派给谁。
+# default_agent: coordinator      # 对话/消息绑定默认用哪个 Agent；留空=默认单 Agent
+# agents:
+#   - name: coordinator           # 标识符 [A-Za-z0-9_-]+
+#     description: 总协调，按子 Agent 职责决定转交给谁   # 供上级判断何时转交
+#     provider: deepseek          # 留空=默认 Provider，可让不同 Agent 跑不同模型
+#     instruction: 你是协调者，先判断该由哪个专家处理，再决定是否转交。  # 留空=内置默认指令
+#     sub_agents: [researcher, coder]   # 可转交的子 Agent
+#     enabled: true
+#   - name: researcher
+#     description: 擅长联网检索与资料整理
+#     mcp: [filesystem]           # 按需加载的 MCP 子集；不选=不挂 MCP
+#     enabled: true
+#   - name: coder
+#     description: 写代码与调试
+#     enabled: true

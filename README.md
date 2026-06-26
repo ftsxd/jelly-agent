@@ -7,16 +7,17 @@
 **Phase 4（Web 控制台）已完成，Phase 5（生产化）进行中**，并已扩展多平台消息接入。已验证可用：
 
 - 自写 `model.LLM` OpenAI 兼容适配器（流式 + 工具调用 + DeepSeek 思考模型 `reasoning_content` 往返）。
-- 单 Agent + `web_search` 工具，端到端跑通 DeepSeek。
+- Agent + `web_search` 工具，端到端跑通 DeepSeek。
 - 配置层（YAML + `${ENV}` + 环境变量回落）、模型 Registry、cobra 命令树。
 - **交互式多轮对话** + 内联命令（`/help` `/tools` `/memory` `/clear` `/stats` `/exit`）。
 - **会话持久化**：纯 Go SQLite（无 CGO），落 `~/.jelly-agent/state.db`，可列出历史会话。
 - **L1 核心记忆**（Hermes 式）：`MEMORY.md` / `USER.md` 每轮注入 system prompt（带 token 预算裁剪），Agent 通过 `remember` / `forget` 工具跨会话增删长期事实。
 - **L2 会话检索**（可选）：历史会话文本索引进 SQLite FTS5（与 `state.db` 同库、纯 Go trigram 分词，中英文皆可子串检索），开启后 Agent 获得 `load_memory` 工具按需检索过往对话。
-- **Web 控制台**：`jelly serve` 启动深色主题 Dashboard（Vue 3 + Vite，`go:embed` 进二进制），含对话、工具测试台、会话浏览（可删除）、用量监控、记忆、技能、MCP、消息绑定、Provider 配置等页面。CLI 与 Web 共用 `internal/engine` 同一运行时。
+- **多 Agent（协调者 + 子 Agent 转交）**：在 config / Web 定义多个具名 Agent（各自 provider、指令、MCP），给协调者挂上「子 Agent」即开启 ADK 的 `transfer_to_agent` 转交——协调者按每个子 Agent 的描述判断把任务交给谁。未定义任何 Agent 时对话仍走默认单 Agent（向后兼容）。
+- **Web 控制台**：`jelly serve` 启动深色主题 Dashboard（Vue 3 + Vite，`go:embed` 进二进制），含对话、工具测试台、会话浏览（可删除）、用量监控、记忆、技能、Agent、MCP、消息绑定、Provider 配置等页面。CLI 与 Web 共用 `internal/engine` 同一运行时。
 - **配置热重载**：Web 端增删改 Provider/MCP/消息绑定保存即生效；直接编辑磁盘上的 `config.yaml` 也会被监听到并自动热重载，对话不中断、无需重启。
 - **技能（Skills）**：Claude/Agent Skills 风格的 Markdown 能力包，清单注入 + `use_skill` 按需加载（渐进式披露）；Web 页增删改 + 上传 ZIP 包导入。技能可附带脚本，经 `run_script` 在**沙箱**中执行。
-- **沙箱执行**：脚本运行走 `internal/sandbox`，两套后端——`native`（纯 Go 零依赖、尽力而为加固：清洗环境不泄漏宿主密钥、限工作目录、超时杀整进程组、CPU 时长 + 输出截断）与可选 `docker`（强隔离：无网络、只读 rootfs、内存/PID 限额、仅挂载工作目录）；每次执行写审计日志（见 `configs/config.example.yaml` 的 `sandbox` 段）。
+- **沙箱执行**：脚本运行走 `internal/sandbox`，两套后端——`native`（纯 Go 零依赖、尽力而为加固：清洗环境不泄漏宿主密钥、限工作目录、超时杀整进程组、CPU 时长 + 输出截断）与可选 `docker`（强隔离：无网络、只读 rootfs、内存/PID 限额、仅挂载工作目录）；每次执行写审计日志。后端、资源上限等可在 Web **技能**页的「脚本沙箱设置」直接配置（保存即热重载），也可手动编辑 `configs/config.example.yaml` 的 `sandbox` 段。
 - **消息绑定（多平台）**：把同一套 Agent 接入聊天平台，纯本地无需公网。
   - **钉钉**：官方 Stream 模式（出站 WebSocket）；可绑定 AI 卡片模板实现**流式回复**。
   - **个人微信**：经 WeChatPadPro 网关（iPad 协议）接入，Web 页扫码登录，文本收发（⚠️ 第三方协议有封号风险）。
@@ -108,16 +109,46 @@ enabled: true
 
 面向开发者的测试台（Vue 3 + Vite，深色主题，`go:embed` 打包进二进制）。页面：
 
-- **对话** —— SSE 流式响应、工具调用过程可视化、逐轮 Token 统计；多 Provider 下拉切换（记住上次选择、标注默认项，多 Provider 时为每条回复标注应答模型）。
+- **对话** —— SSE 流式响应、工具调用过程可视化、逐轮 Token 统计；多 Provider 下拉切换（记住上次选择、标注默认项，多 Provider 时为每条回复标注应答模型）。定义了多 Agent 后多出 Agent 下拉（可选「单 Agent（默认）」回落），发生转交时气泡标注当前应答的子 Agent。
 - **工具** —— 列出内置工具，并内置 `web_search` 测试台（绕过模型直接调用）。
 - **会话** —— 列出持久化历史会话，查看完整 transcript。
 - **监控** —— 跨全部持久化会话聚合用量：会话/消息/工具调用/Token 总量 KPI、Token 构成、工具调用排行、每日 Token 趋势柱状图。
 - **记忆** —— L1 核心记忆（USER.md / MEMORY.md）快照 + L2 FTS5 会话全文检索。
+- **Agent** —— 定义具名 Agent（provider / 描述 / 系统指令 / MCP / 子 Agent），新建/编辑/启停/删除、设默认；给协调者勾选子 Agent 即组成转交树。详见下方「多 Agent」。
 - **MCP** —— 接入外部 Model Context Protocol 服务器（stdio / http / sse），新建/编辑/启停/删除、一键测试连接并列出其工具；启用后其工具与内置工具一起注入 Agent。
 - **消息绑定** —— 把钉钉接入为消息入口：新建/编辑/启停/删除钉钉机器人，实时显示连接状态（在线/连接中/错误），启用即连接、无需重启。详见下方「消息绑定」。
 - **配置** —— 在线增删改 Provider（OpenAI 兼容端点）、设默认，保存即**热重载**，无需重启。
 
 配置（Provider / MCP / 消息绑定）写入 `configs/config.yaml` 或 `~/.jelly-agent/config.yaml`（`0600`）；API Key 与各类密钥脱敏展示，编辑时留空即保留原值，`${ENV}` 引用不会被改写成明文。直接编辑该文件也会被服务器监听并热重载，无需重启。
+
+## 多 Agent（协调者 + 子 Agent 转交）
+
+把单个 Agent 扩展成一棵可委派的 Agent 树：一个**协调者**根据子 Agent 的描述，按需把整轮对话**转交**给最合适的专家（ADK 的 `transfer_to_agent` 委派，由协调者的 LLM 自行决定）。
+
+- 每个 Agent 是一条具名定义：`name`（标识符）、`description`（**供上级判断何时转交，务必写清职责**）、`provider`（留空=默认 Provider，可让不同 Agent 跑不同模型）、`instruction`（系统指令，留空=内置默认）、`mcp`（按需加载的 MCP 子集，不选=不挂）、`sub_agents`（可转交的子 Agent 名）、`enabled`。
+- 在 Web **Agent** 页增删改：先建若干专家，再建协调者并勾选其子 Agent、设为默认；也可直接写 `config.yaml` 的 `agents` / `default_agent` 段。保存即热重载。
+- 对话时在「对话」页顶部选 Agent（或用 `default_agent`）；选「单 Agent（默认）」则回落到旧的单 Agent + Provider 模式。发生转交时气泡会标注当前应答的子 Agent。
+- 安全约束：拒绝自引用、引用不存在的子 Agent；删除某 Agent 时自动从其它 Agent 的子列表与 `default_agent` 中清除；构树带环检测与深度上限。
+
+```yaml
+default_agent: coordinator
+agents:
+  - name: coordinator
+    description: 总协调，按子 Agent 职责决定转交给谁
+    provider: deepseek          # 留空=默认 Provider
+    instruction: 你是协调者，先判断该由哪个专家处理，再决定是否转交。
+    sub_agents: [researcher, coder]
+    enabled: true
+  - name: researcher
+    description: 擅长联网检索与资料整理
+    mcp: [filesystem]           # 不选=不挂 MCP
+    enabled: true
+  - name: coder
+    description: 写代码与调试
+    enabled: true
+```
+
+> 未定义任何 `agents` 时，CLI / Web / 消息绑定一切照旧走默认单 Agent——多 Agent 是纯增量、向后兼容。
 
 ## 消息绑定
 
@@ -206,8 +237,8 @@ go vet ./...
 ```text
 cmd/cli/              # CLI 入口（cobra 命令树 + 交互式 REPL + serve 子命令）
 cmd/server/           # 独立 Web 服务器入口
-internal/engine/      # 运行时装配（model/agent/runner/session/memory），CLI 与 server 共用
-internal/server/      # REST + SSE 处理器 + SPA 静态服务 + Provider/MCP 配置热重载
+internal/engine/      # 运行时装配（model/agent/runner/session/memory + 多 Agent 转交树），CLI 与 server 共用
+internal/server/      # REST + SSE 处理器 + SPA 静态服务 + Provider/MCP/Agent/沙箱 配置热重载
 internal/mcp/         # MCP 接入（stdio/http/sse transport + toolset + 直连列举）
 internal/model/       # OpenAI 兼容 model.LLM 适配器 + Registry
 internal/tool/        # 内置工具（web_search、remember/forget、load_memory）

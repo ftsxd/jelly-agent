@@ -34,6 +34,13 @@ type Config struct {
 	MCP       []MCPServer                  `mapstructure:"mcp" yaml:"mcp,omitempty"`
 	Platforms []PlatformBot                `mapstructure:"platforms" yaml:"platforms,omitempty"`
 
+	// DefaultAgent names the agent the CLI/web run when none is specified. Empty
+	// ⇒ the built-in single "root" agent (backward compatible).
+	DefaultAgent string `mapstructure:"default_agent" yaml:"default_agent,omitempty"`
+	// Agents are named agent definitions composable into a coordinator/sub-agent
+	// tree (PLAN §multi-agent). Empty ⇒ the engine builds the legacy single agent.
+	Agents []AgentDef `mapstructure:"agents" yaml:"agents,omitempty"`
+
 	// SourcePath records where the config came from ("(env)" for the env
 	// fallback, "" when nothing was found). Not persisted.
 	SourcePath string `mapstructure:"-" yaml:"-"`
@@ -76,6 +83,32 @@ type PlatformBot struct {
 	// servers). Empty = no MCP tools for this bot. Lets each bot selectively load
 	// MCP instead of always injecting every enabled server.
 	MCP []string `mapstructure:"mcp" yaml:"mcp,omitempty"`
+}
+
+// AgentDef is a named agent in the multi-agent tree. A coordinator references
+// specialists by name in SubAgents; ADK then exposes transfer_to_agent so the
+// coordinator's LLM can delegate a turn to the best-matching child (it routes on
+// each child's Description). The zero-ish value is valid — empty fields fall
+// back to engine defaults (default provider, RootInstruction, all enabled MCP).
+type AgentDef struct {
+	// Name is the unique identifier ([A-Za-z0-9_-]+), used by chat selection and
+	// as the agent's name in the tree.
+	Name string `mapstructure:"name" yaml:"name" json:"name"`
+	// Description tells a parent coordinator when to delegate here. One line.
+	Description string `mapstructure:"description" yaml:"description,omitempty" json:"description,omitempty"`
+	// Provider names which configured provider/model this agent runs on. Empty
+	// ⇒ the default provider.
+	Provider string `mapstructure:"provider" yaml:"provider,omitempty" json:"provider,omitempty"`
+	// Instruction is this agent's system instruction. Empty ⇒ RootInstruction.
+	Instruction string `mapstructure:"instruction" yaml:"instruction,omitempty" json:"instruction,omitempty"`
+	// MCP names the MCP servers this agent loads (a subset of the enabled
+	// servers). Empty ⇒ no MCP. Mirrors PlatformBot.MCP semantics.
+	MCP []string `mapstructure:"mcp" yaml:"mcp,omitempty" json:"mcp,omitempty"`
+	// SubAgents names the child agents this one may transfer to (delegation).
+	SubAgents []string `mapstructure:"sub_agents" yaml:"sub_agents,omitempty" json:"sub_agents,omitempty"`
+	// Enabled gates whether the agent is selectable / built. Disabled agents are
+	// kept in config but skipped.
+	Enabled bool `mapstructure:"enabled" yaml:"enabled,omitempty" json:"enabled"`
 }
 
 // Skills configures the Agent Skills subsystem (Markdown skill packages loaded
@@ -185,8 +218,10 @@ func Save(c *Config, path string) error {
 		SkillVars       map[string]map[string]string `yaml:"skill_vars,omitempty"`
 		MCP             []MCPServer                  `yaml:"mcp,omitempty"`
 		Platforms       []PlatformBot                `yaml:"platforms,omitempty"`
+		DefaultAgent    string                       `yaml:"default_agent,omitempty"`
+		Agents          []AgentDef                   `yaml:"agents,omitempty"`
 	}
-	p := payload{DefaultProvider: c.DefaultProvider, Providers: c.Providers, MCP: c.MCP, Platforms: c.Platforms, SkillVars: c.SkillVars}
+	p := payload{DefaultProvider: c.DefaultProvider, Providers: c.Providers, MCP: c.MCP, Platforms: c.Platforms, SkillVars: c.SkillVars, DefaultAgent: c.DefaultAgent, Agents: c.Agents}
 	if c.Skills != (Skills{}) {
 		sk := c.Skills
 		p.Skills = &sk
