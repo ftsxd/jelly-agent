@@ -53,7 +53,9 @@ func New(eng *engine.Engine, staticFS fs.FS) *Server {
 	if n, err := memory.PurgeOrphanIndex(""); err == nil && n > 0 {
 		log.Printf("[memory] 清理孤儿检索索引 %d 条", n)
 	}
-	return &Server{eng: eng, static: staticFS, auth: newAuthManager()}
+	s := &Server{eng: eng, static: staticFS, auth: newAuthManager()}
+	s.attachScheduleTools(eng)
+	return s
 }
 
 // WithConfigPath records the explicit config path (from --config / $JELLY_CONFIG)
@@ -80,6 +82,7 @@ func (s *Server) reload() error {
 	s.mu.Lock()
 	old := s.eng
 	s.eng = engine.New(cfg)
+	s.attachScheduleTools(s.eng)
 	s.mu.Unlock()
 	if old != nil {
 		old.Close() // terminate the previous engine's stdio MCP subprocesses

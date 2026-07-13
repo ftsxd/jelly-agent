@@ -67,10 +67,11 @@ type Engine struct {
 	cfg *config.Config
 	reg *jellymodel.Registry
 
-	mcpCtx    context.Context
-	mcpCancel context.CancelFunc
-	mcpOnce   sync.Once
-	mcpSets   map[string]adktool.Toolset // enabled MCP toolsets, keyed by server name
+	mcpCtx     context.Context
+	mcpCancel  context.CancelFunc
+	mcpOnce    sync.Once
+	mcpSets    map[string]adktool.Toolset // enabled MCP toolsets, keyed by server name
+	extraTools []adktool.Tool
 }
 
 // New wraps a loaded config in an engine.
@@ -80,7 +81,8 @@ func New(cfg *config.Config) *Engine {
 }
 
 // Config returns the underlying config.
-func (e *Engine) Config() *config.Config { return e.cfg }
+func (e *Engine) Config() *config.Config             { return e.cfg }
+func (e *Engine) SetExtraTools(tools []adktool.Tool) { e.extraTools = tools }
 
 // Close releases engine-owned resources. It cancels the MCP context, which
 // terminates any stdio MCP subprocesses this engine launched. Safe to call once
@@ -357,6 +359,7 @@ func (e *Engine) buildNode(name, description, provider, instruction string, tool
 	if err != nil {
 		return nil, prov, fmt.Errorf("build tools: %w", err)
 	}
+	tools = append(tools, e.extraTools...)
 
 	// Agent Skills: when any skill is enabled, add the use_skill tool so the
 	// agent can pull a skill's full body on demand. The catalog itself is

@@ -9,6 +9,8 @@ import (
 	"github.com/jelly-agent/jelly-agent/internal/schedule"
 	"github.com/robfig/cron/v3"
 	"google.golang.org/adk/agent"
+	adktool "google.golang.org/adk/tool"
+	"google.golang.org/adk/tool/functiontool"
 	"google.golang.org/genai"
 	"net/http"
 	"strings"
@@ -20,6 +22,41 @@ type scheduler struct {
 	mu     sync.Mutex
 	c      *cron.Cron
 	cancel context.CancelFunc
+}
+
+type createScheduleArgs struct {
+	Name   string `json:"name"`
+	Cron   string `json:"cron"`
+	Prompt string `json:"prompt"`
+	Skill  string `json:"skill,omitempty"`
+}
+
+func (s *Server) attachScheduleTools(eng *engine.Engine) {
+	t, err := functiontool.New(functiontool.Config{Name: "create_schedule", Description: "创建标准 Cron 周期任务。当用户要求定时、每天、每周执行任务时调用。"}, func(_ adktool.Context, a createScheduleArgs) (map[string]any, error) {
+		task := config.ScheduleTask{Name: strings.TrimSpace(a.Name), Cron: strings.TrimSpace(a.Cron), Prompt: strings.TrimSpace(a.Prompt), Skill: strings.TrimSpace(a.Skill), Enabled: true}
+		if err := validSchedule(task); err != nil {
+			return nil, err
+		}
+		p, err := s.writeTargetPath()
+		if err != nil {
+			return nil, err
+		}
+		c, err := loadRawOrEmpty(p)
+		if err != nil {
+			return nil, err
+		}
+		c.Schedules = append(c.Schedules, task)
+		if err := config.Save(c, p); err != nil {
+			return nil, err
+		}
+		if err := s.reload(); err != nil {
+			return nil, err
+		}
+		return map[string]any{"ok": true, "name": task.Name}, nil
+	})
+	if err == nil {
+		eng.SetExtraTools([]adktool.Tool{t})
+	}
 }
 
 func (s *Server) StartSchedules(ctx context.Context) {
