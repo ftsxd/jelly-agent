@@ -6,6 +6,13 @@
 
 default_provider: deepseek
 
+# Web 控制台管理员。首次执行 jelly serve 时会自动创建 admin、输出一次性
+# 初始密码，并在此处写入 bcrypt 哈希。首次登录后必须修改密码；不要手填明文。
+# web:
+#   admin:
+#     username: admin
+#     password_hash: $2a$...  # bcrypt 哈希，由服务自动生成
+
 providers:
   - name: deepseek
     base_url: https://api.deepseek.com/v1

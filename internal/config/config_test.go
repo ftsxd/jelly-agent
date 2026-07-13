@@ -63,3 +63,22 @@ func TestSavePermsAndMinimalMemory(t *testing.T) {
 		t.Fatalf("empty memory should be omitted:\n%s", raw)
 	}
 }
+
+func TestLoadPreservesBcryptHashWhileExpandingBracedEnv(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	hash := "$2a$10$abcdefghijklmnopqrstuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuu"
+	if err := os.WriteFile(path, []byte("web:\n  admin:\n    username: admin\n    password_hash: "+hash+"\nproviders:\n  - name: x\n    api_key: ${TEST_KEY}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TEST_KEY", "expanded")
+	c, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Web.Admin.PasswordHash != hash {
+		t.Fatalf("bcrypt hash changed to %q", c.Web.Admin.PasswordHash)
+	}
+	if c.Providers[0].APIKey != "expanded" {
+		t.Fatalf("env ref = %q, want expanded", c.Providers[0].APIKey)
+	}
+}

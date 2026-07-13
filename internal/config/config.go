@@ -7,10 +7,13 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"gopkg.in/yaml.v3"
 )
+
+var envReference = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}`)
 
 // Provider is one OpenAI-compatible model endpoint.
 type Provider struct {
@@ -27,6 +30,7 @@ type Config struct {
 	Memory          Memory     `mapstructure:"memory" yaml:"memory"`
 	Skills          Skills     `mapstructure:"skills" yaml:"skills,omitempty"`
 	Sandbox         Sandbox    `mapstructure:"sandbox" yaml:"sandbox,omitempty"`
+	Web             Web        `mapstructure:"web" yaml:"web,omitempty"`
 	// SkillVars holds per-skill variables (skill name → KV), where secret-ish
 	// values are masked by the API and may use ${ENV}. Kept here (config, 0600)
 	// rather than in the skill files so sharing/exporting a skill omits secrets.
@@ -121,6 +125,24 @@ type Skills struct {
 	AllowScripts bool `mapstructure:"allow_scripts" yaml:"allow_scripts,omitempty"`
 }
 
+// Web configures access to the local web dashboard. A configured administrator
+// is required before either server entry point will start.
+type Web struct {
+	Admin Admin `mapstructure:"admin" yaml:"admin,omitempty"`
+}
+
+// Admin is the one local dashboard administrator. PasswordHash must be a
+// bcrypt hash; never store a plaintext password in config.yaml.
+type Admin struct {
+	Username     string `mapstructure:"username" yaml:"username,omitempty"`
+	PasswordHash string `mapstructure:"password_hash" yaml:"password_hash,omitempty"`
+	MustChange   bool   `mapstructure:"must_change" yaml:"must_change,omitempty"`
+}
+
+func (a Admin) Configured() bool {
+	return strings.TrimSpace(a.Username) != "" && strings.TrimSpace(a.PasswordHash) != ""
+}
+
 // Sandbox configures the execution envelope for skill scripts (and future
 // run_code). The zero value is valid: the sandbox package applies its defaults
 // (60s timeout, 8 KiB output, native best-effort confinement). See PLAN §8
@@ -192,7 +214,7 @@ func load(path string, expand bool) (*Config, error) {
 	}
 	content := raw
 	if expand {
-		content = []byte(os.ExpandEnv(string(raw)))
+		content = []byte(expandEnvReferences(string(raw)))
 	}
 
 	// yaml.v3 (not viper) so map keys keep their case — viper lowercases them,
@@ -205,6 +227,16 @@ func load(path string, expand bool) (*Config, error) {
 	return &c, nil
 }
 
+// expandEnvReferences intentionally recognizes only the documented ${ENV}
+// form. os.ExpandEnv would also treat bcrypt's $2a$... password hashes as
+// environment variables and silently corrupt them.
+func expandEnvReferences(s string) string {
+	return envReference.ReplaceAllStringFunc(s, func(ref string) string {
+		name := ref[2 : len(ref)-1]
+		return os.Getenv(name)
+	})
+}
+
 // Save writes the config as YAML to path (0600 — it may hold API keys),
 // creating parent directories. The memory section is omitted when empty so a
 // freshly-created file stays minimal.
@@ -215,6 +247,7 @@ func Save(c *Config, path string) error {
 		Memory          *Memory                      `yaml:"memory,omitempty"`
 		Skills          *Skills                      `yaml:"skills,omitempty"`
 		Sandbox         *Sandbox                     `yaml:"sandbox,omitempty"`
+		Web             *Web                         `yaml:"web,omitempty"`
 		SkillVars       map[string]map[string]string `yaml:"skill_vars,omitempty"`
 		MCP             []MCPServer                  `yaml:"mcp,omitempty"`
 		Platforms       []PlatformBot                `yaml:"platforms,omitempty"`
@@ -222,6 +255,10 @@ func Save(c *Config, path string) error {
 		Agents          []AgentDef                   `yaml:"agents,omitempty"`
 	}
 	p := payload{DefaultProvider: c.DefaultProvider, Providers: c.Providers, MCP: c.MCP, Platforms: c.Platforms, SkillVars: c.SkillVars, DefaultAgent: c.DefaultAgent, Agents: c.Agents}
+	if c.Web != (Web{}) {
+		web := c.Web
+		p.Web = &web
+	}
 	if c.Skills != (Skills{}) {
 		sk := c.Skills
 		p.Skills = &sk
@@ -263,7 +300,19 @@ func DefaultUserConfigPath() (string, error) {
 // neither is present, so read-only commands still work.
 func LoadOrEnv(explicit string) (*Config, error) {
 	if path, ok := resolvePath(explicit); ok {
-		return Load(path)
+		c, err := Load(path)
+		if err != nil {
+			return nil, err
+		}
+		// A server may create a user config solely to persist its administrator
+		// credential. Keep an environment-supplied provider usable in that case.
+		if len(c.Providers) == 0 {
+			if p, ok := providerFromEnv(); ok {
+				c.DefaultProvider = p.Name
+				c.Providers = []Provider{p}
+			}
+		}
+		return c, nil
 	}
 	if p, ok := providerFromEnv(); ok {
 		return &Config{DefaultProvider: p.Name, Providers: []Provider{p}, SourcePath: "(env)"}, nil

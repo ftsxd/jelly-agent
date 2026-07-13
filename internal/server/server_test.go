@@ -10,6 +10,7 @@ import (
 
 	"github.com/jelly-agent/jelly-agent/internal/config"
 	"github.com/jelly-agent/jelly-agent/internal/engine"
+	"golang.org/x/crypto/bcrypt"
 )
 
 // newTestServer builds an API-only server over an engine whose memory lives in a
@@ -21,6 +22,16 @@ func newTestServer(t *testing.T) *Server {
 		Providers:       []config.Provider{{Name: "test", BaseURL: "http://x", APIKey: "sk-secret-key-1234", Model: "m"}},
 	}
 	cfg.Memory.Core.Dir = t.TempDir()
+	return New(engine.New(cfg), nil)
+}
+
+func newAdminServer(t *testing.T) *Server {
+	t.Helper()
+	hash, err := bcrypt.GenerateFromPassword([]byte("correct-horse-battery-staple"), bcrypt.MinCost)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{Web: config.Web{Admin: config.Admin{Username: "admin", PasswordHash: string(hash)}}}
 	return New(engine.New(cfg), nil)
 }
 
@@ -55,6 +66,108 @@ func TestHealth(t *testing.T) {
 	}
 	if m := decode(t, w); m["status"] != "ok" {
 		t.Fatalf("status field = %v", m["status"])
+	}
+}
+
+func TestAdminAuthenticationProtectsAPIs(t *testing.T) {
+	s := newAdminServer(t)
+
+	// Public process health does not expose control-plane data.
+	if w := do(t, s, "GET", "/api/health", ""); w.Code != http.StatusOK {
+		t.Fatalf("health status = %d", w.Code)
+	}
+	// Every other API endpoint needs an authenticated administrator.
+	if w := do(t, s, "GET", "/api/providers", ""); w.Code != http.StatusUnauthorized {
+		t.Fatalf("private status = %d, want 401: %s", w.Code, w.Body.String())
+	}
+	if w := do(t, s, "POST", "/api/auth/login", `{"username":"admin","password":"wrong"}`); w.Code != http.StatusUnauthorized {
+		t.Fatalf("wrong password status = %d", w.Code)
+	}
+
+	login := do(t, s, "POST", "/api/auth/login", `{"username":"admin","password":"correct-horse-battery-staple"}`)
+	if login.Code != http.StatusOK {
+		t.Fatalf("login status = %d: %s", login.Code, login.Body.String())
+	}
+	cookies := login.Result().Cookies()
+	if len(cookies) != 1 || !cookies[0].HttpOnly || cookies[0].SameSite != http.SameSiteStrictMode {
+		t.Fatalf("unexpected session cookie: %+v", cookies)
+	}
+	req := httptest.NewRequest("GET", "/api/providers", nil)
+	req.AddCookie(cookies[0])
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("authenticated status = %d: %s", w.Code, w.Body.String())
+	}
+
+	// A config reload that changes the password hash invalidates existing sessions.
+	s.engine().Config().Web.Admin.PasswordHash = "changed"
+	w = httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("changed-password status = %d, want 401", w.Code)
+	}
+}
+
+func TestInitialAdminMustChangePassword(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	hash, err := bcrypt.GenerateFromPassword([]byte("initial-password-123"), bcrypt.MinCost)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := New(engine.New(&config.Config{Web: config.Web{Admin: config.Admin{Username: "admin", PasswordHash: string(hash), MustChange: true}}}), nil)
+	login := do(t, s, "POST", "/api/auth/login", `{"username":"admin","password":"initial-password-123"}`)
+	if login.Code != http.StatusOK {
+		t.Fatalf("login status = %d: %s", login.Code, login.Body.String())
+	}
+	cookie := login.Result().Cookies()[0]
+	req := httptest.NewRequest("GET", "/api/providers", nil)
+	req.AddCookie(cookie)
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("protected API status = %d, want 403", w.Code)
+	}
+	req = httptest.NewRequest("POST", "/api/auth/password", strings.NewReader(`{"current_password":"initial-password-123","new_password":"new-password-123"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(cookie)
+	w = httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("change password status = %d: %s", w.Code, w.Body.String())
+	}
+	cookie = w.Result().Cookies()[0]
+	req = httptest.NewRequest("GET", "/api/providers", nil)
+	req.AddCookie(cookie)
+	w = httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("API after password change status = %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestBootstrapAdminCreatesOneTimeCredential(t *testing.T) {
+	path := t.TempDir() + "/config.yaml"
+	cfg := &config.Config{SourcePath: path}
+	password, err := BootstrapAdmin(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(password) < 20 {
+		t.Fatalf("initial password too short: %q", password)
+	}
+	saved, err := config.LoadRaw(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if saved.Web.Admin.Username != "admin" || !saved.Web.Admin.MustChange {
+		t.Fatalf("unexpected admin config: %+v", saved.Web.Admin)
+	}
+	if bcrypt.CompareHashAndPassword([]byte(saved.Web.Admin.PasswordHash), []byte(password)) != nil {
+		t.Fatal("saved hash does not match generated password")
+	}
+	if second, err := BootstrapAdmin(saved); err != nil || second != "" {
+		t.Fatalf("second bootstrap = %q, %v; want no new password", second, err)
 	}
 }
 

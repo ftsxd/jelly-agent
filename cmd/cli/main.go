@@ -46,7 +46,7 @@ func newRootCmd() *cobra.Command {
 	}
 	root.PersistentFlags().StringVar(&configPath, "config", "", "配置文件路径（默认搜索 configs/config.yaml、~/.jelly-agent/config.yaml，或回落到 LLM_* 环境变量）")
 
-	root.AddCommand(newAgentCmd(), newConfigCmd(), newToolCmd(), newSessionCmd(), newServeCmd())
+	root.AddCommand(newAgentCmd(), newConfigCmd(), newToolCmd(), newSessionCmd(), newServeCmd(), newAdminCmd())
 	return root
 }
 

@@ -26,6 +26,18 @@ func newServeCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if password, err := server.BootstrapAdmin(eng.Config()); err != nil {
+				return err
+			} else if password != "" {
+				fmt.Printf("\n首次管理员账户已创建：用户名 admin\n一次性初始密码：%s\n请立刻登录控制台并修改密码。\n\n", password)
+				eng, err = loadEngine()
+				if err != nil {
+					return err
+				}
+			}
+			if err := server.ValidateAdmin(eng.Config().Web.Admin); err != nil {
+				return err
+			}
 			srv := server.New(eng, web.DistFS()).WithConfigPath(configPath)
 			httpSrv := &http.Server{
 				Addr:              addr,
@@ -46,7 +58,7 @@ func newServeCmd() *cobra.Command {
 				if web.DistFS() == nil {
 					front = "前端未构建（仅 API）"
 				}
-				fmt.Printf("jelly-agent 控制台 → http://localhost%s  [%s]\n", addr, front)
+				fmt.Printf("jelly-agent 控制台 → http://%s  [%s]\n", addr, front)
 				fmt.Printf("配置来源: %s   默认 Provider: %s\n", eng.Config().SourcePath, eng.Config().DefaultProvider)
 				if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 					errc <- err
@@ -64,6 +76,6 @@ func newServeCmd() *cobra.Command {
 			}
 		},
 	}
-	cmd.Flags().StringVar(&addr, "addr", ":6185", "监听地址")
+	cmd.Flags().StringVar(&addr, "addr", "127.0.0.1:6185", "监听地址（默认仅本机；公开访问请显式指定）")
 	return cmd
 }

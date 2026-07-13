@@ -39,6 +39,10 @@ async function jdelete(path) {
 
 export const api = {
   health: () => jget('/api/health'),
+  authStatus: () => jget('/api/auth/status'),
+  login: (username, password) => jpost('/api/auth/login', { username, password }),
+  logout: () => jpost('/api/auth/logout', {}),
+  changePassword: (currentPassword, newPassword) => jpost('/api/auth/password', { current_password: currentPassword, new_password: newPassword }),
   providers: () => jget('/api/providers'),
   saveProvider: (p) => jpost('/api/providers', p),
   deleteProvider: (name) => jdelete(`/api/providers/${encodeURIComponent(name)}`),

@@ -34,6 +34,7 @@ type Server struct {
 	out          io.Writer     // hot-reload notices; nil = os.Stderr
 
 	bots botManager // running messaging-platform bots (DingTalk, …)
+	auth *authManager
 }
 
 // New builds a server over the given engine. staticFS is the embedded frontend
@@ -51,7 +52,7 @@ func New(eng *engine.Engine, staticFS fs.FS) *Server {
 	if n, err := memory.PurgeOrphanIndex(""); err == nil && n > 0 {
 		log.Printf("[memory] 清理孤儿检索索引 %d 条", n)
 	}
-	return &Server{eng: eng, static: staticFS}
+	return &Server{eng: eng, static: staticFS, auth: newAuthManager()}
 }
 
 // WithConfigPath records the explicit config path (from --config / $JELLY_CONFIG)
@@ -91,6 +92,10 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /api/health", s.handleHealth)
+	mux.HandleFunc("GET /api/auth/status", s.handleAuthStatus)
+	mux.HandleFunc("POST /api/auth/login", s.handleLogin)
+	mux.HandleFunc("POST /api/auth/logout", s.handleLogout)
+	mux.HandleFunc("POST /api/auth/password", s.handleChangePassword)
 	mux.HandleFunc("GET /api/providers", s.handleProviders)
 	mux.HandleFunc("POST /api/providers", s.handleSaveProvider)
 	mux.HandleFunc("DELETE /api/providers/{name}", s.handleDeleteProvider)
@@ -131,7 +136,7 @@ func (s *Server) Handler() http.Handler {
 	if s.static != nil {
 		mux.Handle("/", s.spaHandler())
 	}
-	return mux
+	return s.authMiddleware(mux)
 }
 
 // writeJSON encodes v as a JSON response with the given status.

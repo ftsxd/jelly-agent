@@ -58,7 +58,7 @@ jelly agent list                       # 列出 Agent
 jelly session list                     # 列出持久化的历史会话
 jelly config list                      # 列出 Provider（API Key 脱敏）
 jelly tool list                        # 列出内置工具
-jelly serve                            # 启动 Web 控制台（默认 :6185）
+jelly serve                            # 启动 Web 控制台（默认 127.0.0.1:6185）
 jelly --help                           # 全部命令
 ```
 
@@ -106,6 +106,15 @@ enabled: true
 设 `memory.search.enabled: true` 后开启——既可改 `config.yaml`，也可在 Web **记忆**页右上角的开关一键启停（保存即写入配置并热重载，即时生效、无需重启）。开启后每轮结束把会话文本写入 `state.db` 内的 FTS5 全文索引，Agent 据此获得 `load_memory` 工具，可在后续会话里检索过往对话（返回 top-K，永不回灌整段历史）。采用 trigram 分词，中英文均按子串匹配（查询需 ≥3 字符，更短自动回落 LIKE）。配置项见 `memory.search`（`top_k` 等）。向量语义检索（L3）属后续。
 
 ## Web 控制台
+
+控制台需要一个管理员账户，且默认仅监听 `127.0.0.1:6185`。首次启动时服务会自动创建 `admin`、在启动终端打印一次性初始密码，并强制首次登录后修改密码：
+
+```bash
+cp configs/config.example.yaml configs/config.yaml
+./jelly serve
+```
+
+密码以 bcrypt 哈希写入权限为 `0600` 的配置文件。登录成功后浏览器获得 12 小时、HttpOnly、SameSite=Strict 的会话 Cookie；服务重启会使旧会话失效。可用 `jelly admin set-password <用户名>` 从标准输入重置密码。若确需通过反向代理公开访问，请显式传 `--addr 0.0.0.0:6185`，并由代理提供 HTTPS。
 
 面向开发者的测试台（Vue 3 + Vite，深色主题，`go:embed` 打包进二进制）。页面：
 
