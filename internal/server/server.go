@@ -33,8 +33,9 @@ type Server struct {
 	pollInterval time.Duration // config-watch poll interval; 0 = defaultConfigPoll
 	out          io.Writer     // hot-reload notices; nil = os.Stderr
 
-	bots botManager // running messaging-platform bots (DingTalk, …)
-	auth *authManager
+	bots     botManager // running messaging-platform bots (DingTalk, …)
+	auth     *authManager
+	schedule scheduler
 }
 
 // New builds a server over the given engine. staticFS is the embedded frontend
@@ -84,6 +85,7 @@ func (s *Server) reload() error {
 		old.Close() // terminate the previous engine's stdio MCP subprocesses
 	}
 	s.restartBots(cfg) // pick up platform changes; bots answer via the new engine
+	// The caller-owned server context restarts schedules through Watch/startup.
 	return nil
 }
 
@@ -96,6 +98,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/auth/login", s.handleLogin)
 	mux.HandleFunc("POST /api/auth/logout", s.handleLogout)
 	mux.HandleFunc("POST /api/auth/password", s.handleChangePassword)
+	mux.HandleFunc("GET /api/schedules", s.handleSchedules)
+	mux.HandleFunc("POST /api/schedules", s.handleSaveSchedule)
+	mux.HandleFunc("DELETE /api/schedules/{name}", s.handleDeleteSchedule)
+	mux.HandleFunc("GET /api/schedules/runs", s.handleScheduleRuns)
 	mux.HandleFunc("GET /api/providers", s.handleProviders)
 	mux.HandleFunc("POST /api/providers", s.handleSaveProvider)
 	mux.HandleFunc("DELETE /api/providers/{name}", s.handleDeleteProvider)

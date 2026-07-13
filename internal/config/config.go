@@ -37,6 +37,7 @@ type Config struct {
 	SkillVars map[string]map[string]string `mapstructure:"skill_vars" yaml:"skill_vars,omitempty"`
 	MCP       []MCPServer                  `mapstructure:"mcp" yaml:"mcp,omitempty"`
 	Platforms []PlatformBot                `mapstructure:"platforms" yaml:"platforms,omitempty"`
+	Schedules []ScheduleTask               `mapstructure:"schedules" yaml:"schedules,omitempty"`
 
 	// DefaultAgent names the agent the CLI/web run when none is specified. Empty
 	// ⇒ the built-in single "root" agent (backward compatible).
@@ -137,6 +138,18 @@ type Admin struct {
 	Username     string `mapstructure:"username" yaml:"username,omitempty"`
 	PasswordHash string `mapstructure:"password_hash" yaml:"password_hash,omitempty"`
 	MustChange   bool   `mapstructure:"must_change" yaml:"must_change,omitempty"`
+}
+
+// ScheduleTask is a persisted cron-triggered Agent job. Cron uses the standard
+// five-field syntax (minute hour day-of-month month day-of-week).
+type ScheduleTask struct {
+	Name     string `yaml:"name" json:"name"`
+	Cron     string `yaml:"cron" json:"cron"`
+	Prompt   string `yaml:"prompt" json:"prompt"`
+	Agent    string `yaml:"agent,omitempty" json:"agent,omitempty"`
+	Provider string `yaml:"provider,omitempty" json:"provider,omitempty"`
+	Skill    string `yaml:"skill,omitempty" json:"skill,omitempty"`
+	Enabled  bool   `yaml:"enabled" json:"enabled"`
 }
 
 func (a Admin) Configured() bool {
@@ -251,10 +264,11 @@ func Save(c *Config, path string) error {
 		SkillVars       map[string]map[string]string `yaml:"skill_vars,omitempty"`
 		MCP             []MCPServer                  `yaml:"mcp,omitempty"`
 		Platforms       []PlatformBot                `yaml:"platforms,omitempty"`
+		Schedules       []ScheduleTask               `yaml:"schedules,omitempty"`
 		DefaultAgent    string                       `yaml:"default_agent,omitempty"`
 		Agents          []AgentDef                   `yaml:"agents,omitempty"`
 	}
-	p := payload{DefaultProvider: c.DefaultProvider, Providers: c.Providers, MCP: c.MCP, Platforms: c.Platforms, SkillVars: c.SkillVars, DefaultAgent: c.DefaultAgent, Agents: c.Agents}
+	p := payload{DefaultProvider: c.DefaultProvider, Providers: c.Providers, MCP: c.MCP, Platforms: c.Platforms, Schedules: c.Schedules, SkillVars: c.SkillVars, DefaultAgent: c.DefaultAgent, Agents: c.Agents}
 	if c.Web != (Web{}) {
 		web := c.Web
 		p.Web = &web

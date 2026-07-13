@@ -85,6 +85,10 @@ export const api = {
   saveMCP: (s) => jpost('/api/mcp', s),
   testMCP: (s) => jpost('/api/mcp/test', s),
   deleteMCP: (name) => jdelete(`/api/mcp/${encodeURIComponent(name)}`),
+  schedules: () => jget('/api/schedules'),
+  saveSchedule: (task) => jpost('/api/schedules', task),
+  deleteSchedule: (name) => jdelete(`/api/schedules/${encodeURIComponent(name)}`),
+  scheduleRuns: (task = '') => jget(`/api/schedules/runs?task=${encodeURIComponent(task)}`),
 }
 
 // streamChat POSTs a message and parses the SSE response. onEvent receives each

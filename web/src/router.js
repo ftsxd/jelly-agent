@@ -14,6 +14,7 @@ const routes = [
   { path: '/mcp', name: 'mcp', component: () => import('./views/McpView.vue'), meta: { title: 'MCP', icon: 'plug' } },
   { path: '/messaging', name: 'messaging', component: () => import('./views/MessagingView.vue'), meta: { title: '消息绑定', icon: 'message' } },
   { path: '/config', name: 'config', component: () => import('./views/ConfigView.vue'), meta: { title: '配置', icon: 'settings' } },
+  { path: '/schedules', name: 'schedules', component: () => import('./views/SchedulesView.vue'), meta: { title: '周期任务', icon: 'chart' } },
 ]
 
 export const navItems = routes.filter((r) => r.meta)

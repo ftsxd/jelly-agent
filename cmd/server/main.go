@@ -59,6 +59,7 @@ func main() {
 
 	go srv.Watch(ctx)  // hot-reload on external config file edits
 	srv.StartBots(ctx) // launch enabled messaging-platform bots (DingTalk, …)
+	srv.StartSchedules(ctx)
 
 	go func() {
 		embedded := "已嵌入前端"
