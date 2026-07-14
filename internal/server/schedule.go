@@ -13,15 +13,18 @@ import (
 	"google.golang.org/adk/tool/functiontool"
 	"google.golang.org/genai"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 )
 
 type scheduler struct {
-	mu     sync.Mutex
-	c      *cron.Cron
-	cancel context.CancelFunc
+	mu      sync.Mutex
+	c       *cron.Cron
+	cancel  context.CancelFunc
+	base    context.Context
+	running map[string]bool
 }
 
 type createScheduleArgs struct {
@@ -75,8 +78,20 @@ func (s *Server) StartSchedules(ctx context.Context) {
 	s.schedule.mu.Lock()
 	s.schedule.c = c
 	s.schedule.cancel = cancel
+	s.schedule.base = ctx
+	if s.schedule.running == nil {
+		s.schedule.running = map[string]bool{}
+	}
 	s.schedule.mu.Unlock()
 	c.Start()
+}
+func (s *Server) restartSchedules() {
+	s.schedule.mu.Lock()
+	ctx := s.schedule.base
+	s.schedule.mu.Unlock()
+	if ctx != nil {
+		s.StartSchedules(ctx)
+	}
 }
 func (s *Server) stopSchedules() {
 	s.schedule.mu.Lock()
@@ -95,12 +110,41 @@ func (s *Server) stopSchedules() {
 	s.schedule.cancel = nil
 }
 func (s *Server) runSchedule(ctx context.Context, t config.ScheduleTask) {
+	s.schedule.mu.Lock()
+	if s.schedule.running[t.Name] {
+		s.schedule.mu.Unlock()
+		s.logf("周期任务 %q 仍在执行，跳过本次触发", t.Name)
+		return
+	}
+	s.schedule.running[t.Name] = true
+	s.schedule.mu.Unlock()
+	defer func() { s.schedule.mu.Lock(); delete(s.schedule.running, t.Name); s.schedule.mu.Unlock() }()
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
+	defer cancel()
 	started := time.Now()
 	prompt := t.Prompt
 	if t.Skill != "" {
 		prompt = "必须先调用 use_skill 加载技能 \"" + t.Skill + "\"，再严格执行。\n\n" + prompt
 	}
-	out, err := s.runScheduledAgent(ctx, t, prompt)
+	var out string
+	var err error
+	for attempt := 0; attempt <= t.RetryCount; attempt++ {
+		out, err = s.runScheduledAgent(ctx, t, prompt)
+		if err == nil || ctx.Err() != nil {
+			break
+		}
+		if attempt < t.RetryCount {
+			delay := time.Duration(t.RetryDelaySec) * time.Second
+			if delay <= 0 {
+				delay = 30 * time.Second
+			}
+			s.logf("周期任务 %q 失败，%s 后重试（%d/%d）", t.Name, delay, attempt+1, t.RetryCount)
+			select {
+			case <-ctx.Done():
+			case <-time.After(delay):
+			}
+		}
+	}
 	if err != nil {
 		_ = schedule.Record(t.Name, started, "failed", out, err.Error())
 		s.logf("周期任务 %q 失败: %v", t.Name, err)
@@ -225,11 +269,39 @@ func (s *Server) handleDeleteSchedule(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, 200, map[string]bool{"ok": true})
 }
+func (s *Server) handleRunSchedule(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	for _, t := range s.engine().Config().Schedules {
+		if t.Name == name {
+			if !t.Enabled {
+				writeErr(w, http.StatusBadRequest, "任务已停用")
+				return
+			}
+			s.schedule.mu.Lock()
+			ctx := s.schedule.base
+			s.schedule.mu.Unlock()
+			if ctx == nil {
+				ctx = context.Background()
+			}
+			go s.runSchedule(ctx, t)
+			writeJSON(w, http.StatusAccepted, map[string]bool{"ok": true})
+			return
+		}
+	}
+	writeErr(w, http.StatusNotFound, "周期任务不存在")
+}
 func (s *Server) handleScheduleRuns(w http.ResponseWriter, r *http.Request) {
-	runs, err := schedule.List(r.URL.Query().Get("task"), 50)
+	limit, offset := 50, 0
+	if n, err := strconv.Atoi(r.URL.Query().Get("limit")); err == nil && n > 0 && n <= 200 {
+		limit = n
+	}
+	if n, err := strconv.Atoi(r.URL.Query().Get("offset")); err == nil && n >= 0 {
+		offset = n
+	}
+	runs, total, err := schedule.List(r.URL.Query().Get("task"), limit, offset)
 	if err != nil {
 		writeErr(w, 500, err.Error())
 		return
 	}
-	writeJSON(w, 200, map[string]any{"runs": runs})
+	writeJSON(w, 200, map[string]any{"runs": runs, "total": total, "limit": limit, "offset": offset})
 }

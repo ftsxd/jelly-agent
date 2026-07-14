@@ -88,6 +88,7 @@ export const api = {
   schedules: () => jget('/api/schedules'),
   saveSchedule: (task) => jpost('/api/schedules', task),
   deleteSchedule: (name) => jdelete(`/api/schedules/${encodeURIComponent(name)}`),
+  runSchedule: (name) => jpost(`/api/schedules/${encodeURIComponent(name)}/run`, {}),
   scheduleRuns: (task = '') => jget(`/api/schedules/runs?task=${encodeURIComponent(task)}`),
 }
 

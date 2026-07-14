@@ -143,13 +143,15 @@ type Admin struct {
 // ScheduleTask is a persisted cron-triggered Agent job. Cron uses the standard
 // five-field syntax (minute hour day-of-month month day-of-week).
 type ScheduleTask struct {
-	Name     string `yaml:"name" json:"name"`
-	Cron     string `yaml:"cron" json:"cron"`
-	Prompt   string `yaml:"prompt" json:"prompt"`
-	Agent    string `yaml:"agent,omitempty" json:"agent,omitempty"`
-	Provider string `yaml:"provider,omitempty" json:"provider,omitempty"`
-	Skill    string `yaml:"skill,omitempty" json:"skill,omitempty"`
-	Enabled  bool   `yaml:"enabled" json:"enabled"`
+	Name          string `yaml:"name" json:"name"`
+	Cron          string `yaml:"cron" json:"cron"`
+	Prompt        string `yaml:"prompt" json:"prompt"`
+	Agent         string `yaml:"agent,omitempty" json:"agent,omitempty"`
+	Provider      string `yaml:"provider,omitempty" json:"provider,omitempty"`
+	Skill         string `yaml:"skill,omitempty" json:"skill,omitempty"`
+	Enabled       bool   `yaml:"enabled" json:"enabled"`
+	RetryCount    int    `yaml:"retry_count,omitempty" json:"retry_count,omitempty"`
+	RetryDelaySec int    `yaml:"retry_delay_sec,omitempty" json:"retry_delay_sec,omitempty"`
 }
 
 func (a Admin) Configured() bool {

@@ -88,7 +88,7 @@ func (s *Server) reload() error {
 		old.Close() // terminate the previous engine's stdio MCP subprocesses
 	}
 	s.restartBots(cfg) // pick up platform changes; bots answer via the new engine
-	// The caller-owned server context restarts schedules through Watch/startup.
+	s.restartSchedules()
 	return nil
 }
 
@@ -104,6 +104,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/schedules", s.handleSchedules)
 	mux.HandleFunc("POST /api/schedules", s.handleSaveSchedule)
 	mux.HandleFunc("DELETE /api/schedules/{name}", s.handleDeleteSchedule)
+	mux.HandleFunc("POST /api/schedules/{name}/run", s.handleRunSchedule)
 	mux.HandleFunc("GET /api/schedules/runs", s.handleScheduleRuns)
 	mux.HandleFunc("GET /api/providers", s.handleProviders)
 	mux.HandleFunc("POST /api/providers", s.handleSaveProvider)
