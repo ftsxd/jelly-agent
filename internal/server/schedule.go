@@ -34,11 +34,19 @@ type createScheduleArgs struct {
 	Prompt string `json:"prompt"`
 	Skill  string `json:"skill,omitempty"`
 }
+type scheduleNameArgs struct {
+	Name string `json:"name"`
+}
+type setScheduleEnabledArgs struct {
+	Name    string `json:"name"`
+	Enabled bool   `json:"enabled"`
+}
 
 var validScheduleName = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
 
 func (s *Server) attachScheduleTools(eng *engine.Engine) {
-	t, err := functiontool.New(functiontool.Config{Name: "create_schedule", Description: "创建标准 Cron 周期任务。当用户要求定时、每天、每周执行任务时调用。"}, func(_ adktool.Context, a createScheduleArgs) (map[string]any, error) {
+	var tools []adktool.Tool
+	if t, err := functiontool.New(functiontool.Config{Name: "create_schedule", Description: "创建或更新标准 Cron 周期任务。当用户要求定时、每天、每周执行任务时调用。"}, func(_ adktool.Context, a createScheduleArgs) (map[string]any, error) {
 		task := config.ScheduleTask{Name: strings.TrimSpace(a.Name), Cron: strings.TrimSpace(a.Cron), Prompt: strings.TrimSpace(a.Prompt), Skill: strings.TrimSpace(a.Skill), Enabled: true}
 		if err := validSchedule(task); err != nil {
 			return nil, err
@@ -47,10 +55,63 @@ func (s *Server) attachScheduleTools(eng *engine.Engine) {
 			return nil, err
 		}
 		return map[string]any{"ok": true, "name": task.Name}, nil
-	})
-	if err == nil {
-		eng.SetExtraTools([]adktool.Tool{t})
+	}); err == nil {
+		tools = append(tools, t)
 	}
+	if t, err := functiontool.New(functiontool.Config{Name: "list_schedules", Description: "列出当前所有周期任务及其 Cron、启用状态和提示词。"}, func(_ adktool.Context, _ struct{}) ([]config.ScheduleTask, error) {
+		return s.engine().Config().Schedules, nil
+	}); err == nil {
+		tools = append(tools, t)
+	}
+	if t, err := functiontool.New(functiontool.Config{Name: "set_schedule_enabled", Description: "启用或停用指定周期任务。"}, func(_ adktool.Context, a setScheduleEnabledArgs) (map[string]any, error) {
+		for _, t := range s.engine().Config().Schedules {
+			if t.Name == a.Name {
+				t.Enabled = a.Enabled
+				return map[string]any{"ok": true, "enabled": a.Enabled}, s.upsertSchedule(t)
+			}
+		}
+		return nil, fmt.Errorf("周期任务 %q 不存在", a.Name)
+	}); err == nil {
+		tools = append(tools, t)
+	}
+	if t, err := functiontool.New(functiontool.Config{Name: "delete_schedule", Description: "删除指定周期任务。"}, func(_ adktool.Context, a scheduleNameArgs) (map[string]any, error) {
+		if err := s.deleteSchedule(a.Name); err != nil {
+			return nil, err
+		}
+		return map[string]any{"ok": true}, nil
+	}); err == nil {
+		tools = append(tools, t)
+	}
+	eng.SetExtraTools(tools)
+}
+
+func (s *Server) deleteSchedule(name string) error {
+	name = strings.TrimSpace(name)
+	p, err := s.writeTargetPath()
+	if err != nil {
+		return err
+	}
+	c, err := loadRawOrEmpty(p)
+	if err != nil {
+		return err
+	}
+	found := false
+	out := c.Schedules[:0]
+	for _, t := range c.Schedules {
+		if t.Name == name {
+			found = true
+			continue
+		}
+		out = append(out, t)
+	}
+	if !found {
+		return fmt.Errorf("周期任务 %q 不存在", name)
+	}
+	c.Schedules = out
+	if err := config.Save(c, p); err != nil {
+		return err
+	}
+	return s.reload()
 }
 
 func (s *Server) StartSchedules(ctx context.Context) {
@@ -250,24 +311,8 @@ func (s *Server) handleSaveSchedule(w http.ResponseWriter, r *http.Request) {
 }
 func (s *Server) handleDeleteSchedule(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
-	p, err := s.writeTargetPath()
-	if err != nil {
-		writeErr(w, 500, err.Error())
-		return
-	}
-	c, err := loadRawOrEmpty(p)
-	if err != nil {
-		writeErr(w, 500, err.Error())
-		return
-	}
-	out := c.Schedules[:0]
-	for _, t := range c.Schedules {
-		if t.Name != name {
-			out = append(out, t)
-		}
-	}
-	c.Schedules = out
-	if err := s.persist(w, c, p); err != nil {
+	if err := s.deleteSchedule(name); err != nil {
+		writeErr(w, http.StatusNotFound, err.Error())
 		return
 	}
 	writeJSON(w, 200, map[string]bool{"ok": true})
