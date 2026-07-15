@@ -13,6 +13,7 @@ import (
 	"google.golang.org/adk/tool/functiontool"
 	"google.golang.org/genai"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -34,25 +35,15 @@ type createScheduleArgs struct {
 	Skill  string `json:"skill,omitempty"`
 }
 
+var validScheduleName = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
+
 func (s *Server) attachScheduleTools(eng *engine.Engine) {
 	t, err := functiontool.New(functiontool.Config{Name: "create_schedule", Description: "创建标准 Cron 周期任务。当用户要求定时、每天、每周执行任务时调用。"}, func(_ adktool.Context, a createScheduleArgs) (map[string]any, error) {
 		task := config.ScheduleTask{Name: strings.TrimSpace(a.Name), Cron: strings.TrimSpace(a.Cron), Prompt: strings.TrimSpace(a.Prompt), Skill: strings.TrimSpace(a.Skill), Enabled: true}
 		if err := validSchedule(task); err != nil {
 			return nil, err
 		}
-		p, err := s.writeTargetPath()
-		if err != nil {
-			return nil, err
-		}
-		c, err := loadRawOrEmpty(p)
-		if err != nil {
-			return nil, err
-		}
-		c.Schedules = append(c.Schedules, task)
-		if err := config.Save(c, p); err != nil {
-			return nil, err
-		}
-		if err := s.reload(); err != nil {
+		if err := s.upsertSchedule(task); err != nil {
 			return nil, err
 		}
 		return map[string]any{"ok": true, "name": task.Name}, nil
@@ -196,13 +187,44 @@ func (s *Server) runScheduledAgent(ctx context.Context, t config.ScheduleTask, p
 	return b.String(), nil
 }
 func validSchedule(t config.ScheduleTask) error {
-	if strings.TrimSpace(t.Name) == "" || strings.TrimSpace(t.Prompt) == "" {
-		return fmt.Errorf("name 和 prompt 不能为空")
+	if !validScheduleName.MatchString(strings.TrimSpace(t.Name)) {
+		return fmt.Errorf("任务名称仅允许字母、数字、下划线、连字符")
+	}
+	if strings.TrimSpace(t.Prompt) == "" {
+		return fmt.Errorf("prompt 不能为空")
 	}
 	if _, err := cron.ParseStandard(t.Cron); err != nil {
 		return fmt.Errorf("Cron 无效: %w", err)
 	}
 	return nil
+}
+
+// upsertSchedule is the single persistence path used by both the Web API and
+// the Agent tool. A matching name updates the existing definition, preventing
+// duplicate cron entries and their shared schedule-<name> session collision.
+func (s *Server) upsertSchedule(t config.ScheduleTask) error {
+	p, err := s.writeTargetPath()
+	if err != nil {
+		return err
+	}
+	c, err := loadRawOrEmpty(p)
+	if err != nil {
+		return err
+	}
+	for i := range c.Schedules {
+		if c.Schedules[i].Name == t.Name {
+			c.Schedules[i] = t
+			if err := config.Save(c, p); err != nil {
+				return err
+			}
+			return s.reload()
+		}
+	}
+	c.Schedules = append(c.Schedules, t)
+	if err := config.Save(c, p); err != nil {
+		return err
+	}
+	return s.reload()
 }
 
 func (s *Server) handleSchedules(w http.ResponseWriter, _ *http.Request) {
@@ -220,27 +242,8 @@ func (s *Server) handleSaveSchedule(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, err.Error())
 		return
 	}
-	p, err := s.writeTargetPath()
-	if err != nil {
+	if err := s.upsertSchedule(t); err != nil {
 		writeErr(w, 500, err.Error())
-		return
-	}
-	c, err := loadRawOrEmpty(p)
-	if err != nil {
-		writeErr(w, 500, err.Error())
-		return
-	}
-	found := false
-	for i := range c.Schedules {
-		if c.Schedules[i].Name == t.Name {
-			c.Schedules[i] = t
-			found = true
-		}
-	}
-	if !found {
-		c.Schedules = append(c.Schedules, t)
-	}
-	if err := s.persist(w, c, p); err != nil {
 		return
 	}
 	writeJSON(w, 200, map[string]bool{"ok": true})

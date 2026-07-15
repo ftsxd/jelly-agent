@@ -109,6 +109,28 @@ func TestAdminAuthenticationProtectsAPIs(t *testing.T) {
 	}
 }
 
+func TestUpsertScheduleReplacesMatchingName(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	s := New(engine.New(&config.Config{}), nil)
+	first := config.ScheduleTask{Name: "daily-report", Cron: "0 9 * * *", Prompt: "first", Enabled: true}
+	if err := s.upsertSchedule(first); err != nil {
+		t.Fatal(err)
+	}
+	updated := first
+	updated.Prompt = "updated"
+	updated.Cron = "0 10 * * *"
+	if err := s.upsertSchedule(updated); err != nil {
+		t.Fatal(err)
+	}
+	got := s.engine().Config().Schedules
+	if len(got) != 1 || got[0].Prompt != "updated" || got[0].Cron != "0 10 * * *" {
+		t.Fatalf("schedules = %+v, want one updated task", got)
+	}
+	if err := validSchedule(config.ScheduleTask{Name: "bad name", Cron: "0 9 * * *", Prompt: "x"}); err == nil {
+		t.Fatal("expected invalid task name to be rejected")
+	}
+}
+
 func TestInitialAdminMustChangePassword(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	hash, err := bcrypt.GenerateFromPassword([]byte("initial-password-123"), bcrypt.MinCost)
