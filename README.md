@@ -243,7 +243,7 @@ go vet ./...
 
 ## 部署与备份
 
-本地构建可使用 `make check`、`make build`；Docker 镜像先通过 `make docker` 构建一次，之后使用 `docker compose up -d` 启动，无需每次重新构建。首次容器启动会生成管理员初始密码，请从容器日志获取并立即修改。Compose 默认将控制台发布在宿主机的 `6185` 端口；公网部署应置于 HTTPS 反向代理之后。
+本地构建可使用 `make check`、`make build`；Docker 镜像先通过 `make docker` 构建一次，之后使用 `docker compose up -d` 启动，无需每次重新构建。首次容器启动会生成管理员初始密码，请从容器日志获取并立即修改。Compose 会把默认配置与状态写入卷中的 `/data/.jelly-agent/`；如需显式设置 `JELLY_CONFIG`，请先创建对应配置文件。Compose 默认将控制台发布在宿主机的 `6185` 端口；公网部署应置于 HTTPS 反向代理之后。
 
 持久化目录是容器内的 `/data`，其中保存 `config.yaml`；会话、记忆与周期任务记录默认位于运行用户的 `~/.jelly-agent`。生产部署应将两者映射到受备份策略保护的卷，并定期备份配置文件与 `state.db`；恢复时停止服务后还原这两个文件再启动。
 
