@@ -125,6 +125,10 @@ export async function streamChat({ message, sessionId, provider, agent }, onEven
       if (!json) continue
       try {
         onEvent(JSON.parse(json))
+        // A proxy/browser can deliver several SSE frames in one read. Yielding
+        // here gives Vue a paint opportunity between text deltas instead of
+        // rendering the whole accumulated answer in one visual update.
+        await new Promise((resolve) => setTimeout(resolve, 0))
       } catch {
         /* ignore malformed frame */
       }

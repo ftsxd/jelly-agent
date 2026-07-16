@@ -89,10 +89,11 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Past this point the response is an SSE stream; errors go in-band.
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache, no-transform")
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("X-Accel-Buffering", "no") // disable proxy buffering
+	w.Header().Set("Content-Encoding", "none") // keep SSE chunks uncompressed
 	w.WriteHeader(http.StatusOK)
 
 	sse := &sseWriter{w: w, flusher: flusher}
