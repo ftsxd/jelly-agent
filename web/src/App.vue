@@ -254,6 +254,7 @@ async function logout() {
 .content {
   overflow: hidden;
   height: 100%;
+  min-height: 0;
 }
 .auth-page {
   display: grid;

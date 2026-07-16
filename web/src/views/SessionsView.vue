@@ -1,5 +1,6 @@
 <script setup>
 import { computed, onMounted, ref } from 'vue'
+import { useRouter } from 'vue-router'
 import Icon from '../components/Icon.vue'
 import { api } from '../api'
 
@@ -18,6 +19,7 @@ const detailLoading = ref(false)
 
 const checked = ref([]) // session ids ticked for batch delete
 const deleting = ref(false)
+const router = useRouter()
 
 // allLoadedChecked: every currently-loaded row is ticked (drives 全选 state and
 // the "select all N across pages" affordance).
@@ -137,6 +139,7 @@ function fmtArgs(args) {
     .map(([k, v]) => `${k}=${JSON.stringify(v)}`)
     .join(', ')
 }
+function continueChat(id) { router.push({ path: '/chat', query: { session: id } }) }
 </script>
 
 <template>
@@ -220,7 +223,7 @@ function fmtArgs(args) {
         <template v-else>
           <div class="detail-head">
             <span class="mono dim">{{ detail.id }}</span>
-            <span class="badge mono">total {{ detail.usage.total }} tok</span>
+            <div class="detail-actions"><span class="badge mono">total {{ detail.usage.total }} tok</span><button class="btn btn-sm" @click="continueChat(detail.id)">继续对话</button></div>
           </div>
           <div class="transcript">
             <div v-if="!detail.events.length" class="empty"><span class="muted">（空会话）</span></div>

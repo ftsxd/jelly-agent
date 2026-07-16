@@ -1,5 +1,6 @@
 <script setup>
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import Icon from '../components/Icon.vue'
 import { api, streamChat } from '../api'
 
@@ -7,6 +8,7 @@ const PROVIDER_KEY = 'jelly.provider' // remembers the last-used provider
 const AGENT_KEY = 'jelly.agent' // remembers the last-used agent (multi-agent)
 
 const providers = ref([])
+const historySessions = ref([])
 const provider = ref('')
 const agents = ref([]) // enabled named agents (multi-agent); empty = single-agent mode
 const agentName = ref('') // '' = single agent on the chosen provider
@@ -17,6 +19,8 @@ const busy = ref(false)
 const error = ref('')
 const scroller = ref(null)
 let abort = null
+const route = useRoute()
+const router = useRouter()
 
 // Tag agent messages with the model that produced them only when there's a
 // choice to make — a single-provider setup needs no per-message label.
@@ -51,7 +55,37 @@ onMounted(async () => {
   } catch {
     /* agents are optional; ignore when unavailable */
   }
+  await loadHistorySessions()
+  if (typeof route.query.session === 'string') await openHistorySession(route.query.session)
 })
+
+watch(() => route.query.session, async (id) => {
+  if (typeof id === 'string' && id && id !== sessionId.value) await openHistorySession(id)
+})
+
+async function loadHistorySessions() {
+  try { historySessions.value = (await api.sessions(100, 0)).sessions || [] } catch { /* history is optional */ }
+}
+
+async function openHistorySession(id) {
+  if (!id || busy.value) return
+  error.value = ''
+  try {
+    const detail = await api.session(id)
+    sessionId.value = detail.id
+    messages.value = (detail.events || []).filter((ev) => ev.text || ev.tool_calls?.length || ev.tool_results?.length).map((ev) => ({
+      role: ev.role,
+      text: ev.text || '',
+      tools: [
+        ...(ev.tool_calls || []).map((t) => ({ name: t.name, args: t.args, response: null })),
+        ...(ev.tool_results || []).map((t) => ({ name: t.name, args: null, response: t.response })),
+      ],
+      usage: null,
+      provider: '', model: '', author: ev.author || '',
+    }))
+    await scrollDown()
+  } catch (e) { error.value = e.message }
+}
 
 watch(provider, (name) => {
   if (name) localStorage.setItem(PROVIDER_KEY, name)
@@ -70,6 +104,7 @@ function newChat() {
   messages.value = []
   sessionId.value = ''
   error.value = ''
+  router.replace({ query: {} })
 }
 
 async function send() {
@@ -99,6 +134,8 @@ async function send() {
         switch (ev.type) {
           case 'session':
             sessionId.value = ev.session_id
+            router.replace({ query: { session: ev.session_id } })
+            loadHistorySessions()
             break
           case 'text_delta':
             agentMsg.text += ev.text
@@ -161,6 +198,10 @@ function resultSummary(resp) {
         <span v-if="sessionId" class="badge mono">{{ sessionId }}</span>
       </div>
       <div class="topbar-r">
+        <select v-model="sessionId" class="input select history-select" :disabled="busy" @change="openHistorySession(sessionId)">
+          <option value="">历史会话…</option>
+          <option v-for="s in historySessions" :key="s.id" :value="s.id">{{ s.id }}</option>
+        </select>
         <select v-if="agents.length" v-model="agentName" class="input select" :disabled="busy" aria-label="选择 Agent">
           <option value="">单 Agent（默认）</option>
           <option v-for="a in agents" :key="a.name" :value="a.name">
@@ -285,6 +326,7 @@ function resultSummary(resp) {
   width: auto;
   height: 36px;
 }
+.history-select { max-width: 260px; }
 
 .stream {
   flex: 1;

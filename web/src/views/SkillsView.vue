@@ -421,6 +421,7 @@ async function onZipPicked(e) {
   display: flex;
   flex-direction: column;
   height: 100%;
+  min-height: 0;
 }
 .topbar {
   display: flex;
@@ -450,6 +451,7 @@ async function onZipPicked(e) {
 }
 .body {
   flex: 1;
+  min-height: 0;
   overflow-y: auto;
   padding: var(--sp-5);
   display: flex;
