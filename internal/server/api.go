@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -92,6 +93,7 @@ type sessionDTO struct {
 	ID         string `json:"id"`
 	Events     int    `json:"events"`
 	LastUpdate int64  `json:"last_update"` // unix seconds
+	Preview    string `json:"preview,omitempty"`
 }
 
 // handleSessions lists persisted sessions, newest first, with limit/offset
@@ -106,9 +108,14 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	svc, err := s.engine().NewSessionService()
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	out := make([]sessionDTO, 0, len(rows))
 	for _, m := range rows {
-		out = append(out, sessionDTO{ID: m.ID, Events: m.Events, LastUpdate: m.LastUpdate})
+		out = append(out, sessionDTO{ID: m.ID, Events: m.Events, LastUpdate: m.LastUpdate, Preview: sessionPreview(r.Context(), svc, m.ID)})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"sessions": out,
@@ -117,6 +124,34 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 		"offset":   offset,
 		"has_more": offset+len(out) < total,
 	})
+}
+
+// sessionPreview returns the first user text for human-friendly history labels.
+// It is best-effort: a missing/corrupt session must not make the list unusable.
+func sessionPreview(ctx context.Context, svc adksession.Service, id string) string {
+	resp, err := svc.Get(ctx, &adksession.GetRequest{AppName: engine.AppName, UserID: engine.UserID, SessionID: id})
+	if err != nil || resp.Session == nil {
+		return ""
+	}
+	for ev := range resp.Session.Events().All() {
+		if roleForAuthor(ev.Author) != "user" || ev.Content == nil {
+			continue
+		}
+		var b strings.Builder
+		for _, p := range ev.Content.Parts {
+			if p != nil {
+				b.WriteString(p.Text)
+			}
+		}
+		text := strings.TrimSpace(b.String())
+		if len([]rune(text)) > 42 {
+			return string([]rune(text)[:42]) + "…"
+		}
+		if text != "" {
+			return text
+		}
+	}
+	return ""
 }
 
 // handleSessionIDs returns every session id (newest first) for the "select all

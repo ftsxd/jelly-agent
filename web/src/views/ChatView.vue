@@ -200,7 +200,7 @@ function resultSummary(resp) {
       <div class="topbar-r">
         <select v-model="sessionId" class="input select history-select" :disabled="busy" @change="openHistorySession(sessionId)">
           <option value="">历史会话…</option>
-          <option v-for="s in historySessions" :key="s.id" :value="s.id">{{ s.id }}</option>
+          <option v-for="s in historySessions" :key="s.id" :value="s.id">{{ s.preview || '（空会话）' }} · {{ s.id }}</option>
         </select>
         <select v-if="agents.length" v-model="agentName" class="input select" :disabled="busy" aria-label="选择 Agent">
           <option value="">单 Agent（默认）</option>
