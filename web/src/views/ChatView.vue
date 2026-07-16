@@ -123,6 +123,11 @@ async function send() {
     author: '', // which (sub-)agent produced the latest text, for multi-agent
   }
   messages.value.push(agentMsg)
+  // Vue 3 only tracks mutations made through the reactive proxy. The literal we
+  // pushed is still the raw object, so streaming deltas into `agentMsg` directly
+  // wouldn't trigger re-renders and the answer would appear all at once. Grab the
+  // proxied element and mutate that instead so each delta paints incrementally.
+  const live = messages.value[messages.value.length - 1]
   busy.value = true
   scrollDown()
 
@@ -138,22 +143,22 @@ async function send() {
             loadHistorySessions()
             break
           case 'text_delta':
-            agentMsg.text += ev.text
-            if (ev.agent) agentMsg.author = ev.agent
+            live.text += ev.text
+            if (ev.agent) live.author = ev.agent
             scrollDown()
             break
           case 'tool_call':
-            agentMsg.tools.push({ name: ev.name, args: ev.args, response: null })
+            live.tools.push({ name: ev.name, args: ev.args, response: null })
             scrollDown()
             break
           case 'tool_result': {
-            const t = [...agentMsg.tools].reverse().find((t) => t.name === ev.name && t.response === null)
+            const t = [...live.tools].reverse().find((t) => t.name === ev.name && t.response === null)
             if (t) t.response = ev.response
-            else agentMsg.tools.push({ name: ev.name, args: null, response: ev.response })
+            else live.tools.push({ name: ev.name, args: null, response: ev.response })
             break
           }
           case 'usage':
-            agentMsg.usage = ev
+            live.usage = ev
             break
           case 'error':
             error.value = ev.message
