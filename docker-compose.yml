@@ -1,11 +1,9 @@
 services:
   jelly-agent:
     image: jelly-agent:local
+    user: "0:0"
     ports:
       - "6185:6185"
     volumes:
-      - jelly-data:/data
+      - ./data:/data
     restart: unless-stopped
-
-volumes:
-  jelly-data:

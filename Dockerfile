@@ -14,9 +14,11 @@ RUN go mod download
 COPY . ./
 COPY --from=web /src/web/dist ./web/dist
 RUN CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o /out/jelly ./cmd/cli
+RUN mkdir -p /out/data/.jelly-agent && touch /out/data/.jelly-agent/.keep
 
 FROM gcr.io/distroless/base-debian12:nonroot
 COPY --from=build /out/jelly /usr/local/bin/jelly
+COPY --chown=nonroot:nonroot --from=build /out/data /data
 USER nonroot:nonroot
 ENV HOME=/data
 EXPOSE 6185
