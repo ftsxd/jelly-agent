@@ -252,7 +252,8 @@ async function logout() {
 }
 
 .content {
-  overflow: hidden;
+  overflow-y: auto;
+  overflow-x: hidden;
   height: 100%;
   min-height: 0;
 }

@@ -420,7 +420,8 @@ async function onZipPicked(e) {
 .view {
   display: flex;
   flex-direction: column;
-  height: 100%;
+  min-height: 100%;
+  height: auto;
   min-height: 0;
 }
 .topbar {
@@ -450,9 +451,8 @@ async function onZipPicked(e) {
   font-size: 12px;
 }
 .body {
-  flex: 1;
-  min-height: 0;
-  overflow-y: auto;
+  flex: none;
+  overflow: visible;
   padding: var(--sp-5);
   display: flex;
   flex-direction: column;
