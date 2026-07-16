@@ -2,7 +2,7 @@ services:
   jelly-agent:
     build: .
     ports:
-      - "127.0.0.1:6185:6185"
+      - "6185:6185"
     environment:
       JELLY_CONFIG: /data/config.yaml
     volumes:
