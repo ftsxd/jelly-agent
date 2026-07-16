@@ -1,6 +1,6 @@
 services:
   jelly-agent:
-    build: .
+    image: jelly-agent:local
     ports:
       - "6185:6185"
     environment:
