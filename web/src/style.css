@@ -2,13 +2,13 @@
    Semantic tokens only; components never reference raw hex. */
 
 :root {
-  /* Surfaces — layered near-black with a faint blue cast. */
-  --bg: #0a0c10;
-  --surface: #12151b;
-  --surface-2: #181c24;
-  --surface-3: #1f242e;
-  --border: #272d38;
-  --border-strong: #38414f;
+  /* Surfaces — navy slate ladder: each step visibly blue, not near-black. */
+  --bg: #0b101d;
+  --surface: #131a2c;
+  --surface-2: #1a2338;
+  --surface-3: #223052;
+  --border: #28345a;
+  --border-strong: #3a4a78;
 
   /* Text — meets >=4.5:1 on --surface for primary/secondary. */
   --text: #e8ebf0;
@@ -20,11 +20,24 @@
   --primary-hover: #889fff;
   --primary-tint: rgba(110, 139, 255, 0.14);
   --primary-border: rgba(110, 139, 255, 0.4);
+  /* Second brand hue — violet gradient partner (jellyfish bioluminescence). */
+  --primary-2: #a78bfa;
+  --primary-2-tint: rgba(167, 139, 250, 0.14);
+  --primary-2-border: rgba(167, 139, 250, 0.4);
+  --primary-grad: linear-gradient(135deg, var(--primary), var(--primary-2));
   --accent: #46d6a8; /* agent / success */
   --accent-tint: rgba(70, 214, 168, 0.12);
+  --accent-border: rgba(70, 214, 168, 0.32);
+  --cyan: #22d3ee; /* aurora + chart accents */
+  --cyan-tint: rgba(34, 211, 238, 0.12);
+  --pink: #f472b6; /* aurora corner accent */
+  --pink-tint: rgba(244, 114, 182, 0.12);
   --danger: #ff6b6b;
   --danger-tint: rgba(255, 107, 107, 0.12);
+  --danger-border: rgba(255, 107, 107, 0.35);
   --warning: #f0b454;
+  --warning-tint: rgba(240, 180, 84, 0.12);
+  --warning-border: rgba(240, 180, 84, 0.35);
 
   /* Type. CJK-aware system stack; mono for code/tokens. */
   --font-sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI",
@@ -32,12 +45,30 @@
   --font-mono: "JetBrains Mono", "SF Mono", ui-monospace, "Cascadia Code",
     "Menlo", "Consolas", monospace;
 
-  /* Radius + elevation. */
+  /* Radius + elevation. Layered, soft umbra/penumbra for depth. */
   --radius-sm: 6px;
   --radius: 10px;
   --radius-lg: 14px;
-  --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 8px 24px rgba(0, 0, 0, 0.3);
-  --shadow-pop: 0 12px 40px rgba(0, 0, 0, 0.5);
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.32), 0 4px 12px rgba(0, 0, 0, 0.22),
+    0 16px 40px rgba(0, 0, 0, 0.18);
+  --shadow-pop: 0 2px 4px rgba(0, 0, 0, 0.35), 0 12px 32px rgba(0, 0, 0, 0.4),
+    0 24px 64px rgba(0, 0, 0, 0.28);
+
+  /* Ambient + glass — aurora night sky: blue → violet → teal + a magenta
+     corner, strong enough to read as a colored sky behind the panels. */
+  --glow-primary: radial-gradient(ellipse 78% 62% at 10% -6%, rgba(110, 139, 255, 0.24), transparent 62%);
+  --glow-violet: radial-gradient(ellipse 62% 52% at 96% 0%, rgba(167, 139, 250, 0.2), transparent 62%);
+  --glow-accent: radial-gradient(ellipse 88% 66% at 50% 120%, rgba(70, 214, 168, 0.16), transparent 68%);
+  --glow-magenta: radial-gradient(ellipse 42% 36% at 92% 82%, rgba(244, 114, 182, 0.1), transparent 66%);
+  --aurora-drift: radial-gradient(ellipse 46% 38% at 22% 12%, rgba(110, 139, 255, 0.14), transparent 62%),
+    radial-gradient(ellipse 40% 36% at 84% 88%, rgba(34, 211, 238, 0.12), transparent 65%);
+  /* Glass: near-opaque so the aurora behind never bleeds through as milky
+     patches; backdrop blur still applies to content scrolling underneath. */
+  --bg-glass: color-mix(in srgb, var(--bg) 90%, transparent);
+  --surface-glass: color-mix(in srgb, var(--surface) 85%, transparent);
+  --sidebar-grad: linear-gradient(180deg, #151f3d 0%, #101830 52%, #0b1122 100%);
+  --primary-glow: rgba(110, 139, 255, 0.22);
+  --selection: rgba(110, 139, 255, 0.28);
 
   /* Spacing rhythm (4/8). */
   --sp-1: 4px;
@@ -63,13 +94,51 @@ body,
 }
 
 body {
-  background: var(--bg);
+  /* Aurora night sky: static blue → violet → teal + magenta corner over --bg… */
+  background:
+    var(--glow-primary),
+    var(--glow-violet),
+    var(--glow-accent),
+    var(--glow-magenta),
+    var(--bg);
+  background-attachment: fixed;
   color: var(--text);
   font-family: var(--font-sans);
   font-size: 14px;
   line-height: 1.55;
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
+}
+
+/* …plus one ultra-slow drifting layer for a living "bioluminescent" feel.
+   Sits above the base background but below all content (negative z-index). */
+body::before {
+  content: '';
+  position: fixed;
+  inset: -6%;
+  z-index: -1;
+  pointer-events: none;
+  background: var(--aurora-drift);
+  animation: aurora-drift 52s ease-in-out infinite alternate;
+}
+@keyframes aurora-drift {
+  0% {
+    transform: translate3d(0, 0, 0) scale(1);
+    opacity: 0.75;
+  }
+  50% {
+    transform: translate3d(1.8%, -1.4%, 0) scale(1.05);
+    opacity: 1;
+  }
+  100% {
+    transform: translate3d(-1.4%, 1.8%, 0) scale(1.02);
+    opacity: 0.8;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  body::before {
+    animation: none;
+  }
 }
 
 a {
@@ -92,20 +161,42 @@ h3 {
   letter-spacing: -0.01em;
 }
 
+::selection {
+  background: var(--selection);
+}
+
 ::-webkit-scrollbar {
-  width: 10px;
-  height: 10px;
+  width: 8px;
+  height: 8px;
 }
 ::-webkit-scrollbar-thumb {
   background: var(--surface-3);
   border-radius: 6px;
-  border: 2px solid var(--bg);
+  border: 2px solid transparent;
+  background-clip: padding-box;
 }
 ::-webkit-scrollbar-thumb:hover {
   background: var(--border-strong);
+  background-clip: padding-box;
+  border: 2px solid transparent;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
 }
 
 /* ---- Reusable primitives ---- */
+
+/* Click press feedback — quick squash on :active, springy overshoot rebound
+   on release. Class-based rules (.btn, .nav-item) carry their own tuned
+   transition lists; this element-level rule catches every plain <button>
+   (.logout, .del, .loadmore, …) that doesn't. */
+button {
+  transition: transform 0.26s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+button:active {
+  transform: scale(0.96);
+  transition: transform 0.08s ease-out;
+}
 
 .btn {
   display: inline-flex;
@@ -120,28 +211,67 @@ h3 {
   font: inherit;
   font-weight: 500;
   cursor: pointer;
-  transition: background 0.15s ease, border-color 0.15s ease, transform 0.05s ease;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
+  transition:
+    background 0.15s ease,
+    border-color 0.15s ease,
+    box-shadow 0.15s ease,
+    transform 0.26s cubic-bezier(0.34, 1.56, 0.64, 1);
 }
 .btn:hover {
   background: var(--surface-3);
   border-color: var(--border-strong);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
 }
+/* Squash on press; release springs back via the base overshoot curve. */
 .btn:active {
-  transform: translateY(1px);
+  transform: scale(0.96);
 }
 .btn:disabled {
   opacity: 0.45;
   cursor: not-allowed;
 }
 .btn-primary {
-  background: var(--primary);
+  position: relative;
+  /* Clip the sheen ::after to the button box — otherwise its resting
+     translateX(-130%) paints a gray streak outside the button. outline and
+     box-shadow are painted outside the border box and are not affected. */
+  overflow: hidden;
+  background: var(--primary-grad);
   border-color: var(--primary);
   color: #0a0c10;
   font-weight: 600;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.18),
+    0 4px 16px var(--primary-glow);
+  transition:
+    border-color 0.15s ease,
+    box-shadow 0.15s ease,
+    filter 0.15s ease,
+    transform 0.26s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+/* Sheen sweep on hover — clipped by .btn-primary's overflow: hidden;
+   travels from -130% to +130% so it fully enters and exits the button. */
+.btn-primary::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: linear-gradient(105deg, transparent 42%, rgba(255, 255, 255, 0.22) 50%, transparent 58%);
+  transform: translateX(-130%);
+  pointer-events: none;
 }
 .btn-primary:hover {
-  background: var(--primary-hover);
   border-color: var(--primary-hover);
+  filter: brightness(1.08);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.22),
+    0 4px 22px rgba(110, 139, 255, 0.34),
+    0 2px 12px rgba(167, 139, 250, 0.22);
+}
+.btn-primary:hover::after {
+  transform: translateX(130%);
+  transition: transform 0.3s ease;
 }
 .btn-icon {
   width: 36px;
@@ -152,23 +282,32 @@ h3 {
 .input,
 .textarea {
   width: 100%;
-  background: var(--surface-2);
+  background: color-mix(in srgb, var(--surface-2) 78%, var(--bg));
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   color: var(--text);
   font: inherit;
   padding: var(--sp-2) var(--sp-3);
-  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.22);
+  transition: border-color 0.15s ease, box-shadow 0.15s ease, background 0.15s ease;
 }
 .input::placeholder,
 .textarea::placeholder {
   color: var(--text-muted);
 }
+.input:hover,
+.textarea:hover {
+  border-color: var(--border-strong);
+}
 .input:focus,
 .textarea:focus {
   outline: none;
   border-color: var(--primary);
-  box-shadow: 0 0 0 3px var(--primary-tint);
+  background: var(--surface-2);
+  box-shadow:
+    inset 0 1px 2px rgba(0, 0, 0, 0.18),
+    0 0 0 4px var(--primary-tint),
+    0 0 22px rgba(167, 139, 250, 0.14);
 }
 .textarea {
   resize: vertical;
@@ -177,10 +316,27 @@ h3 {
 }
 
 .card {
-  background: var(--surface);
+  position: relative;
+  background:
+    linear-gradient(180deg, rgba(110, 139, 255, 0.05), transparent 36%),
+    var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  box-shadow: var(--shadow);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.04),
+    var(--shadow);
+}
+/* Top gradient hairline — keeps card stacks from reading as uniform slabs. */
+.card::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: var(--sp-3);
+  right: var(--sp-3);
+  height: 1px;
+  background: linear-gradient(90deg, transparent, var(--primary-border) 35%, var(--primary-2-border) 65%, transparent);
+  opacity: 0.55;
+  pointer-events: none;
 }
 
 .mono {
@@ -196,19 +352,41 @@ h3 {
   border-radius: 999px;
   font-size: 12px;
   font-weight: 500;
+  letter-spacing: 0.01em;
   background: var(--surface-3);
   color: var(--text-dim);
   border: 1px solid var(--border);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
 }
 .badge-accent {
-  background: var(--accent-tint);
+  background: rgba(70, 214, 168, 0.16);
   color: var(--accent);
-  border-color: transparent;
+  border-color: rgba(70, 214, 168, 0.3);
 }
 .badge-primary {
-  background: var(--primary-tint);
-  color: var(--primary);
-  border-color: transparent;
+  background: rgba(110, 139, 255, 0.18);
+  color: var(--primary-hover);
+  border-color: rgba(110, 139, 255, 0.32);
+}
+.badge-violet {
+  background: rgba(167, 139, 250, 0.17);
+  color: var(--primary-2);
+  border-color: rgba(167, 139, 250, 0.32);
+}
+.badge-cyan {
+  background: rgba(34, 211, 238, 0.15);
+  color: var(--cyan);
+  border-color: rgba(34, 211, 238, 0.3);
+}
+.badge-amber {
+  background: rgba(240, 180, 84, 0.15);
+  color: var(--warning);
+  border-color: var(--warning-border);
+}
+.badge-danger {
+  background: rgba(255, 107, 107, 0.15);
+  color: var(--danger);
+  border-color: var(--danger-border);
 }
 
 .muted {
@@ -216,6 +394,22 @@ h3 {
 }
 .dim {
   color: var(--text-dim);
+}
+
+/* Sticky glass topbar — matches every view's .topbar without touching its
+   scoped layout (padding/border stay view-owned). */
+.topbar {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  background: var(--bg-glass);
+  -webkit-backdrop-filter: blur(14px) saturate(1.3);
+  backdrop-filter: blur(14px) saturate(1.3);
+}
+/* Brand tick under each page title — a short blue → violet gradient dash. */
+.topbar h1 {
+  padding-bottom: 4px;
+  background: linear-gradient(90deg, var(--primary), var(--primary-2)) left bottom / 1.7em 2px no-repeat;
 }
 
 /* Empty / loading states */
@@ -228,6 +422,10 @@ h3 {
   padding: var(--sp-6);
   color: var(--text-muted);
   text-align: center;
+}
+.empty svg {
+  color: var(--text-muted);
+  opacity: 0.7;
 }
 
 .spinner {

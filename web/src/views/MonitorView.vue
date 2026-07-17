@@ -187,9 +187,81 @@ function dayLabel(date) {
   display: flex;
   flex-direction: column;
   gap: var(--sp-1);
+  transition: transform 0.18s ease, border-color 0.18s ease, box-shadow 0.18s ease;
+}
+.kpi:hover {
+  transform: translateY(-1px);
+  border-color: var(--border-strong);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.04),
+    0 6px 20px rgba(0, 0, 0, 0.28);
 }
 .kpi-icon {
+  box-sizing: content-box;
+  width: 18px;
+  height: 18px;
+  padding: 8px;
+  border-radius: var(--radius-sm);
+  background: var(--primary-tint);
   color: var(--primary);
+}
+/* Per-KPI hue coding: blue / violet / teal / amber — full-card tint, not
+   just the icon chip: gradient wash + tinted border + matching hairline. */
+.kpi:nth-child(1) {
+  background: linear-gradient(160deg, rgba(110, 139, 255, 0.14), rgba(110, 139, 255, 0.03) 60%), var(--surface);
+  border-color: rgba(110, 139, 255, 0.26);
+}
+.kpi:nth-child(1):hover {
+  border-color: rgba(110, 139, 255, 0.5);
+}
+.kpi:nth-child(2) {
+  background: linear-gradient(160deg, rgba(167, 139, 250, 0.14), rgba(167, 139, 250, 0.03) 60%), var(--surface);
+  border-color: rgba(167, 139, 250, 0.26);
+}
+.kpi:nth-child(2):hover {
+  border-color: rgba(167, 139, 250, 0.5);
+}
+.kpi:nth-child(3) {
+  background: linear-gradient(160deg, rgba(70, 214, 168, 0.12), rgba(70, 214, 168, 0.03) 60%), var(--surface);
+  border-color: rgba(70, 214, 168, 0.26);
+}
+.kpi:nth-child(3):hover {
+  border-color: rgba(70, 214, 168, 0.5);
+}
+.kpi:nth-child(4) {
+  background: linear-gradient(160deg, rgba(240, 180, 84, 0.13), rgba(240, 180, 84, 0.03) 60%), var(--surface);
+  border-color: rgba(240, 180, 84, 0.26);
+}
+.kpi:nth-child(4):hover {
+  border-color: rgba(240, 180, 84, 0.5);
+}
+.kpi:nth-child(1) .kpi-icon {
+  background: rgba(110, 139, 255, 0.2);
+  color: var(--primary-hover);
+}
+.kpi:nth-child(2) .kpi-icon {
+  background: rgba(167, 139, 250, 0.2);
+  color: var(--primary-2);
+}
+.kpi:nth-child(3) .kpi-icon {
+  background: rgba(70, 214, 168, 0.18);
+  color: var(--accent);
+}
+.kpi:nth-child(4) .kpi-icon {
+  background: rgba(240, 180, 84, 0.18);
+  color: var(--warning);
+}
+.kpi:nth-child(1)::before {
+  background: linear-gradient(90deg, transparent, var(--primary-border), transparent);
+}
+.kpi:nth-child(2)::before {
+  background: linear-gradient(90deg, transparent, var(--primary-2-border), transparent);
+}
+.kpi:nth-child(3)::before {
+  background: linear-gradient(90deg, transparent, var(--accent-border), transparent);
+}
+.kpi:nth-child(4)::before {
+  background: linear-gradient(90deg, transparent, var(--warning-border), transparent);
 }
 .kpi-num {
   font-size: 28px;
@@ -294,10 +366,35 @@ function dayLabel(date) {
 }
 .bar-fill {
   height: 100%;
-  background: var(--primary);
+  background: linear-gradient(90deg, var(--primary), var(--primary-2));
   border-radius: 999px;
   min-width: 2px;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.18),
+    0 0 10px rgba(110, 139, 255, 0.3);
   transition: width 0.3s ease;
+}
+/* Tool ranking: categorical palette cycling blue/violet/teal/amber/cyan.
+   Each bar runs dark-to-saturated within its own hue, all derived from tokens. */
+.bar-row:nth-child(5n + 1) .bar-fill {
+  background: linear-gradient(90deg, color-mix(in srgb, var(--primary) 76%, var(--bg)), var(--primary));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.18), 0 0 10px rgba(110, 139, 255, 0.34);
+}
+.bar-row:nth-child(5n + 2) .bar-fill {
+  background: linear-gradient(90deg, color-mix(in srgb, var(--primary-2) 76%, var(--bg)), var(--primary-2));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.18), 0 0 10px rgba(167, 139, 250, 0.34);
+}
+.bar-row:nth-child(5n + 3) .bar-fill {
+  background: linear-gradient(90deg, color-mix(in srgb, var(--accent) 76%, var(--bg)), var(--accent));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.18), 0 0 10px rgba(70, 214, 168, 0.3);
+}
+.bar-row:nth-child(5n + 4) .bar-fill {
+  background: linear-gradient(90deg, color-mix(in srgb, var(--warning) 76%, var(--bg)), var(--warning));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.18), 0 0 10px rgba(240, 180, 84, 0.3);
+}
+.bar-row:nth-child(5n + 5) .bar-fill {
+  background: linear-gradient(90deg, color-mix(in srgb, var(--cyan) 76%, var(--bg)), var(--cyan));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.18), 0 0 10px rgba(34, 211, 238, 0.3);
 }
 .bar-val {
   text-align: right;
@@ -332,9 +429,14 @@ function dayLabel(date) {
   width: 60%;
   max-width: 32px;
   min-height: 2px;
-  background: linear-gradient(180deg, var(--primary), var(--primary-tint));
+  background: linear-gradient(180deg, var(--primary-2), var(--primary) 55%, rgba(110, 139, 255, 0.35));
   border-radius: var(--radius-sm) var(--radius-sm) 0 0;
-  transition: height 0.3s ease;
+  box-shadow: 0 0 12px rgba(110, 139, 255, 0.28);
+  transition: height 0.3s ease, filter 0.15s ease, box-shadow 0.15s ease;
+}
+.chart-col:hover .chart-bar {
+  filter: brightness(1.25);
+  box-shadow: 0 0 20px rgba(167, 139, 250, 0.5);
 }
 .chart-label {
   font-size: 10px;

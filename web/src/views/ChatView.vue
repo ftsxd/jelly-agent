@@ -353,14 +353,19 @@ function resultSummary(resp) {
   flex-shrink: 0;
   width: 30px;
   height: 30px;
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   display: grid;
   place-items: center;
   border: 1px solid var(--border);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
 }
 .avatar.user {
-  background: var(--primary-tint);
-  color: var(--primary);
+  background: var(--primary-grad);
+  border-color: transparent;
+  color: #fff;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.22),
+    0 0 10px rgba(110, 139, 255, 0.3);
 }
 .avatar.agent {
   background: var(--accent-tint);
@@ -379,13 +384,20 @@ function resultSummary(resp) {
   white-space: pre-wrap;
   word-break: break-word;
   border: 1px solid var(--border);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
 }
 .bubble.user {
-  background: var(--primary-tint);
-  border-color: var(--primary-border);
+  border-color: transparent;
+  background:
+    linear-gradient(135deg, rgba(110, 139, 255, 0.3), rgba(167, 139, 250, 0.2)) padding-box,
+    linear-gradient(135deg, var(--primary-border), var(--primary-2-border)) border-box;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.08),
+    0 4px 14px rgba(110, 139, 255, 0.14);
 }
 .bubble.agent {
-  background: var(--surface);
+  background: var(--surface-2);
+  border-left: 3px solid var(--accent);
 }
 .bubble.typing {
   display: flex;
@@ -432,7 +444,8 @@ function resultSummary(resp) {
   display: flex;
   align-items: center;
   gap: 4px;
-  font-size: 11px;
+  font-size: 12px;
+  color: var(--text-dim);
   padding-left: var(--sp-1);
 }
 
@@ -460,6 +473,10 @@ function resultSummary(resp) {
   align-items: flex-end;
   padding: var(--sp-4) var(--sp-5);
   border-top: 1px solid var(--border);
+  background: var(--surface-glass);
+  -webkit-backdrop-filter: blur(14px) saturate(1.3);
+  backdrop-filter: blur(14px) saturate(1.3);
+  box-shadow: 0 -8px 24px rgba(0, 0, 0, 0.2);
 }
 .composer .textarea {
   max-height: 180px;

@@ -261,9 +261,37 @@ async function remove(p) {
   justify-content: space-between;
   gap: var(--sp-3);
   padding: var(--sp-3) var(--sp-4);
+  transition: transform 0.18s ease, border-color 0.18s ease, background 0.18s ease, box-shadow 0.18s ease;
+}
+.prov::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 12px;
+  bottom: 12px;
+  width: 3px;
+  border-radius: 0 999px 999px 0;
+  background: linear-gradient(180deg, var(--primary), var(--primary-2));
+  opacity: 0;
+  transition: opacity 0.18s ease;
+  pointer-events: none;
+}
+.prov:hover {
+  transform: translateY(-1px);
+  border-color: var(--border-strong);
+  background:
+    linear-gradient(90deg, rgba(110, 139, 255, 0.05), transparent 45%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.024), transparent 30%),
+    var(--surface-2);
+}
+.prov:hover::after {
+  opacity: 1;
 }
 .prov.def {
   border-color: var(--primary-border);
+}
+.prov.def:hover {
+  border-color: var(--primary);
 }
 .prov-main {
   min-width: 0;

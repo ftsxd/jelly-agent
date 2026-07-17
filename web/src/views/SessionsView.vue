@@ -368,17 +368,21 @@ function continueChat(id) { router.push({ path: '/chat', query: { session: id } 
   cursor: pointer;
   font: inherit;
   color: var(--text);
-  transition: border-color 0.15s ease, background 0.15s ease;
+  transition: border-color 0.15s ease, background 0.15s ease, transform 0.18s ease, box-shadow 0.18s ease;
 }
 .sess:hover {
   background: var(--surface-2);
+  border-color: var(--border-strong);
+  transform: translateY(-1px);
 }
 .sess.active {
   border-color: var(--primary-border);
-  background: var(--primary-tint);
+  background: linear-gradient(90deg, rgba(110, 139, 255, 0.22), rgba(167, 139, 250, 0.15));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
 }
 .sess.picked {
   border-color: var(--accent);
+  background: linear-gradient(90deg, rgba(70, 214, 168, 0.2), rgba(70, 214, 168, 0.07)), var(--surface);
 }
 .sess-top {
   display: flex;
@@ -444,13 +448,18 @@ function continueChat(id) { router.push({ path: '/chat', query: { session: id } 
 }
 .ev {
   border-left: 2px solid var(--border-strong);
-  padding-left: var(--sp-3);
+  padding: var(--sp-3);
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  background: color-mix(in srgb, var(--surface-2) 70%, transparent);
 }
 .ev.user {
-  border-left-color: var(--primary);
+  border-left: 3px solid transparent;
+  border-image: linear-gradient(180deg, var(--primary), var(--primary-2)) 1;
+  background: linear-gradient(90deg, rgba(110, 139, 255, 0.2), rgba(167, 139, 250, 0.07) 60%, transparent 85%);
 }
 .ev.agent {
   border-left-color: var(--accent);
+  background: linear-gradient(90deg, rgba(70, 214, 168, 0.17), transparent 78%);
 }
 .ev-head {
   display: flex;

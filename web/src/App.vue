@@ -86,12 +86,27 @@ async function logout() {
 
   <div v-else-if="!authenticated" class="auth-page">
     <form class="auth-card" @submit.prevent="login">
-      <h1>jelly-agent 控制台</h1>
+      <div class="auth-brand">
+        <svg class="brand-mark" width="26" height="26" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+          <path
+            d="M4 11a8 8 0 0 1 16 0v1H4z"
+            fill="var(--primary)"
+            fill-opacity="0.9"
+          />
+          <path
+            d="M6.5 12.5c0 2 .8 3 .8 4.5M10 12.5c0 2.5-.6 3.5-.6 5.5M14 12.5c0 2.5.6 3.5.6 5.5M17.5 12.5c0 1.5-.8 2.5-.8 4.5"
+            stroke="var(--accent)"
+            stroke-width="1.4"
+            stroke-linecap="round"
+          />
+        </svg>
+        <h1>jelly-agent 控制台</h1>
+      </div>
       <p class="dim">请使用管理员账户登录</p>
       <label>用户名<input v-model="username" class="input" autocomplete="username" required /></label>
       <label>密码<input v-model="password" class="input" type="password" autocomplete="current-password" required /></label>
       <p v-if="loginError" class="auth-error">{{ loginError }}</p>
-      <button class="btn primary" type="submit">登录</button>
+      <button class="btn btn-primary" type="submit">登录</button>
     </form>
   </div>
 
@@ -103,7 +118,7 @@ async function logout() {
       <label>新密码<input v-model="newPassword" class="input" type="password" autocomplete="new-password" minlength="12" required /></label>
       <label>确认新密码<input v-model="confirmPassword" class="input" type="password" autocomplete="new-password" minlength="12" required /></label>
       <p v-if="loginError" class="auth-error">{{ loginError }}</p>
-      <button class="btn primary" type="submit">保存新密码</button>
+      <button class="btn btn-primary" type="submit">保存新密码</button>
     </form>
   </div>
 
@@ -154,7 +169,9 @@ async function logout() {
 
     <main class="content">
       <RouterView v-slot="{ Component }">
-        <component :is="Component" />
+        <Transition name="page" mode="out-in">
+          <component :is="Component" />
+        </Transition>
       </RouterView>
     </main>
   </div>
@@ -170,7 +187,7 @@ async function logout() {
 .sidebar {
   display: flex;
   flex-direction: column;
-  background: var(--surface);
+  background: var(--sidebar-grad);
   border-right: 1px solid var(--border);
   padding: var(--sp-4) var(--sp-3);
 }
@@ -180,10 +197,16 @@ async function logout() {
   align-items: center;
   gap: var(--sp-3);
   padding: var(--sp-2) var(--sp-2) var(--sp-5);
+  border-bottom: 1px solid transparent;
+  border-image: linear-gradient(90deg, var(--primary-border), var(--primary-2-border) 55%, transparent) 1;
+  margin-bottom: var(--sp-3);
+  background: radial-gradient(ellipse 90% 120% at 20% 0%, rgba(110, 139, 255, 0.12), transparent 65%);
+  border-radius: var(--radius-sm);
 }
 .brand-mark {
   flex-shrink: 0;
-  filter: drop-shadow(0 0 10px var(--primary-border));
+  filter: drop-shadow(0 0 6px rgba(110, 139, 255, 0.4))
+    drop-shadow(0 2px 16px rgba(167, 139, 250, 0.25));
 }
 .brand-text {
   display: flex;
@@ -193,6 +216,10 @@ async function logout() {
 .brand-text strong {
   font-size: 15px;
   letter-spacing: -0.01em;
+  background: var(--primary-grad);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
 }
 .brand-sub {
   font-size: 11px;
@@ -204,6 +231,7 @@ async function logout() {
   gap: 2px;
 }
 .nav-item {
+  position: relative;
   display: flex;
   align-items: center;
   gap: var(--sp-3);
@@ -211,15 +239,39 @@ async function logout() {
   border-radius: var(--radius-sm);
   color: var(--text-dim);
   font-weight: 500;
-  transition: background 0.15s ease, color 0.15s ease;
+  transition: background 0.18s ease, color 0.18s ease,
+    transform 0.26s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+.nav-item:active {
+  transform: scale(0.97);
+  transition-duration: 0.08s;
+}
+.nav-item::before {
+  content: '';
+  position: absolute;
+  left: -4px;
+  top: 50%;
+  width: 3px;
+  height: 0;
+  border-radius: 999px;
+  background: linear-gradient(180deg, var(--primary), var(--primary-2));
+  box-shadow: 0 0 10px rgba(110, 139, 255, 0.55);
+  transform: translateY(-50%);
+  transition: height 0.18s ease;
 }
 .nav-item:hover {
   background: var(--surface-2);
   color: var(--text);
 }
 .nav-item.active {
-  background: var(--primary-tint);
-  color: var(--primary);
+  background: linear-gradient(90deg, rgba(110, 139, 255, 0.22), rgba(167, 139, 250, 0.16));
+  color: var(--primary-hover);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.06),
+    0 2px 10px rgba(110, 139, 255, 0.14);
+}
+.nav-item.active::before {
+  height: 18px;
 }
 
 .sidebar-foot {
@@ -235,7 +287,16 @@ async function logout() {
   display: flex;
   align-items: center;
   gap: var(--sp-2);
+  padding: 4px 10px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 999px;
   color: var(--text-dim);
+  transition: border-color 0.3s ease;
+}
+.status:has(.dot.ok) {
+  border-color: rgba(70, 214, 168, 0.32);
+  box-shadow: 0 0 12px rgba(70, 214, 168, 0.12);
 }
 .dot {
   width: 8px;
@@ -246,6 +307,16 @@ async function logout() {
 .dot.ok {
   background: var(--accent);
   box-shadow: 0 0 8px var(--accent);
+  animation: dot-breathe 2.4s ease-in-out infinite;
+}
+@keyframes dot-breathe {
+  0%,
+  100% {
+    box-shadow: 0 0 4px rgba(70, 214, 168, 0.35);
+  }
+  50% {
+    box-shadow: 0 0 10px rgba(70, 214, 168, 0.75);
+  }
 }
 .ver {
   font-size: 11px;
@@ -258,19 +329,52 @@ async function logout() {
   min-height: 0;
 }
 .auth-page {
+  position: relative;
   display: grid;
   min-height: 100%;
   place-items: center;
   padding: var(--sp-5);
 }
+.auth-page::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background:
+    radial-gradient(ellipse 46% 34% at 50% 32%, rgba(110, 139, 255, 0.15), transparent 70%),
+    radial-gradient(ellipse 32% 26% at 64% 58%, rgba(167, 139, 250, 0.09), transparent 70%),
+    radial-gradient(ellipse 28% 22% at 38% 62%, rgba(70, 214, 168, 0.06), transparent 70%);
+  pointer-events: none;
+}
 .auth-card {
+  position: relative;
+  z-index: 1;
   display: grid;
   width: min(100%, 360px);
   gap: var(--sp-3);
   padding: var(--sp-6);
-  border: 1px solid var(--border);
+  border: 1px solid transparent;
   border-radius: var(--radius);
-  background: var(--surface);
+  background:
+    linear-gradient(var(--surface), var(--surface)) padding-box,
+    linear-gradient(135deg, var(--primary-border), var(--primary-2-border) 50%, rgba(70, 214, 168, 0.24)) border-box;
+  box-shadow: var(--shadow-pop);
+}
+.auth-brand {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+}
+.auth-brand .brand-mark {
+  width: 34px;
+  height: 34px;
+  filter: drop-shadow(0 0 8px rgba(110, 139, 255, 0.5))
+    drop-shadow(0 4px 18px rgba(167, 139, 250, 0.3));
+}
+.auth-brand h1 {
+  background: var(--primary-grad);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
 }
 .auth-card h1 { margin: 0; font-size: 20px; }
 .auth-card p { margin: 0; line-height: 1.6; }
@@ -278,6 +382,25 @@ async function logout() {
 .auth-error { color: var(--danger); font-size: 13px; }
 .logout { margin-left: var(--sp-2); border: 0; background: transparent; color: var(--text-muted); cursor: pointer; font-size: 12px; }
 .logout:hover { color: var(--text); }
+
+/* Route fade: gentle 4px rise, out-in to avoid view overlap. */
+.page-enter-active,
+.page-leave-active {
+  transition: opacity 0.2s ease, transform 0.2s ease;
+}
+.page-enter-from {
+  opacity: 0;
+  transform: translateY(4px);
+}
+.page-leave-to {
+  opacity: 0;
+}
+@media (prefers-reduced-motion: reduce) {
+  .page-enter-active,
+  .page-leave-active {
+    transition: none;
+  }
+}
 
 @media (max-width: 720px) {
   .shell {

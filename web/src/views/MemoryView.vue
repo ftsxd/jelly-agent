@@ -305,8 +305,9 @@ function fmtTime(unix) {
   transition: background 0.18s ease, border-color 0.18s ease;
 }
 .switch.on {
-  background: var(--accent);
-  border-color: var(--accent);
+  background: linear-gradient(90deg, var(--primary), var(--primary-2));
+  border-color: transparent;
+  box-shadow: 0 0 10px rgba(110, 139, 255, 0.32);
 }
 .switch:disabled {
   opacity: 0.6;
@@ -320,6 +321,9 @@ function fmtTime(unix) {
   height: 16px;
   border-radius: 50%;
   background: #fff;
+  box-shadow:
+    inset 0 1px 1px rgba(255, 255, 255, 0.6),
+    0 1px 3px rgba(0, 0, 0, 0.35);
   transition: transform 0.18s ease;
 }
 .switch.on .switch-knob {
@@ -345,6 +349,8 @@ function fmtTime(unix) {
   gap: var(--sp-2);
   padding: var(--sp-3) var(--sp-4);
   border-bottom: 1px solid var(--border);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.02), transparent);
+  box-shadow: inset 0 -1px 0 rgba(0, 0, 0, 0.18);
   font-weight: 600;
   font-size: 13px;
   color: var(--text-dim);

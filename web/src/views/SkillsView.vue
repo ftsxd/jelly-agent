@@ -546,8 +546,9 @@ async function onZipPicked(e) {
   transition: background 0.18s ease, border-color 0.18s ease;
 }
 .switch.on {
-  background: var(--accent);
-  border-color: var(--accent);
+  background: linear-gradient(90deg, var(--primary), var(--primary-2));
+  border-color: transparent;
+  box-shadow: 0 0 10px rgba(110, 139, 255, 0.32);
 }
 .switch-knob {
   position: absolute;
@@ -557,6 +558,9 @@ async function onZipPicked(e) {
   height: 16px;
   border-radius: 50%;
   background: #fff;
+  box-shadow:
+    inset 0 1px 1px rgba(255, 255, 255, 0.6),
+    0 1px 3px rgba(0, 0, 0, 0.35);
   transition: transform 0.18s ease;
 }
 .switch.on .switch-knob {
@@ -667,6 +671,31 @@ async function onZipPicked(e) {
   align-items: center;
   justify-content: space-between;
   gap: var(--sp-3);
+  transition: transform 0.18s ease, border-color 0.18s ease, background 0.18s ease, box-shadow 0.18s ease;
+}
+.skill::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 12px;
+  bottom: 12px;
+  width: 3px;
+  border-radius: 0 999px 999px 0;
+  background: linear-gradient(180deg, var(--primary), var(--primary-2));
+  opacity: 0;
+  transition: opacity 0.18s ease;
+  pointer-events: none;
+}
+.skill:hover {
+  transform: translateY(-1px);
+  border-color: var(--border-strong);
+  background:
+    linear-gradient(90deg, rgba(110, 139, 255, 0.05), transparent 45%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.024), transparent 30%),
+    var(--surface-2);
+}
+.skill:hover::after {
+  opacity: 1;
 }
 .skill.off {
   opacity: 0.6;
