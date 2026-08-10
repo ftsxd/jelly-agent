@@ -14,11 +14,13 @@ import (
 
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
+	adkmodel "google.golang.org/adk/model"
 	"google.golang.org/adk/runner"
 	adksession "google.golang.org/adk/session"
 	adktool "google.golang.org/adk/tool"
 
 	"github.com/jelly-agent/jelly-agent/internal/config"
+	"github.com/jelly-agent/jelly-agent/internal/history"
 	jellymcp "github.com/jelly-agent/jelly-agent/internal/mcp"
 	"github.com/jelly-agent/jelly-agent/internal/memory"
 	jellymodel "github.com/jelly-agent/jelly-agent/internal/model"
@@ -349,11 +351,30 @@ func (e *Engine) BuildAgentWith(provider string, mcpNames []string) (agent.Agent
 // is rendered fresh each turn (core memory + skill catalog prepended) via an
 // InstructionProvider. Shared by the legacy single agent and the multi-agent
 // tree so both behave identically.
+// withCompaction layers conversation compaction over the raw LLM so a long
+// session (or a few large tool results) can't overrun the context window. An
+// explicit history.max_tokens of 0 opts out and returns the model untouched.
+func (e *Engine) withCompaction(llm adkmodel.LLM, agentName string) adkmodel.LLM {
+	h := e.cfg.History
+	if h.MaxTokens != nil && *h.MaxTokens <= 0 {
+		return llm
+	}
+	pol := history.Policy{KeepRecent: h.KeepRecent, ToolResultTokens: h.ToolResultTokens}
+	if h.MaxTokens != nil {
+		pol.MaxTokens = *h.MaxTokens
+	}
+	return history.Wrap(llm, pol, func(r history.Result) {
+		log.Printf("[jelly] 上下文压缩 (%s): %d→%d token，省略 %d 条、截断 %d 个工具结果",
+			agentName, r.BeforeTokens, r.AfterTokens, r.Dropped, r.Truncated)
+	})
+}
+
 func (e *Engine) buildNode(name, description, provider, instruction string, toolsets []adktool.Toolset, subAgents []agent.Agent, core *memory.Core, withSearch bool) (agent.Agent, config.Provider, error) {
 	llm, prov, err := e.reg.Get(provider)
 	if err != nil {
 		return nil, prov, err
 	}
+	mdl := e.withCompaction(llm, name)
 
 	tools, err := e.Tools(core, withSearch)
 	if err != nil {
@@ -383,7 +404,7 @@ func (e *Engine) buildNode(name, description, provider, instruction string, tool
 
 	a, err := llmagent.New(llmagent.Config{
 		Name:        name,
-		Model:       llm,
+		Model:       mdl,
 		Description: description,
 		// InstructionProvider (not Instruction) so MEMORY.md/USER.md (and the
 		// skill catalog) are read fresh each turn. Note: ADK then skips {}

@@ -37,11 +37,27 @@ type Provider struct {
 	MaxRetries *int `mapstructure:"max_retries" yaml:"max_retries,omitempty"`
 }
 
+// History bounds the conversation history sent to the model each turn. Without
+// a bound, a few large tool results (e.g. fetch_url pages) push a session past
+// the context window; see internal/history.
+type History struct {
+	// MaxTokens is the history budget. Nil ⇒ the package default; an explicit
+	// 0 turns compaction off entirely (the whole history is always sent).
+	MaxTokens *int `mapstructure:"max_tokens" yaml:"max_tokens,omitempty"`
+	// KeepRecent is how many trailing contents are never dropped, so the
+	// current question always survives. Zero ⇒ default.
+	KeepRecent int `mapstructure:"keep_recent" yaml:"keep_recent,omitempty"`
+	// ToolResultTokens caps an individual tool result once it is selected for
+	// shortening. Zero ⇒ default.
+	ToolResultTokens int `mapstructure:"tool_result_tokens" yaml:"tool_result_tokens,omitempty"`
+}
+
 // Config is the top-level jelly-agent configuration.
 type Config struct {
 	DefaultProvider string     `mapstructure:"default_provider" yaml:"default_provider"`
 	Providers       []Provider `mapstructure:"providers" yaml:"providers"`
 	Memory          Memory     `mapstructure:"memory" yaml:"memory"`
+	History         History    `mapstructure:"history" yaml:"history,omitempty"`
 	Skills          Skills     `mapstructure:"skills" yaml:"skills,omitempty"`
 	Sandbox         Sandbox    `mapstructure:"sandbox" yaml:"sandbox,omitempty"`
 	Web             Web        `mapstructure:"web" yaml:"web,omitempty"`

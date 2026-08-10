@@ -14,6 +14,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/jelly-agent/jelly-agent/internal/tokens"
 )
 
 const (
@@ -262,32 +264,6 @@ func expandHome(p string) (string, error) {
 	return filepath.Join(home, p[2:]), nil
 }
 
-// estimateTokens approximates the token count of s without a tokenizer: CJK
-// runes count as ~1 token each, other characters as ~4 per token. Good enough
-// for budgeting the small core-memory files.
-func estimateTokens(s string) int {
-	cjk, other := 0, 0
-	for _, r := range s {
-		if isCJK(r) {
-			cjk++
-		} else {
-			other++
-		}
-	}
-	return cjk + (other+3)/4
-}
-
-func isCJK(r rune) bool {
-	switch {
-	case r >= 0x3400 && r <= 0x9FFF: // CJK Unified Ideographs (+ Ext A)
-		return true
-	case r >= 0xF900 && r <= 0xFAFF: // CJK Compatibility Ideographs
-		return true
-	case r >= 0x3000 && r <= 0x303F: // CJK symbols & punctuation
-		return true
-	case r >= 0xFF00 && r <= 0xFFEF: // fullwidth / halfwidth forms
-		return true
-	default:
-		return false
-	}
-}
+// estimateTokens approximates the token count of s. The implementation is
+// shared with conversation-history compaction — see internal/tokens.
+func estimateTokens(s string) int { return tokens.Estimate(s) }
