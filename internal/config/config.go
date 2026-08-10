@@ -21,6 +21,20 @@ type Provider struct {
 	BaseURL string `mapstructure:"base_url" yaml:"base_url,omitempty"`
 	APIKey  string `mapstructure:"api_key" yaml:"api_key,omitempty"`
 	Model   string `mapstructure:"model" yaml:"model,omitempty"`
+
+	// Temperature overrides the endpoint's default sampling temperature. It is a
+	// pointer so "unset" is distinguishable from an explicit value.
+	Temperature *float64 `mapstructure:"temperature" yaml:"temperature,omitempty"`
+	// MaxTokens caps the completion length. Zero ⇒ the endpoint's default.
+	MaxTokens int `mapstructure:"max_tokens" yaml:"max_tokens,omitempty"`
+	// TimeoutSec bounds how long to wait for the model's response headers (i.e.
+	// time to first byte), not the whole exchange — a long stream must not be
+	// cut off mid-answer. Zero ⇒ the model layer's default.
+	TimeoutSec int `mapstructure:"timeout_sec" yaml:"timeout_sec,omitempty"`
+	// MaxRetries bounds automatic retries of transient failures (429 / 5xx /
+	// network). Pointer so an explicit 0 (disable retries) is distinguishable
+	// from "unset". Nil ⇒ the model layer's default.
+	MaxRetries *int `mapstructure:"max_retries" yaml:"max_retries,omitempty"`
 }
 
 // Config is the top-level jelly-agent configuration.

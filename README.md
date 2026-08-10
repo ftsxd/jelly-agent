@@ -7,7 +7,7 @@
 **Phase 4（Web 控制台）已完成，Phase 5（生产化）进行中**，并已扩展多平台消息接入。已验证可用：
 
 - 自写 `model.LLM` OpenAI 兼容适配器（流式 + 工具调用 + DeepSeek 思考模型 `reasoning_content` 往返）。
-- Agent + `web_search` 工具，端到端跑通 DeepSeek。
+- Agent + `web_search` / `fetch_url` 工具，端到端跑通 DeepSeek。
 - 配置层（YAML + `${ENV}` + 环境变量回落）、模型 Registry、cobra 命令树。
 - **交互式多轮对话** + 内联命令（`/help` `/tools` `/memory` `/clear` `/stats` `/exit`）。
 - **会话持久化**：纯 Go SQLite（无 CGO），落 `~/.jelly-agent/state.db`，可列出历史会话。
@@ -65,6 +65,28 @@ jelly --help                           # 全部命令
 交互模式内联命令：`/help` `/tools` `/memory`（查看长期记忆）`/clear`（开新会话）`/stats`（token 用量）`/exit`（或 Ctrl+D）。
 
 可选环境变量：`TAVILY_API_KEY`（设置后 `web_search` 走 Tavily，否则回落免 key 的 DuckDuckGo）。
+
+## 联网工具
+
+- `web_search` —— 搜索，返回标题/摘要/链接。
+- `fetch_url` —— 打开链接读正文：抓取网页后剥掉脚本/样式/标签，按 meta 声明的字符集转成 UTF-8（GB18030、Big5 等中文页不会乱码），输出纯文本；默认截断到 8000 字符（`max_chars` 可调，上限 40000）。仅接受 http/https，只处理 HTML / 纯文本 / JSON / XML，二进制（图片、PDF）直接拒绝。
+
+> `fetch_url` 在**建立连接时**校验解析后的 IP，拒绝环回、RFC1918 内网、链路本地（含 `169.254.169.254` 云元数据端点）、CGNAT 与 IPv6 ULA——每一跳重定向都重新校验，所以公网域名解析到内网地址（DNS rebinding）同样会被挡下。
+
+## 模型调用参数与重试
+
+在 Web **配置**页编辑 Provider，展开「高级参数」即可设置（也可直接写 `config.yaml`，两者等价，保存即热重载）。四项均可省略：
+
+| 字段 | 默认 | 说明 |
+|---|---|---|
+| `temperature` | 服务端默认 | 采样温度。**填 0 无效**——go-openai 对该字段用了 `omitempty`，0 会被整个丢弃；要近似确定性输出请填 `0.01`。 |
+| `max_tokens` | 服务端默认 | 回复长度上限。 |
+| `timeout_sec` | 120 | 等待**首字节**的超时，而不是整轮超时——否则一段长回复流到一半就会被掐断。 |
+| `max_retries` | 2 | 429 / 5xx / 网络抖动的自动重试次数，退避 0.5s→1s→2s→4s→8s 封顶。填 `0` 关闭。 |
+
+列表卡片会显示非默认的参数（如 `温度 0.3 · ≤2048 tokens`），编辑时自动展开该区块，避免设置被遗忘。留空 = 用默认；点击卡片上的「设为默认」按钮不会影响这些参数。
+
+重试只针对**瞬时**故障：4xx（401 密钥错、400 参数错、404 模型不存在）一律不重试，重试也只会重复同一个错误。流式回复有一条额外约束——**一旦已经有增量吐给前端就不再重试**，否则重放会让同一段文字在屏幕上出现两次；此时错误直接上抛。
 
 ## 核心记忆（L1）
 
@@ -256,7 +278,7 @@ internal/engine/      # 运行时装配（model/agent/runner/session/memory + �
 internal/server/      # REST + SSE 处理器 + SPA 静态服务 + Provider/MCP/Agent/沙箱 配置热重载
 internal/mcp/         # MCP 接入（stdio/http/sse transport + toolset + 直连列举）
 internal/model/       # OpenAI 兼容 model.LLM 适配器 + Registry
-internal/tool/        # 内置工具（web_search、remember/forget、load_memory）
+internal/tool/        # 内置工具（web_search、fetch_url、remember/forget、load_memory）
 internal/config/      # YAML + ${ENV} 配置加载
 internal/memory/      # L1 核心记忆（MEMORY/USER.md）+ L2 FTS5 会话检索
 internal/session/     # SQLite 会话持久化（纯 Go，无 CGO）

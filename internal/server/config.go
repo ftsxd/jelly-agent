@@ -9,12 +9,49 @@ import (
 )
 
 // providerInput is the body for POST /api/providers (create or update).
+//
+// The four tuning fields are pointers so an absent JSON key means "leave as
+// is": callers that only touch one thing (e.g. the list's "set as default"
+// button, which posts just name/base_url/model) must not silently wipe them.
+// An explicit value writes through, and an explicit 0 clears back to the
+// endpoint default — except max_retries, where 0 legitimately means "never
+// retry", so only omitting the key keeps the current setting.
 type providerInput struct {
 	Name        string `json:"name"`
 	BaseURL     string `json:"base_url"`
 	APIKey      string `json:"api_key"` // empty on update = keep existing key
 	Model       string `json:"model"`
 	MakeDefault bool   `json:"make_default"`
+
+	Temperature *float64 `json:"temperature"`
+	MaxTokens   *int     `json:"max_tokens"`
+	TimeoutSec  *int     `json:"timeout_sec"`
+	MaxRetries  *int     `json:"max_retries"`
+}
+
+// applyTuning copies the supplied tuning fields onto p, leaving absent ones
+// untouched. Out-of-range values are clamped rather than rejected so a stray
+// negative from a client can't produce a nonsensical config.
+func (in providerInput) applyTuning(p *config.Provider) {
+	if in.Temperature != nil {
+		// go-openai drops a 0 temperature (`omitempty`), so storing it would be
+		// a lie; treat 0 as "unset" and keep the file clean.
+		if t := *in.Temperature; t > 0 {
+			p.Temperature = &t
+		} else {
+			p.Temperature = nil
+		}
+	}
+	if in.MaxTokens != nil {
+		p.MaxTokens = max(0, *in.MaxTokens)
+	}
+	if in.TimeoutSec != nil {
+		p.TimeoutSec = max(0, *in.TimeoutSec)
+	}
+	if in.MaxRetries != nil {
+		n := max(0, *in.MaxRetries)
+		p.MaxRetries = &n
+	}
 }
 
 // handleSaveProvider upserts a provider into the config file and hot-reloads the
@@ -53,9 +90,11 @@ func (s *Server) handleSaveProvider(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusBadRequest, "新建 Provider 需填写 base_url 与 model")
 			return
 		}
-		raw.Providers = append(raw.Providers, config.Provider{
+		created := config.Provider{
 			Name: in.Name, BaseURL: in.BaseURL, APIKey: in.APIKey, Model: in.Model,
-		})
+		}
+		in.applyTuning(&created)
+		raw.Providers = append(raw.Providers, created)
 	} else {
 		p := &raw.Providers[idx]
 		p.BaseURL = in.BaseURL
@@ -63,6 +102,7 @@ func (s *Server) handleSaveProvider(w http.ResponseWriter, r *http.Request) {
 		if strings.TrimSpace(in.APIKey) != "" {
 			p.APIKey = in.APIKey // only overwrite when a new key is supplied
 		}
+		in.applyTuning(p)
 	}
 
 	// First provider becomes default automatically; explicit request overrides.

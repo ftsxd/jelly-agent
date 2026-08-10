@@ -13,11 +13,22 @@ default_provider: deepseek
 #     username: admin
 #     password_hash: $2a$...  # bcrypt 哈希，由服务自动生成
 
+# 每个 provider 除 base_url / api_key / model 外，还可选配以下参数（省略即用默认）：
+#   temperature: 0.7    采样温度。注意：0 无法发送（被 omitempty 丢弃），
+#                       需要近似确定性输出请填 0.01。
+#   max_tokens: 4096    回复长度上限。0 ⇒ 用服务端默认。
+#   timeout_sec: 120    等待“首字节”的超时（不是整轮超时，故不会截断长流式回复）。
+#   max_retries: 2      429 / 5xx / 网络抖动的自动重试次数（退避 0.5s→1s→2s…最多 8s）。
+#                       填 0 可完全关闭重试。4xx（鉴权/参数错误）一律不重试。
 providers:
   - name: deepseek
     base_url: https://api.deepseek.com/v1
     api_key: ${DEEPSEEK_API_KEY}
     model: deepseek-chat
+    # temperature: 0.7
+    # max_tokens: 4096
+    # timeout_sec: 120
+    # max_retries: 2
 
   - name: openai
     base_url: https://api.openai.com/v1

@@ -28,15 +28,25 @@ func (s *Server) handleProviders(w http.ResponseWriter, _ *http.Request) {
 		Model     string `json:"model"`
 		APIKey    string `json:"api_key"` // masked
 		IsDefault bool   `json:"is_default"`
+
+		// Tuning fields; null ⇒ unset, i.e. the model layer's default applies.
+		Temperature *float64 `json:"temperature"`
+		MaxTokens   int      `json:"max_tokens"`
+		TimeoutSec  int      `json:"timeout_sec"`
+		MaxRetries  *int     `json:"max_retries"`
 	}
 	out := make([]providerDTO, 0, len(cfg.Providers))
 	for _, p := range cfg.Providers {
 		out = append(out, providerDTO{
-			Name:      p.Name,
-			BaseURL:   p.BaseURL,
-			Model:     p.Model,
-			APIKey:    config.MaskKey(p.APIKey),
-			IsDefault: p.Name == cfg.DefaultProvider,
+			Name:        p.Name,
+			BaseURL:     p.BaseURL,
+			Model:       p.Model,
+			APIKey:      config.MaskKey(p.APIKey),
+			IsDefault:   p.Name == cfg.DefaultProvider,
+			Temperature: p.Temperature,
+			MaxTokens:   p.MaxTokens,
+			TimeoutSec:  p.TimeoutSec,
+			MaxRetries:  p.MaxRetries,
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
