@@ -82,3 +82,67 @@ func TestLoadPreservesBcryptHashWhileExpandingBracedEnv(t *testing.T) {
 		t.Fatalf("env ref = %q, want expanded", c.Providers[0].APIKey)
 	}
 }
+
+// Save writes an explicit whitelist of sections, so a field added to Config but
+// forgotten there is silently dropped on every web-side save. This round-trips
+// a fully-populated config to catch that whole class of bug rather than one
+// instance of it.
+func TestSaveRoundTripsEverySection(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+
+	budget := 12000
+	retries := 3
+	temp := 0.4
+	in := &Config{
+		DefaultProvider: "p1",
+		Providers: []Provider{{
+			Name: "p1", BaseURL: "http://x", APIKey: "k", Model: "m",
+			Temperature: &temp, MaxTokens: 2048, TimeoutSec: 90, MaxRetries: &retries,
+		}},
+		History:      History{MaxTokens: &budget, KeepRecent: 4, ToolResultTokens: 500},
+		DefaultAgent: "root",
+		SkillVars:    map[string]map[string]string{"s": {"K": "V"}},
+	}
+	in.Memory.Search.Enabled = true
+	in.Memory.Search.Backend = "fts5"
+	in.Skills.AllowScripts = true
+	in.Sandbox.Backend = "native"
+	in.Web.Admin = Admin{Username: "admin", PasswordHash: "$2a$hash"}
+
+	if err := Save(in, path); err != nil {
+		t.Fatal(err)
+	}
+	out, err := LoadRaw(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if out.History.MaxTokens == nil || *out.History.MaxTokens != 12000 ||
+		out.History.KeepRecent != 4 || out.History.ToolResultTokens != 500 {
+		t.Errorf("history section lost on save: %+v", out.History)
+	}
+	if len(out.Providers) != 1 {
+		t.Fatalf("providers lost: %+v", out.Providers)
+	}
+	p := out.Providers[0]
+	if p.Temperature == nil || *p.Temperature != 0.4 || p.MaxTokens != 2048 ||
+		p.TimeoutSec != 90 || p.MaxRetries == nil || *p.MaxRetries != 3 {
+		t.Errorf("provider tuning lost on save: %+v", p)
+	}
+	if !out.Memory.Search.Enabled || out.Memory.Search.Backend != "fts5" {
+		t.Errorf("memory section lost: %+v", out.Memory)
+	}
+	if !out.Skills.AllowScripts {
+		t.Error("skills section lost")
+	}
+	if out.Sandbox.Backend != "native" {
+		t.Error("sandbox section lost")
+	}
+	if out.Web.Admin.Username != "admin" || out.Web.Admin.PasswordHash != "$2a$hash" {
+		t.Errorf("web/admin section lost: %+v", out.Web)
+	}
+	if out.DefaultAgent != "root" || out.SkillVars["s"]["K"] != "V" {
+		t.Errorf("default_agent / skill_vars lost: %q %+v", out.DefaultAgent, out.SkillVars)
+	}
+}

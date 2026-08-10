@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/jelly-agent/jelly-agent/internal/config"
+	"github.com/jelly-agent/jelly-agent/internal/history"
 )
 
 // providerInput is the body for POST /api/providers (create or update).
@@ -145,6 +146,68 @@ func (s *Server) handleDeleteProvider(w http.ResponseWriter, r *http.Request) {
 			raw.DefaultProvider = raw.Providers[0].Name
 		}
 	}
+
+	if err := s.persist(w, raw, path); err != nil {
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "saved_to": path})
+}
+
+// historyInput configures conversation compaction from the web UI.
+//
+// Unlike providerInput there is no partial-update caller here — the form always
+// posts the whole section — so plain "absent means default" semantics are
+// enough. MaxTokens stays a pointer only to separate "use the default" (null)
+// from "turn compaction off" (0).
+type historyInput struct {
+	MaxTokens        *int `json:"max_tokens"`
+	KeepRecent       int  `json:"keep_recent"`
+	ToolResultTokens int  `json:"tool_result_tokens"`
+}
+
+// handleHistory reports the current compaction settings plus the defaults that
+// apply when a field is unset, so the form can show what is actually in force.
+func (s *Server) handleHistory(w http.ResponseWriter, _ *http.Request) {
+	h := s.engine().Config().History
+	writeJSON(w, http.StatusOK, map[string]any{
+		"max_tokens":         h.MaxTokens, // null ⇒ default applies
+		"keep_recent":        h.KeepRecent,
+		"tool_result_tokens": h.ToolResultTokens,
+		"defaults": map[string]int{
+			"max_tokens":         history.DefaultMaxTokens,
+			"keep_recent":        history.DefaultKeepRecent,
+			"tool_result_tokens": history.DefaultToolResultTokens,
+		},
+	})
+}
+
+// handleSetHistory persists the history section and hot-reloads, so compaction
+// retunes without a restart. Negative values are clamped rather than rejected.
+func (s *Server) handleSetHistory(w http.ResponseWriter, r *http.Request) {
+	var in historyInput
+	if err := decodeJSON(r, &in); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	path, err := s.writeTargetPath()
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	raw, err := loadRawOrEmpty(path)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	if in.MaxTokens == nil {
+		raw.History.MaxTokens = nil // fall back to the package default
+	} else {
+		n := max(0, *in.MaxTokens) // 0 = compaction off
+		raw.History.MaxTokens = &n
+	}
+	raw.History.KeepRecent = max(0, in.KeepRecent)
+	raw.History.ToolResultTokens = max(0, in.ToolResultTokens)
 
 	if err := s.persist(w, raw, path); err != nil {
 		return

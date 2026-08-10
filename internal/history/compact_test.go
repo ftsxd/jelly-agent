@@ -198,6 +198,31 @@ func TestCompactAddsPlaceholderWhenDropping(t *testing.T) {
 	}
 }
 
+// L2 session search is off by default, so load_memory usually does not exist.
+// Advertising it anyway invites the model to hallucinate a call to it.
+func TestPlaceholderOnlyMentionsLoadMemoryWhenAvailable(t *testing.T) {
+	var in []*genai.Content
+	for range 30 {
+		in = append(in, textContent(genai.RoleUser, strings.Repeat("话", 200)))
+	}
+
+	withoutRecall, res := Compact(in, Policy{MaxTokens: 400, KeepRecent: 2})
+	if res.Dropped == 0 {
+		t.Fatal("expected drops")
+	}
+	if got := withoutRecall[0].Parts[0].Text; strings.Contains(got, "load_memory") {
+		t.Errorf("suggested load_memory although the agent has no such tool: %q", got)
+	}
+
+	withRecall, res := Compact(in, Policy{MaxTokens: 400, KeepRecent: 2, CanRecall: true})
+	if res.Dropped == 0 {
+		t.Fatal("expected drops")
+	}
+	if got := withRecall[0].Parts[0].Text; !strings.Contains(got, "load_memory") {
+		t.Errorf("load_memory is available but was not offered: %q", got)
+	}
+}
+
 // The tail alone can exceed the budget; compaction must then shorten tool
 // results inside it rather than give up or drop the current question.
 func TestCompactShortensProtectedTailAsLastResort(t *testing.T) {

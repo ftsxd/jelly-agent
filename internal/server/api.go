@@ -79,6 +79,30 @@ func (s *Server) handleTools(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"tools": out})
 }
 
+// handleToolFetch runs fetch_url directly (bypassing the model) so the Tools
+// view can check what a page actually reduces to before an agent relies on it.
+// Body: {"url": "https://…", "max_chars": 8000}.
+//
+// The tool's own guards still apply — scheme check, the private-address dialer
+// guard, size and redirect caps — so this endpoint is no more reachable into
+// the local network than the agent is.
+func (s *Server) handleToolFetch(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		URL      string `json:"url"`
+		MaxChars int    `json:"max_chars"`
+	}
+	if err := decodeJSON(r, &req); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	res, err := jellytool.FetchURL(r.Context(), req.URL, req.MaxChars)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
 // handleToolTest runs web_search directly (bypassing the model) so the Tools
 // view can exercise the search backend. Body: {"query": "...", "max": 5}.
 func (s *Server) handleToolTest(w http.ResponseWriter, r *http.Request) {

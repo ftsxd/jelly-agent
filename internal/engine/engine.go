@@ -345,21 +345,15 @@ func (e *Engine) BuildAgentWith(provider string, mcpNames []string) (agent.Agent
 	return a, prov, core, search, nil
 }
 
-// buildNode constructs a single llmagent: it resolves the provider's model,
-// assembles the built-in + skill tools, and attaches the given MCP toolsets and
-// sub-agents (which give ADK its transfer_to_agent delegation). The instruction
-// is rendered fresh each turn (core memory + skill catalog prepended) via an
-// InstructionProvider. Shared by the legacy single agent and the multi-agent
-// tree so both behave identically.
 // withCompaction layers conversation compaction over the raw LLM so a long
 // session (or a few large tool results) can't overrun the context window. An
 // explicit history.max_tokens of 0 opts out and returns the model untouched.
-func (e *Engine) withCompaction(llm adkmodel.LLM, agentName string) adkmodel.LLM {
+func (e *Engine) withCompaction(llm adkmodel.LLM, agentName string, canRecall bool) adkmodel.LLM {
 	h := e.cfg.History
 	if h.MaxTokens != nil && *h.MaxTokens <= 0 {
 		return llm
 	}
-	pol := history.Policy{KeepRecent: h.KeepRecent, ToolResultTokens: h.ToolResultTokens}
+	pol := history.Policy{KeepRecent: h.KeepRecent, ToolResultTokens: h.ToolResultTokens, CanRecall: canRecall}
 	if h.MaxTokens != nil {
 		pol.MaxTokens = *h.MaxTokens
 	}
@@ -369,12 +363,20 @@ func (e *Engine) withCompaction(llm adkmodel.LLM, agentName string) adkmodel.LLM
 	})
 }
 
+// buildNode constructs a single llmagent: it resolves the provider's model,
+// assembles the built-in + skill tools, and attaches the given MCP toolsets and
+// sub-agents (which give ADK its transfer_to_agent delegation). The instruction
+// is rendered fresh each turn (core memory + skill catalog prepended) via an
+// InstructionProvider. Shared by the legacy single agent and the multi-agent
+// tree so both behave identically.
 func (e *Engine) buildNode(name, description, provider, instruction string, toolsets []adktool.Toolset, subAgents []agent.Agent, core *memory.Core, withSearch bool) (agent.Agent, config.Provider, error) {
 	llm, prov, err := e.reg.Get(provider)
 	if err != nil {
 		return nil, prov, err
 	}
-	mdl := e.withCompaction(llm, name)
+	// withSearch is exactly "the agent has load_memory", which decides whether
+	// the compaction notice may point the model at it.
+	mdl := e.withCompaction(llm, name, withSearch)
 
 	tools, err := e.Tools(core, withSearch)
 	if err != nil {

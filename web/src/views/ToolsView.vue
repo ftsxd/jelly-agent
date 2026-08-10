@@ -7,13 +7,24 @@ const tools = ref([])
 const loading = ref(true)
 const listError = ref('')
 
+const tab = ref('web_search') // which tool the bench is exercising
+
 const query = ref('')
 const maxNum = ref(5)
 const running = ref(false)
 const result = ref(null)
 const runError = ref('')
 
+const url = ref('')
+const maxChars = ref(8000)
+const fetched = ref(null)
+
 onMounted(load)
+
+function switchTab(name) {
+  tab.value = name
+  runError.value = ''
+}
 
 async function load() {
   loading.value = true
@@ -35,6 +46,21 @@ async function run() {
   result.value = null
   try {
     result.value = await api.testTool(q, Number(maxNum.value) || 5)
+  } catch (e) {
+    runError.value = e.message
+  } finally {
+    running.value = false
+  }
+}
+
+async function runFetch() {
+  const u = url.value.trim()
+  if (!u || running.value) return
+  running.value = true
+  runError.value = ''
+  fetched.value = null
+  try {
+    fetched.value = await api.fetchUrl(u, Number(maxChars.value) || 8000)
   } catch (e) {
     runError.value = e.message
   } finally {
@@ -69,8 +95,51 @@ async function run() {
       </section>
 
       <section class="col">
-        <h2 class="section-title">web_search 测试台</h2>
-        <div class="card runner">
+        <h2 class="section-title">测试台</h2>
+        <div class="tabs">
+          <button class="tab" :class="{ on: tab === 'web_search' }" @click="switchTab('web_search')">web_search</button>
+          <button class="tab" :class="{ on: tab === 'fetch_url' }" @click="switchTab('fetch_url')">fetch_url</button>
+        </div>
+
+        <div v-if="tab === 'fetch_url'" class="card runner">
+          <label class="field">
+            <span class="label">网址</span>
+            <input
+              v-model="url"
+              class="input mono"
+              placeholder="https://example.com"
+              @keydown.enter="runFetch"
+            />
+          </label>
+          <div class="row">
+            <label class="field max-field">
+              <span class="label">最大字符</span>
+              <input v-model="maxChars" class="input" type="number" min="100" max="40000" step="1000" />
+            </label>
+            <button class="btn btn-primary run-btn" @click="runFetch" :disabled="running || !url.trim()">
+              <Icon v-if="!running" name="link" :size="16" />
+              <span v-else class="spinner" />
+              {{ running ? '抓取中…' : '抓取正文' }}
+            </button>
+          </div>
+          <p class="muted hint">只接受公网 http/https 地址；内网、环回与云元数据地址会被拒绝。</p>
+
+          <div v-if="runError" class="error-bar"><Icon name="alert" :size="16" /> {{ runError }}</div>
+
+          <div v-if="fetched" class="results">
+            <div class="results-meta mono dim">
+              {{ fetched.content_type || '未知类型' }}
+              <template v-if="fetched.truncated"> · 已截断</template>
+            </div>
+            <div class="fetch-title">{{ fetched.title || '（无标题）' }}</div>
+            <a v-if="fetched.final_url" class="hit-url mono dim" :href="fetched.final_url" target="_blank" rel="noopener">
+              重定向至 {{ fetched.final_url }}
+            </a>
+            <pre class="fetch-body">{{ fetched.content }}</pre>
+          </div>
+        </div>
+
+        <div v-else class="card runner">
           <label class="field">
             <span class="label">查询关键词</span>
             <input
@@ -203,6 +272,53 @@ async function run() {
 }
 .run-btn {
   flex: 1;
+}
+.tabs {
+  display: flex;
+  gap: var(--sp-2);
+  margin-bottom: var(--sp-3);
+}
+.tab {
+  padding: 6px 14px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-dim);
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  cursor: pointer;
+}
+.tab:hover {
+  color: var(--text);
+}
+.tab.on {
+  color: var(--text);
+  border-color: var(--accent-border);
+  background: var(--accent-tint);
+}
+.hint {
+  margin: 0;
+  font-size: 12px;
+}
+.fetch-title {
+  margin-top: var(--sp-2);
+  font-weight: 600;
+  font-size: 14px;
+}
+.fetch-body {
+  margin: var(--sp-2) 0 0;
+  padding: var(--sp-3);
+  max-height: 420px;
+  overflow: auto;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--text-dim);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
 }
 
 .results {

@@ -49,6 +49,11 @@ type Policy struct {
 	MaxTokens        int
 	KeepRecent       int
 	ToolResultTokens int
+	// CanRecall reports whether the agent actually has the load_memory tool
+	// (L2 session search). The omission notice only points at it when true —
+	// telling a model to use a tool it was never given invites a hallucinated
+	// call. L2 is off by default, so this must not be assumed.
+	CanRecall bool
 }
 
 func (p Policy) withDefaults() Policy {
@@ -134,7 +139,7 @@ func Compact(contents []*genai.Content, pol Policy) ([]*genai.Content, Result) {
 
 	out := make([]*genai.Content, 0, len(contents)+1)
 	if res.Dropped > 0 {
-		out = append(out, placeholder(res.Dropped))
+		out = append(out, placeholder(res.Dropped, pol.CanRecall))
 	}
 	for _, g := range work {
 		out = append(out, g...)
@@ -144,12 +149,16 @@ func Compact(contents []*genai.Content, pol Policy) ([]*genai.Content, Result) {
 }
 
 // placeholder is the note that replaces dropped exchanges, so the model knows
-// the history was shortened rather than that it never happened.
-func placeholder(dropped int) *genai.Content {
-	return genai.NewContentFromText(
-		fmt.Sprintf("（系统提示：为控制上下文长度，此前 %d 条较早的对话记录已省略。如需其中的信息，可用 load_memory 检索历史会话。）", dropped),
-		genai.RoleUser,
-	)
+// the history was shortened rather than that it never happened. The recall hint
+// is only added when load_memory is actually on the agent's tool list.
+func placeholder(dropped int, canRecall bool) *genai.Content {
+	msg := fmt.Sprintf("（系统提示：为控制上下文长度，此前 %d 条较早的对话记录已省略。", dropped)
+	if canRecall {
+		msg += "如需其中的信息，可用 load_memory 检索历史会话。）"
+	} else {
+		msg += "如果用户提到的内容不在上文中，请直接说明你看不到更早的记录，不要臆测。）"
+	}
+	return genai.NewContentFromText(msg, genai.RoleUser)
 }
 
 // group is one atomic unit of history: a plain message, or a tool call bundled

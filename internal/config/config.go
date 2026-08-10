@@ -290,6 +290,7 @@ func Save(c *Config, path string) error {
 		DefaultProvider string                       `yaml:"default_provider,omitempty"`
 		Providers       []Provider                   `yaml:"providers"`
 		Memory          *Memory                      `yaml:"memory,omitempty"`
+		History         *History                     `yaml:"history,omitempty"`
 		Skills          *Skills                      `yaml:"skills,omitempty"`
 		Sandbox         *Sandbox                     `yaml:"sandbox,omitempty"`
 		Web             *Web                         `yaml:"web,omitempty"`
@@ -316,6 +317,10 @@ func Save(c *Config, path string) error {
 	if c.Memory != (Memory{}) {
 		m := c.Memory
 		p.Memory = &m
+	}
+	if c.History != (History{}) {
+		h := c.History
+		p.History = &h
 	}
 	out, err := yaml.Marshal(p)
 	if err != nil {

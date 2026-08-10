@@ -7,6 +7,7 @@ import (
 
 	"github.com/jelly-agent/jelly-agent/internal/config"
 	"github.com/jelly-agent/jelly-agent/internal/engine"
+	"github.com/jelly-agent/jelly-agent/internal/history"
 )
 
 // newProviderServer builds a server whose config lives in a temp file, so
@@ -183,5 +184,100 @@ func TestListProvidersReturnsTuning(t *testing.T) {
 	if p.Temperature == nil || *p.Temperature != 0.5 || p.MaxTokens != 1024 ||
 		p.TimeoutSec != 45 || p.MaxRetries == nil || *p.MaxRetries != 3 {
 		t.Errorf("tuning not echoed: %+v", p)
+	}
+}
+
+// The fetch_url bench endpoint must keep the tool's own guards: a loopback or
+// private target is refused here exactly as it would be for the agent.
+func TestToolFetchRejectsNonPublicTarget(t *testing.T) {
+	s, _ := newProviderServer(t)
+	w := do(t, s, "POST", "/api/tools/fetch", `{"url":"http://127.0.0.1:9/","max_chars":100}`)
+	if w.Code != 400 {
+		t.Errorf("loopback fetch = %d, want 400: %s", w.Code, w.Body)
+	}
+}
+
+func TestToolFetchRejectsBadScheme(t *testing.T) {
+	s, _ := newProviderServer(t)
+	w := do(t, s, "POST", "/api/tools/fetch", `{"url":"file:///etc/passwd"}`)
+	if w.Code != 400 {
+		t.Errorf("file:// fetch = %d, want 400: %s", w.Code, w.Body)
+	}
+}
+
+// reloadHistory reads the history section back off disk.
+func reloadHistory(t *testing.T, path string) config.History {
+	t.Helper()
+	raw, err := config.LoadRaw(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw.History
+}
+
+func TestSetHistoryPersistsAndClamps(t *testing.T) {
+	s, path := newProviderServer(t)
+
+	if w := do(t, s, "PUT", "/api/history",
+		`{"max_tokens":12000,"keep_recent":4,"tool_result_tokens":500}`); w.Code != 200 {
+		t.Fatalf("save: %d %s", w.Code, w.Body)
+	}
+	h := reloadHistory(t, path)
+	if h.MaxTokens == nil || *h.MaxTokens != 12000 {
+		t.Errorf("max_tokens = %v, want 12000", h.MaxTokens)
+	}
+	if h.KeepRecent != 4 || h.ToolResultTokens != 500 {
+		t.Errorf("keep_recent/tool_result_tokens = %d/%d, want 4/500", h.KeepRecent, h.ToolResultTokens)
+	}
+
+	// Negatives are clamped rather than rejected.
+	if w := do(t, s, "PUT", "/api/history",
+		`{"max_tokens":-5,"keep_recent":-1,"tool_result_tokens":-9}`); w.Code != 200 {
+		t.Fatalf("clamp save: %d %s", w.Code, w.Body)
+	}
+	h = reloadHistory(t, path)
+	if h.MaxTokens == nil || *h.MaxTokens != 0 || h.KeepRecent != 0 || h.ToolResultTokens != 0 {
+		t.Errorf("negatives not clamped: %+v", h)
+	}
+}
+
+// null means "use the package default" while an explicit 0 disables compaction;
+// the two must not collapse into the same stored state.
+func TestSetHistoryNullDiffersFromZero(t *testing.T) {
+	s, path := newProviderServer(t)
+
+	if w := do(t, s, "PUT", "/api/history", `{"max_tokens":0,"keep_recent":2}`); w.Code != 200 {
+		t.Fatalf("zero: %d %s", w.Code, w.Body)
+	}
+	if h := reloadHistory(t, path); h.MaxTokens == nil || *h.MaxTokens != 0 {
+		t.Errorf("explicit 0 (compaction off) not stored: %v", h.MaxTokens)
+	}
+
+	if w := do(t, s, "PUT", "/api/history", `{"max_tokens":null,"keep_recent":2}`); w.Code != 200 {
+		t.Fatalf("null: %d %s", w.Code, w.Body)
+	}
+	if h := reloadHistory(t, path); h.MaxTokens != nil {
+		t.Errorf("null should clear back to the default, got %d", *h.MaxTokens)
+	}
+}
+
+func TestGetHistoryReportsDefaults(t *testing.T) {
+	s, _ := newProviderServer(t)
+	w := do(t, s, "GET", "/api/history", "")
+	if w.Code != 200 {
+		t.Fatalf("get: %d %s", w.Code, w.Body)
+	}
+	var got struct {
+		MaxTokens *int           `json:"max_tokens"`
+		Defaults  map[string]int `json:"defaults"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.MaxTokens != nil {
+		t.Errorf("unset max_tokens should be null, got %d", *got.MaxTokens)
+	}
+	if got.Defaults["max_tokens"] != history.DefaultMaxTokens {
+		t.Errorf("defaults.max_tokens = %d, want %d", got.Defaults["max_tokens"], history.DefaultMaxTokens)
 	}
 }
