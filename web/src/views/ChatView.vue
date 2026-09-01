@@ -77,8 +77,8 @@ async function openHistorySession(id) {
       role: ev.role,
       text: ev.text || '',
       tools: [
-        ...(ev.tool_calls || []).map((t) => ({ name: t.name, args: t.args, response: null })),
-        ...(ev.tool_results || []).map((t) => ({ name: t.name, args: null, response: t.response })),
+        ...(ev.tool_calls || []).map((t) => ({ name: t.name, args: t.args, response: null, ok: null, error: '' })),
+        ...(ev.tool_results || []).map((t) => ({ name: t.name, args: null, response: t.response, ok: t.ok, error: t.error || '' })),
       ],
       usage: null,
       provider: '', model: '', author: ev.author || '',
@@ -148,13 +148,13 @@ async function send() {
             scrollDown()
             break
           case 'tool_call':
-            live.tools.push({ name: ev.name, args: ev.args, response: null })
+            live.tools.push({ name: ev.name, args: ev.args, response: null, ok: null, error: '' })
             scrollDown()
             break
           case 'tool_result': {
             const t = [...live.tools].reverse().find((t) => t.name === ev.name && t.response === null)
-            if (t) t.response = ev.response
-            else live.tools.push({ name: ev.name, args: null, response: ev.response })
+            if (t) Object.assign(t, { response: ev.response, ok: ev.ok, error: ev.error || '' })
+            else live.tools.push({ name: ev.name, args: null, response: ev.response, ok: ev.ok, error: ev.error || '' })
             break
           }
           case 'usage':
@@ -187,10 +187,13 @@ function fmtArgs(args) {
     .join(', ')
 }
 
-function resultSummary(resp) {
-  if (!resp) return '执行中…'
-  if (Array.isArray(resp.results)) return `${resp.results.length} 条结果`
-  const s = JSON.stringify(resp)
+// A tool that failed still comes back as a normal response, so success is read
+// from the server's `ok` flag, never from the payload having arrived.
+function resultSummary(t) {
+  if (!t.response) return '执行中…'
+  if (t.error) return t.error.length > 200 ? t.error.slice(0, 200) + '…' : t.error
+  if (Array.isArray(t.response.results)) return `${t.response.results.length} 条结果`
+  const s = JSON.stringify(t.response)
   return s.length > 120 ? s.slice(0, 120) + '…' : s
 }
 </script>
@@ -259,8 +262,8 @@ function resultSummary(resp) {
               <span class="mono tool-name">{{ t.name }}</span>
               <span v-if="t.args" class="mono dim tool-args">{{ fmtArgs(t.args) }}</span>
             </div>
-            <div class="tool-res mono" :class="{ pending: !t.response }">
-              {{ resultSummary(t.response) }}
+            <div class="tool-res mono" :class="{ pending: !t.response, failed: t.ok === false }">
+              {{ resultSummary(t) }}
             </div>
           </div>
 
@@ -438,6 +441,10 @@ function resultSummary(resp) {
 }
 .tool-res.pending {
   color: var(--text-muted);
+}
+.tool-res.failed {
+  color: var(--danger);
+  background: var(--danger-tint);
 }
 
 .who {

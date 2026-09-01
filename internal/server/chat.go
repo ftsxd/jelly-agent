@@ -133,7 +133,11 @@ func emitFinal(sse *sseWriter, ev *adksession.Event) {
 		case p.FunctionCall != nil:
 			sse.send("tool_call", map[string]any{"name": p.FunctionCall.Name, "args": p.FunctionCall.Args, "agent": ev.Author})
 		case p.FunctionResponse != nil:
-			sse.send("tool_result", map[string]any{"name": p.FunctionResponse.Name, "response": p.FunctionResponse.Response, "agent": ev.Author})
+			resp := p.FunctionResponse.Response
+			sse.send("tool_result", map[string]any{
+				"name": p.FunctionResponse.Name, "response": resp, "agent": ev.Author,
+				"ok": !toolFailed(resp), "error": toolError(resp),
+			})
 		}
 	}
 	if ev.UsageMetadata != nil {

@@ -206,6 +206,10 @@ type toolCallDTO struct {
 type toolResult struct {
 	Name     string         `json:"name"`
 	Response map[string]any `json:"response,omitempty"`
+	// OK is never omitted: a missing field would read as a failure in the UI,
+	// which is the very confusion this flag exists to end.
+	OK    bool   `json:"ok"`
+	Error string `json:"error,omitempty"`
 }
 
 // handleSessionDetail returns one session's transcript as structured turns.
@@ -301,7 +305,11 @@ func eventToDTO(ev *adksession.Event) eventDTO {
 		case p.FunctionCall != nil:
 			dto.ToolCalls = append(dto.ToolCalls, toolCallDTO{Name: p.FunctionCall.Name, Args: p.FunctionCall.Args})
 		case p.FunctionResponse != nil:
-			dto.ToolResults = append(dto.ToolResults, toolResult{Name: p.FunctionResponse.Name, Response: p.FunctionResponse.Response})
+			resp := p.FunctionResponse.Response
+			dto.ToolResults = append(dto.ToolResults, toolResult{
+				Name: p.FunctionResponse.Name, Response: resp,
+				OK: !toolFailed(resp), Error: toolError(resp),
+			})
 		}
 	}
 	dto.Text = text.String()

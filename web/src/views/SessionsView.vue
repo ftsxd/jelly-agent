@@ -139,6 +139,13 @@ function fmtArgs(args) {
     .map(([k, v]) => `${k}=${JSON.stringify(v)}`)
     .join(', ')
 }
+// A tool that failed still comes back as a normal response, so the summary is
+// driven by the server's `ok` flag rather than by the payload's shape.
+function resultSummary(tr) {
+  if (tr.error) return tr.error.length > 160 ? tr.error.slice(0, 160) + '…' : tr.error
+  if (Array.isArray(tr.response?.results)) return `${tr.response.results.length} 条结果`
+  return '已返回'
+}
 function continueChat(id) { router.push({ path: '/chat', query: { session: id } }) }
 </script>
 
@@ -237,10 +244,9 @@ function continueChat(id) { router.push({ path: '/chat', query: { session: id } 
                 <Icon name="tool" :size="13" />
                 <span class="mono">{{ tc.name }}({{ fmtArgs(tc.args) }})</span>
               </div>
-              <div v-for="(tr, ti) in ev.tool_results" :key="'r' + ti" class="ev-tool result">
-                <Icon name="check" :size="13" />
-                <span class="mono">{{ tr.name }} →
-                  {{ Array.isArray(tr.response?.results) ? tr.response.results.length + ' 条结果' : '已返回' }}</span>
+              <div v-for="(tr, ti) in ev.tool_results" :key="'r' + ti" class="ev-tool" :class="tr.ok ? 'result' : 'failed'">
+                <Icon :name="tr.ok ? 'check' : 'alert'" :size="13" />
+                <span class="mono">{{ tr.name }} → {{ resultSummary(tr) }}</span>
               </div>
             </div>
           </div>
@@ -485,6 +491,11 @@ function continueChat(id) { router.push({ path: '/chat', query: { session: id } 
 }
 .ev-tool.result {
   color: var(--accent);
+}
+.ev-tool.failed {
+  color: var(--danger);
+  align-items: flex-start;
+  word-break: break-word;
 }
 .error-bar {
   display: flex;

@@ -11,14 +11,19 @@ import (
 
 // statsResponse is the aggregate the Monitor view renders.
 type statsResponse struct {
-	Sessions  int          `json:"sessions"`   // persisted session count
-	Messages  int          `json:"messages"`   // text turns (user + agent)
-	ToolCalls int          `json:"tool_calls"` // total tool invocations
-	Tokens    tokenTotals  `json:"tokens"`
-	Tools     []toolStat   `json:"tools"` // per-tool invocation counts, desc
-	Daily     []dailyStat  `json:"daily"` // token/message series, chronological
-	Providers providerStat `json:"providers"`
-	Memory    memoryStat   `json:"memory"`
+	Sessions  int `json:"sessions"`   // persisted session count
+	Messages  int `json:"messages"`   // text turns (user + agent)
+	ToolCalls int `json:"tool_calls"` // total tool invocations
+	// ToolResults / ToolErrors count responses, not calls: a call whose response
+	// never came back (the run was cancelled mid-tool) is in neither. Success
+	// rate is therefore (ToolResults-ToolErrors)/ToolResults, not …/ToolCalls.
+	ToolResults int          `json:"tool_results"`
+	ToolErrors  int          `json:"tool_errors"`
+	Tokens      tokenTotals  `json:"tokens"`
+	Tools       []toolStat   `json:"tools"` // per-tool invocation counts, desc
+	Daily       []dailyStat  `json:"daily"` // token/message series, chronological
+	Providers   providerStat `json:"providers"`
+	Memory      memoryStat   `json:"memory"`
 }
 
 type tokenTotals struct {
@@ -28,8 +33,10 @@ type tokenTotals struct {
 }
 
 type toolStat struct {
-	Name  string `json:"name"`
-	Count int    `json:"count"`
+	Name    string `json:"name"`
+	Count   int    `json:"count"`
+	Results int    `json:"results"`
+	Failed  int    `json:"failed"`
 }
 
 type dailyStat struct {
@@ -78,6 +85,8 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	}
 
 	toolCounts := map[string]int{}
+	toolResults := map[string]int{}
+	toolFails := map[string]int{}
 	type dayAgg struct {
 		tokens   int32
 		messages int
@@ -119,6 +128,14 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 				case p.FunctionCall != nil:
 					toolCounts[p.FunctionCall.Name]++
 					out.ToolCalls++
+				case p.FunctionResponse != nil:
+					name := p.FunctionResponse.Name
+					toolResults[name]++
+					out.ToolResults++
+					if toolFailed(p.FunctionResponse.Response) {
+						toolFails[name]++
+						out.ToolErrors++
+					}
 				}
 			}
 			if hasText {
@@ -128,8 +145,13 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	for name := range toolResults {
+		if _, seen := toolCounts[name]; !seen {
+			toolCounts[name] = 0 // a response whose call event is missing
+		}
+	}
 	for name, n := range toolCounts {
-		out.Tools = append(out.Tools, toolStat{Name: name, Count: n})
+		out.Tools = append(out.Tools, toolStat{Name: name, Count: n, Results: toolResults[name], Failed: toolFails[name]})
 	}
 	sort.Slice(out.Tools, func(i, j int) bool {
 		if out.Tools[i].Count != out.Tools[j].Count {
