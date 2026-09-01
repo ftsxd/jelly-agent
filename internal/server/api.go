@@ -28,15 +28,25 @@ func (s *Server) handleProviders(w http.ResponseWriter, _ *http.Request) {
 		Model     string `json:"model"`
 		APIKey    string `json:"api_key"` // masked
 		IsDefault bool   `json:"is_default"`
+
+		// Tuning fields; null ⇒ unset, i.e. the model layer's default applies.
+		Temperature *float64 `json:"temperature"`
+		MaxTokens   int      `json:"max_tokens"`
+		TimeoutSec  int      `json:"timeout_sec"`
+		MaxRetries  *int     `json:"max_retries"`
 	}
 	out := make([]providerDTO, 0, len(cfg.Providers))
 	for _, p := range cfg.Providers {
 		out = append(out, providerDTO{
-			Name:      p.Name,
-			BaseURL:   p.BaseURL,
-			Model:     p.Model,
-			APIKey:    config.MaskKey(p.APIKey),
-			IsDefault: p.Name == cfg.DefaultProvider,
+			Name:        p.Name,
+			BaseURL:     p.BaseURL,
+			Model:       p.Model,
+			APIKey:      config.MaskKey(p.APIKey),
+			IsDefault:   p.Name == cfg.DefaultProvider,
+			Temperature: p.Temperature,
+			MaxTokens:   p.MaxTokens,
+			TimeoutSec:  p.TimeoutSec,
+			MaxRetries:  p.MaxRetries,
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -67,6 +77,30 @@ func (s *Server) handleTools(w http.ResponseWriter, _ *http.Request) {
 		out = append(out, toolDTO{Name: t.Name(), Description: t.Description()})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"tools": out})
+}
+
+// handleToolFetch runs fetch_url directly (bypassing the model) so the Tools
+// view can check what a page actually reduces to before an agent relies on it.
+// Body: {"url": "https://…", "max_chars": 8000}.
+//
+// The tool's own guards still apply — scheme check, the private-address dialer
+// guard, size and redirect caps — so this endpoint is no more reachable into
+// the local network than the agent is.
+func (s *Server) handleToolFetch(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		URL      string `json:"url"`
+		MaxChars int    `json:"max_chars"`
+	}
+	if err := decodeJSON(r, &req); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	res, err := jellytool.FetchURL(r.Context(), req.URL, req.MaxChars)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
 }
 
 // handleToolTest runs web_search directly (bypassing the model) so the Tools

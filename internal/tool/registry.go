@@ -12,14 +12,19 @@ import (
 // withSearch is true the ADK load_memory tool is added for L2 session search
 // (it requires the runner's MemoryService to be set — see PLAN §10.1).
 //
-// web_search is always present; fetch_url / run_code / read_file / write_file /
+// web_search and fetch_url are always present (both read-only network reads;
+// fetch_url refuses non-public addresses). run_code / read_file / write_file /
 // query_db land later, behind the permission model (see PLAN §8 risk 6).
 func Builtins(core *memory.Core, withSearch bool) ([]adktool.Tool, error) {
 	ws, err := NewWebSearchTool()
 	if err != nil {
 		return nil, err
 	}
-	tools := []adktool.Tool{ws}
+	fetch, err := NewFetchURLTool()
+	if err != nil {
+		return nil, err
+	}
+	tools := []adktool.Tool{ws, fetch}
 	if core != nil {
 		mem, err := MemoryTools(core)
 		if err != nil {

@@ -21,6 +21,35 @@ type Provider struct {
 	BaseURL string `mapstructure:"base_url" yaml:"base_url,omitempty"`
 	APIKey  string `mapstructure:"api_key" yaml:"api_key,omitempty"`
 	Model   string `mapstructure:"model" yaml:"model,omitempty"`
+
+	// Temperature overrides the endpoint's default sampling temperature. It is a
+	// pointer so "unset" is distinguishable from an explicit value.
+	Temperature *float64 `mapstructure:"temperature" yaml:"temperature,omitempty"`
+	// MaxTokens caps the completion length. Zero ⇒ the endpoint's default.
+	MaxTokens int `mapstructure:"max_tokens" yaml:"max_tokens,omitempty"`
+	// TimeoutSec bounds how long to wait for the model's response headers (i.e.
+	// time to first byte), not the whole exchange — a long stream must not be
+	// cut off mid-answer. Zero ⇒ the model layer's default.
+	TimeoutSec int `mapstructure:"timeout_sec" yaml:"timeout_sec,omitempty"`
+	// MaxRetries bounds automatic retries of transient failures (429 / 5xx /
+	// network). Pointer so an explicit 0 (disable retries) is distinguishable
+	// from "unset". Nil ⇒ the model layer's default.
+	MaxRetries *int `mapstructure:"max_retries" yaml:"max_retries,omitempty"`
+}
+
+// History bounds the conversation history sent to the model each turn. Without
+// a bound, a few large tool results (e.g. fetch_url pages) push a session past
+// the context window; see internal/history.
+type History struct {
+	// MaxTokens is the history budget. Nil ⇒ the package default; an explicit
+	// 0 turns compaction off entirely (the whole history is always sent).
+	MaxTokens *int `mapstructure:"max_tokens" yaml:"max_tokens,omitempty"`
+	// KeepRecent is how many trailing contents are never dropped, so the
+	// current question always survives. Zero ⇒ default.
+	KeepRecent int `mapstructure:"keep_recent" yaml:"keep_recent,omitempty"`
+	// ToolResultTokens caps an individual tool result once it is selected for
+	// shortening. Zero ⇒ default.
+	ToolResultTokens int `mapstructure:"tool_result_tokens" yaml:"tool_result_tokens,omitempty"`
 }
 
 // Config is the top-level jelly-agent configuration.
@@ -28,6 +57,7 @@ type Config struct {
 	DefaultProvider string     `mapstructure:"default_provider" yaml:"default_provider"`
 	Providers       []Provider `mapstructure:"providers" yaml:"providers"`
 	Memory          Memory     `mapstructure:"memory" yaml:"memory"`
+	History         History    `mapstructure:"history" yaml:"history,omitempty"`
 	Skills          Skills     `mapstructure:"skills" yaml:"skills,omitempty"`
 	Sandbox         Sandbox    `mapstructure:"sandbox" yaml:"sandbox,omitempty"`
 	Web             Web        `mapstructure:"web" yaml:"web,omitempty"`
@@ -260,6 +290,7 @@ func Save(c *Config, path string) error {
 		DefaultProvider string                       `yaml:"default_provider,omitempty"`
 		Providers       []Provider                   `yaml:"providers"`
 		Memory          *Memory                      `yaml:"memory,omitempty"`
+		History         *History                     `yaml:"history,omitempty"`
 		Skills          *Skills                      `yaml:"skills,omitempty"`
 		Sandbox         *Sandbox                     `yaml:"sandbox,omitempty"`
 		Web             *Web                         `yaml:"web,omitempty"`
@@ -286,6 +317,10 @@ func Save(c *Config, path string) error {
 	if c.Memory != (Memory{}) {
 		m := c.Memory
 		p.Memory = &m
+	}
+	if c.History != (History{}) {
+		h := c.History
+		p.History = &h
 	}
 	out, err := yaml.Marshal(p)
 	if err != nil {

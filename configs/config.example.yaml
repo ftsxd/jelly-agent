@@ -13,11 +13,22 @@ default_provider: deepseek
 #     username: admin
 #     password_hash: $2a$...  # bcrypt 哈希，由服务自动生成
 
+# 每个 provider 除 base_url / api_key / model 外，还可选配以下参数（省略即用默认）：
+#   temperature: 0.7    采样温度。注意：0 无法发送（被 omitempty 丢弃），
+#                       需要近似确定性输出请填 0.01。
+#   max_tokens: 4096    回复长度上限。0 ⇒ 用服务端默认。
+#   timeout_sec: 120    等待“首字节”的超时（不是整轮超时，故不会截断长流式回复）。
+#   max_retries: 2      429 / 5xx / 网络抖动的自动重试次数（退避 0.5s→1s→2s…最多 8s）。
+#                       填 0 可完全关闭重试。4xx（鉴权/参数错误）一律不重试。
 providers:
   - name: deepseek
     base_url: https://api.deepseek.com/v1
     api_key: ${DEEPSEEK_API_KEY}
     model: deepseek-chat
+    # temperature: 0.7
+    # max_tokens: 4096
+    # timeout_sec: 120
+    # max_retries: 2
 
   - name: openai
     base_url: https://api.openai.com/v1
@@ -49,6 +60,14 @@ memory:
     backend: fts5               # 目前仅 fts5；向量后端属 L3（后续）
     top_k: 5                    # 每次检索返回的最大条数
     summarize: false            # 预留：检索结果经模型压缩（尚未接线）
+
+# 上下文压缩（可选）。整段省略即用默认值。
+# 每轮都会把完整对话历史发给模型；几次 fetch_url（单次可达 8000 字符）就能
+# 顶满上下文窗口。压缩是确定性的，不调用模型做摘要，因此不增加延迟与费用。
+history:
+  # max_tokens: 24000        # 历史预算。显式填 0 = 关闭压缩，永远发送完整历史
+  # keep_recent: 6           # 末尾这么多条永不丢弃，保证当前问题一定送达
+  # tool_result_tokens: 800  # 单个工具结果被选中精简后的上限
 
 # 技能脚本执行（可选）。仅当信任技能时开启。
 skills:

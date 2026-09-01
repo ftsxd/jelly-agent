@@ -2,6 +2,7 @@ package model
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/jelly-agent/jelly-agent/internal/config"
 )
@@ -33,10 +34,14 @@ func (r *Registry) Get(name string) (*OpenAILLM, config.Provider, error) {
 		return nil, p, fmt.Errorf("provider %q has no model configured", p.Name)
 	}
 	llm := New(ProviderConfig{
-		Name:    p.Name,
-		BaseURL: p.BaseURL,
-		APIKey:  p.APIKey,
-		Model:   p.Model,
+		Name:        p.Name,
+		BaseURL:     p.BaseURL,
+		APIKey:      p.APIKey,
+		Model:       p.Model,
+		Temperature: p.Temperature,
+		MaxTokens:   p.MaxTokens,
+		Timeout:     time.Duration(p.TimeoutSec) * time.Second,
+		MaxRetries:  p.MaxRetries,
 	})
 	return llm, p, nil
 }
