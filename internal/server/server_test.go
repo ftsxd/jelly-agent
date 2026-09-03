@@ -4,12 +4,14 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"testing/fstest"
 
 	"github.com/jelly-agent/jelly-agent/internal/config"
 	"github.com/jelly-agent/jelly-agent/internal/engine"
+	"github.com/jelly-agent/jelly-agent/internal/metrics"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -22,7 +24,20 @@ func newTestServer(t *testing.T) *Server {
 		Providers:       []config.Provider{{Name: "test", BaseURL: "http://x", APIKey: "sk-secret-key-1234", Model: "m"}},
 	}
 	cfg.Memory.Core.Dir = t.TempDir()
-	return New(engine.New(cfg), nil)
+	eng := engine.New(cfg)
+	// Both stores default to the shared ~/.jelly-agent/state.db. Point them at a
+	// temp file, or the suite reads (and writes) whatever the developer running
+	// it happens to have chatted about.
+	dir := t.TempDir()
+	eng.SetSessionDBPath(filepath.Join(dir, "sessions.db"))
+	rec, err := metrics.NewRecorder(filepath.Join(dir, "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr := metrics.NewTracker(rec)
+	t.Cleanup(func() { tr.Close() })
+	eng.SetMetrics(tr)
+	return New(eng, nil)
 }
 
 func newAdminServer(t *testing.T) *Server {

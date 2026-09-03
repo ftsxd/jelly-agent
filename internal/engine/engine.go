@@ -81,6 +81,10 @@ type Engine struct {
 	// the web server rebuilds the agent between them.
 	metricsOnce sync.Once
 	metrics     *jellymetrics.Tracker
+
+	// sessionDBPath overrides the shared store's location. Empty means the
+	// default path; only tests and embedders set it.
+	sessionDBPath string
 }
 
 // New wraps a loaded config in an engine.
@@ -198,6 +202,17 @@ func (e *Engine) Metrics() *jellymetrics.Tracker {
 		e.metrics = jellymetrics.NewTracker(rec)
 	})
 	return e.metrics
+}
+
+// SetMetrics installs a tracker, replacing the store this engine would open on
+// its own. It must be called before the first Metrics call.
+//
+// Tests need this because the default path is the shared ~/.jelly-agent/state.db:
+// without an injection point, exercising any handler that reports telemetry
+// would write rows into the developer's real database.
+func (e *Engine) SetMetrics(tr *jellymetrics.Tracker) {
+	e.metricsOnce.Do(func() {}) // claim the once, so lazy init cannot overwrite
+	e.metrics = tr
 }
 
 // toolCallbacks adapts the tracker to ADK's tool hooks.
@@ -504,11 +519,19 @@ func (e *Engine) buildNode(name, description, provider, instruction string, tool
 	return a, prov, nil
 }
 
-// NewSessionService opens the persistent SQLite session store at the default
-// path. The CLI and web server share one store, so history is consistent across
-// both front ends.
+// SetSessionDBPath points the session store somewhere other than the shared
+// default.
+//
+// Tests need this for the same reason they need SetMetrics: without it, any
+// handler that lists sessions reads the developer's real ~/.jelly-agent/state.db,
+// so the suite's results depend on what that developer happens to have chatted
+// about. Call it before the first NewSessionService.
+func (e *Engine) SetSessionDBPath(path string) { e.sessionDBPath = path }
+
+// NewSessionService opens the persistent SQLite session store. The CLI and web
+// server share one store, so history is consistent across both front ends.
 func (e *Engine) NewSessionService() (adksession.Service, error) {
-	return jellysession.NewSQLite("")
+	return jellysession.NewSQLite(e.sessionDBPath)
 }
 
 // NewRunner builds a runner backed by the persistent SQLite session store,

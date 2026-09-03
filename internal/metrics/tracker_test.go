@@ -163,3 +163,90 @@ func TestToolErrorJudgement(t *testing.T) {
 		})
 	}
 }
+
+func TestSummaryAggregatesPerTool(t *testing.T) {
+	tr, _ := newTestTracker(t)
+
+	// Two slow failures and one fast success, mirroring a real run where a
+	// search times out twice and a fetch succeeds.
+	record := func(id, tool string, dur time.Duration, result map[string]any) {
+		tr.Start(id, tool, nil)
+		tr.mu.Lock()
+		in := tr.pending[id]
+		in.started = time.Now().Add(-dur)
+		tr.pending[id] = in
+		tr.mu.Unlock()
+		tr.Finish(CallMeta{CallID: id, Tool: tool}, result, nil)
+	}
+	record("a", "web_search", 15*time.Second, map[string]any{"error": "context deadline exceeded"})
+	record("b", "web_search", 15*time.Second, map[string]any{"error": "context deadline exceeded"})
+	record("c", "fetch_url", 500*time.Millisecond, map[string]any{"title": "Example"})
+
+	sum, err := tr.Summary(time.Time{})
+	if err != nil {
+		t.Fatalf("Summary: %v", err)
+	}
+	if sum.Calls != 3 {
+		t.Fatalf("Calls = %d, want 3", sum.Calls)
+	}
+	if sum.Since.IsZero() {
+		t.Error("Since is zero, want the oldest row's timestamp")
+	}
+	// Ordered by call count, so web_search (2) comes first.
+	if len(sum.Tools) != 2 || sum.Tools[0].Tool != "web_search" {
+		t.Fatalf("Tools = %+v, want web_search first", sum.Tools)
+	}
+
+	ws := sum.Tools[0]
+	if ws.Calls != 2 || ws.OK != 0 {
+		t.Errorf("web_search calls/ok = %d/%d, want 2/0", ws.Calls, ws.OK)
+	}
+	if ws.ErrKinds[string(ErrTimeout)] != 2 {
+		t.Errorf("web_search err_kinds = %v, want 2 timeouts", ws.ErrKinds)
+	}
+	if ws.P50MS < 14_000 || ws.MaxMS < 14_000 {
+		t.Errorf("web_search p50/max = %d/%d ms, want ~15000", ws.P50MS, ws.MaxMS)
+	}
+
+	fu := sum.Tools[1]
+	if fu.Calls != 1 || fu.OK != 1 || len(fu.ErrKinds) != 0 {
+		t.Errorf("fetch_url = %+v, want 1 call, 1 ok, no error kinds", fu)
+	}
+}
+
+func TestSummaryHonoursSince(t *testing.T) {
+	tr, _ := newTestTracker(t)
+	tr.Start("old", "t", nil)
+	tr.Finish(CallMeta{CallID: "old", Tool: "t"}, nil, nil)
+
+	future, err := tr.Summary(time.Now().Add(time.Hour))
+	if err != nil {
+		t.Fatalf("Summary: %v", err)
+	}
+	if future.Calls != 0 {
+		t.Errorf("Calls = %d for a future window, want 0", future.Calls)
+	}
+}
+
+func TestPercentileNearestRank(t *testing.T) {
+	cases := []struct {
+		name   string
+		sorted []int
+		p      float64
+		want   int
+	}{
+		{"empty", nil, 0.5, 0},
+		{"single", []int{7}, 0.95, 7},
+		// A tail statistic must not smooth away the only slow sample.
+		{"three samples p95 is the max", []int{1, 2, 90}, 0.95, 90},
+		{"median of four", []int{1, 2, 3, 4}, 0.5, 2},
+		{"p95 of ten", []int{1, 2, 3, 4, 5, 6, 7, 8, 9, 10}, 0.95, 10},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := percentile(tc.sorted, tc.p); got != tc.want {
+				t.Errorf("percentile = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}

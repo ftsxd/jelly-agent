@@ -52,6 +52,58 @@ const maxDailyTokens = computed(() =>
 function dayLabel(date) {
   return date.slice(5)
 }
+
+// Every tool the ranking above shows is listed here too, recorded or not.
+//
+// Filtering out the un-recorded ones was the first attempt and it read as a
+// bug: a tool visible in one panel and absent from the next looks like data
+// went missing, when the truth is only that timing did not exist yet. Showing
+// the row with dashes says that directly.
+const timedTools = computed(() => stats.value?.tools ?? [])
+
+const anyTimed = computed(() => timedTools.value.some((t) => t.timed > 0))
+
+const telemetrySince = computed(() => {
+  const raw = stats.value?.telemetry?.since
+  if (!raw) return ''
+  const d = new Date(raw)
+  return Number.isNaN(d.getTime()) ? '' : d.toLocaleString()
+})
+
+function ms(v) {
+  if (v == null) return '—'
+  return v >= 1000 ? (v / 1000).toFixed(1) + 's' : v + 'ms'
+}
+
+function okRate(t) {
+  if (!t.timed) return '—'
+  return Math.round((100 * (t.ok ?? 0)) / t.timed) + '%'
+}
+
+// A slow call is worth flagging even when it succeeds: the time is spent either
+// way, and the p95 is where a five-minute budget actually goes.
+function slow(v) {
+  return v >= 5000
+}
+
+// Failure causes, most frequent first. Two buckets that both read as "it broke"
+// lead to completely different fixes — a timeout points at the network or an
+// over-long deadline, an upstream error points at the other system.
+const errKindLabels = {
+  bad_args: '参数错误',
+  timeout: '超时',
+  canceled: '被取消',
+  auth: '鉴权失败',
+  not_found: '目标不存在',
+  upstream: '下游故障',
+  unknown: '未归类',
+}
+
+function errKinds(t) {
+  return Object.entries(t.err_kinds ?? {})
+    .map(([kind, count]) => ({ kind, count, label: errKindLabels[kind] ?? kind }))
+    .sort((a, b) => b.count - a.count)
+}
 </script>
 
 <template>
@@ -125,6 +177,54 @@ function dayLabel(date) {
             </div>
             <div v-else class="empty sm">暂无工具调用记录</div>
           </div>
+        </section>
+
+        <section class="card panel">
+          <div class="panel-head">
+            <h2 class="section-title">工具耗时与失败归因</h2>
+            <span v-if="telemetrySince" class="dim sm">埋点自 {{ telemetrySince }} 起</span>
+          </div>
+          <div v-if="anyTimed" class="table-wrap">
+            <table class="tl">
+              <thead>
+                <tr>
+                  <th class="tl-name">工具</th>
+                  <th class="num">已记录 / 总次数</th>
+                  <th class="num">成功率</th>
+                  <th class="num">p50</th>
+                  <th class="num">p95</th>
+                  <th class="num">最慢</th>
+                  <th>失败归因</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="t in timedTools" :key="t.name">
+                  <td class="mono tl-name">{{ t.name }}</td>
+                  <td class="num mono">
+                    {{ t.timed }}<span class="dim"> / {{ t.count }}</span>
+                  </td>
+                  <td class="num mono" :class="{ bad: t.timed > 0 && t.ok < t.timed }">
+                    {{ okRate(t) }}
+                  </td>
+                  <td class="num mono">{{ t.timed ? ms(t.p50_ms) : '—' }}</td>
+                  <td class="num mono" :class="{ bad: t.timed > 0 && slow(t.p95_ms) }">
+                    {{ t.timed ? ms(t.p95_ms) : '—' }}
+                  </td>
+                  <td class="num mono dim">{{ t.timed ? ms(t.max_ms) : '—' }}</td>
+                  <td>
+                    <span v-if="!errKinds(t).length" class="dim">—</span>
+                    <span v-for="e in errKinds(t)" :key="e.kind" class="kind">
+                      {{ e.label }} <b>{{ e.count }}</b>
+                    </span>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+            <p class="note sm dim">
+              「已记录」是埋点启用之后的调用数，「总次数」来自全部历史会话。两者不等是正常的：单次耗时从来没写进会话事件，早先的调用无法补算，所以那些行只有次数、没有耗时。
+            </p>
+          </div>
+          <div v-else class="empty sm">尚无耗时记录。跑一次带工具调用的对话后即可看到。</div>
         </section>
 
         <section class="card panel">
@@ -396,6 +496,81 @@ function dayLabel(date) {
   background: linear-gradient(90deg, color-mix(in srgb, var(--cyan) 76%, var(--bg)), var(--cyan));
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.18), 0 0 10px rgba(34, 211, 238, 0.3);
 }
+.panel-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.table-wrap {
+  overflow-x: auto;
+}
+
+.tl {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.tl th,
+.tl td {
+  padding: 8px 10px;
+  text-align: left;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+
+.tl th {
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  opacity: 0.6;
+}
+
+.tl tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.tl .num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+/* The name is the only column that makes the rest of the row mean anything, so
+   it stays put when the table scrolls sideways. Its background has to match the
+   panel it sits on — a fallback colour here paints a light slab over a dark
+   card and hides the very labels the column exists to keep visible. */
+.tl-name {
+  position: sticky;
+  left: 0;
+  background: var(--surface);
+  z-index: 1;
+}
+
+.tl td.bad {
+  color: var(--danger);
+}
+
+.kind {
+  display: inline-block;
+  margin-right: 6px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: var(--danger-tint);
+  border: 1px solid var(--danger-border);
+  color: var(--danger);
+  font-size: 12px;
+}
+
+.note {
+  margin: 10px 0 0;
+  line-height: 1.6;
+  white-space: normal;
+}
+
 .bar-val {
   text-align: right;
   color: var(--text);

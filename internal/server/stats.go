@@ -1,12 +1,15 @@
 package server
 
 import (
+	"log"
 	"net/http"
 	"sort"
+	"time"
 
 	adksession "google.golang.org/adk/session"
 
 	"github.com/jelly-agent/jelly-agent/internal/engine"
+	"github.com/jelly-agent/jelly-agent/internal/metrics"
 )
 
 // statsResponse is the aggregate the Monitor view renders.
@@ -17,13 +20,14 @@ type statsResponse struct {
 	// ToolResults / ToolErrors count responses, not calls: a call whose response
 	// never came back (the run was cancelled mid-tool) is in neither. Success
 	// rate is therefore (ToolResults-ToolErrors)/ToolResults, not …/ToolCalls.
-	ToolResults int          `json:"tool_results"`
-	ToolErrors  int          `json:"tool_errors"`
-	Tokens      tokenTotals  `json:"tokens"`
-	Tools       []toolStat   `json:"tools"` // per-tool invocation counts, desc
-	Daily       []dailyStat  `json:"daily"` // token/message series, chronological
-	Providers   providerStat `json:"providers"`
-	Memory      memoryStat   `json:"memory"`
+	ToolResults int           `json:"tool_results"`
+	ToolErrors  int           `json:"tool_errors"`
+	Tokens      tokenTotals   `json:"tokens"`
+	Tools       []toolStat    `json:"tools"` // per-tool invocation counts, desc
+	Daily       []dailyStat   `json:"daily"` // token/message series, chronological
+	Providers   providerStat  `json:"providers"`
+	Memory      memoryStat    `json:"memory"`
+	Telemetry   telemetryStat `json:"telemetry"`
 }
 
 type tokenTotals struct {
@@ -32,11 +36,26 @@ type tokenTotals struct {
 	Total      int32 `json:"total"`
 }
 
+// toolStat mixes two sources on purpose, and the split matters when reading it.
+//
+// Count/Results/Failed are scanned out of session events, so they cover every
+// call ever made. Timed/P50MS/P95MS/MaxMS/ErrKinds come from the tool_calls
+// table, which only has rows from the moment the telemetry hooks were added —
+// per-call duration was never written to events and cannot be recovered from
+// them. Timed is therefore usually smaller than Count, and a UI that shows both
+// must say so or the two look like a contradiction.
 type toolStat struct {
 	Name    string `json:"name"`
 	Count   int    `json:"count"`
 	Results int    `json:"results"`
 	Failed  int    `json:"failed"`
+
+	Timed    int            `json:"timed"` // recorded calls backing the fields below
+	OK       int            `json:"ok"`
+	P50MS    int            `json:"p50_ms,omitempty"`
+	P95MS    int            `json:"p95_ms,omitempty"`
+	MaxMS    int            `json:"max_ms,omitempty"`
+	ErrKinds map[string]int `json:"err_kinds,omitempty"` // cause bucket -> count
 }
 
 type dailyStat struct {
@@ -49,6 +68,13 @@ type dailyStat struct {
 type providerStat struct {
 	Default string `json:"default"`
 	Count   int    `json:"count"`
+}
+
+// telemetryStat tells the UI how much of the timing picture exists, so it can
+// distinguish "this tool is fast" from "we have not measured this tool yet".
+type telemetryStat struct {
+	Calls int    `json:"calls"`
+	Since string `json:"since,omitempty"` // RFC3339 of the oldest recorded call
 }
 
 type memoryStat struct {
@@ -150,8 +176,33 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 			toolCounts[name] = 0 // a response whose call event is missing
 		}
 	}
+	// Fold in recorded timing. A tool that has rows but no events (or the
+	// reverse) still gets a line: hiding either half would misreport the very
+	// gap this merge exists to expose.
+	timing := map[string]metrics.ToolLatency{}
+	if sum, err := eng.Metrics().Summary(time.Time{}); err != nil {
+		log.Printf("stats: tool timing unavailable: %v", err)
+	} else {
+		out.Telemetry.Calls = sum.Calls
+		if !sum.Since.IsZero() {
+			out.Telemetry.Since = sum.Since.Format(time.RFC3339)
+		}
+		for _, t := range sum.Tools {
+			timing[t.Tool] = t
+			if _, seen := toolCounts[t.Tool]; !seen {
+				toolCounts[t.Tool] = 0
+			}
+		}
+	}
+
 	for name, n := range toolCounts {
-		out.Tools = append(out.Tools, toolStat{Name: name, Count: n, Results: toolResults[name], Failed: toolFails[name]})
+		st := toolStat{Name: name, Count: n, Results: toolResults[name], Failed: toolFails[name]}
+		if t, ok := timing[name]; ok {
+			st.Timed, st.OK = t.Calls, t.OK
+			st.P50MS, st.P95MS, st.MaxMS = t.P50MS, t.P95MS, t.MaxMS
+			st.ErrKinds = t.ErrKinds
+		}
+		out.Tools = append(out.Tools, st)
 	}
 	sort.Slice(out.Tools, func(i, j int) bool {
 		if out.Tools[i].Count != out.Tools[j].Count {
