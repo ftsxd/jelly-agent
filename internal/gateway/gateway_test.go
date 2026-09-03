@@ -6,6 +6,7 @@ import (
 	"errors"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -817,5 +818,163 @@ func TestDefaultSummaryNamesWhatItFound(t *testing.T) {
 	// summary it cannot make.
 	if got := defaultSummary(map[string]any{"rows": []any{1, 2}}); !strings.Contains(got, "data") {
 		t.Errorf("defaultSummary = %q, should point at the payload", got)
+	}
+}
+
+// Abandoning a call is only safe when it cannot change anything.
+//
+// ADK's ToolContext carries no deadline, so a tool that ignores its context
+// keeps running after we stop waiting. For a mutating tool that is the worst
+// possible outcome: the caller reports a failure, the write lands a moment
+// later, and a retry does it twice. "Restart failed" followed by two restarts
+// is not a timeout, it is a duplicated side effect.
+func TestOnlyReadOnlyCallsAreAbandonedOnTimeout(t *testing.T) {
+	newSlowTool := func(level ops.SideEffectLevel) (*Gateway, chan struct{}, *int32) {
+		m := k8sMeta()
+		m.SideEffect = level
+		m.Timeout = 50 * time.Millisecond
+
+		release := make(chan struct{})
+		var completed int32
+		g := New(Config{
+			Registry: fakeReg{m.Name: m},
+			Executors: map[string]Executor{m.Server: ExecutorFunc(
+				func(context.Context, string, map[string]any) (map[string]any, error) {
+					<-release
+					atomic.AddInt32(&completed, 1)
+					return map[string]any{"summary": "done"}, nil
+				})},
+			Policy: Policy{MaxSideEffect: ops.SideEffectRisky},
+		})
+		return g, release, &completed
+	}
+
+	t.Run("read-only is abandoned", func(t *testing.T) {
+		g, release, _ := newSlowTool(ops.SideEffectReadOnly)
+		defer close(release)
+
+		start := time.Now()
+		res, err := g.Execute(context.Background(), prodContext(), ops.OriginModel, "k8s_get_pods", nil)
+		if err == nil {
+			t.Fatal("a hanging read-only call was awaited")
+		}
+		if res.Call.ErrKind != "timeout" {
+			t.Errorf("ErrKind = %q, want timeout", res.Call.ErrKind)
+		}
+		if time.Since(start) > time.Second {
+			t.Error("the timeout did not bound the call")
+		}
+	})
+
+	t.Run("mutating is awaited", func(t *testing.T) {
+		g, release, completed := newSlowTool(ops.SideEffectMutating)
+
+		done := make(chan error, 1)
+		go func() {
+			_, err := g.Execute(context.Background(), prodContext(), ops.OriginModel, "k8s_get_pods", nil)
+			done <- err
+		}()
+
+		// Well past the 50ms timeout: a mutating call must still be waiting,
+		// not reported as failed while the write is in flight.
+		select {
+		case err := <-done:
+			t.Fatalf("a mutating call was abandoned after %v: err = %v", 300*time.Millisecond, err)
+		case <-time.After(300 * time.Millisecond):
+		}
+
+		close(release)
+		if err := <-done; err != nil {
+			t.Errorf("the awaited call reported %v; the write did land", err)
+		}
+		if atomic.LoadInt32(completed) != 1 {
+			t.Error("the tool did not complete")
+		}
+	})
+}
+
+// The gateway is the only place that knows what actually happened, so it is
+// the only honest source for the record: arguments after injection, the
+// canonical name rather than whichever alias the model used, and the evidence
+// ID a conclusion will cite.
+func TestSinkReceivesTheRealCallOnEveryPath(t *testing.T) {
+	m := k8sMeta()
+	m.Aliases = []string{"get_pods"}
+
+	var got []Result
+	var metas []CallMeta
+	newGateway := func(exec Executor, p Policy) *Gateway {
+		reg := fakeReg{m.Name: m, "get_pods": m}
+		return New(Config{
+			Registry:  reg,
+			Executors: map[string]Executor{m.Server: exec},
+			Policy:    p,
+			Sink: SinkFunc(func(_ context.Context, meta CallMeta, res Result) {
+				got = append(got, res)
+				metas = append(metas, meta)
+			}),
+		})
+	}
+
+	// Success, called through an alias.
+	g := newGateway(&recorder{result: map[string]any{"summary": "6/6 Running"}}, Policy{})
+	if _, err := g.ExecuteAs(context.Background(), CallMeta{SessionID: "s1", CallID: "c1"},
+		prodContext(), ops.OriginModel, "get_pods",
+		map[string]any{"label_selector": "app=payment", "cluster": "staging"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("sink saw %d calls, want 1", len(got))
+	}
+	rec := got[0].Call
+	if rec.Tool != "k8s_get_pods" {
+		t.Errorf("Tool = %q, want the canonical name even when called by alias", rec.Tool)
+	}
+	// The recorded arguments are what was sent, not what was asked for.
+	if rec.Args["cluster"] != "prod-a" {
+		t.Errorf("Args = %v, want the injected cluster rather than the model's", rec.Args)
+	}
+	if rec.Args["selector"] != "app=payment" {
+		t.Errorf("Args = %v, want the alias canonicalized", rec.Args)
+	}
+	if _, ok := rec.Args["start"].(string); !ok {
+		t.Errorf("Args = %v, want the injected window", rec.Args)
+	}
+	if got[0].Evidence == nil || rec.EvidenceIDs[0] != got[0].Evidence.ID {
+		t.Error("the record does not link to the evidence a conclusion would cite")
+	}
+	if metas[0].SessionID != "s1" || metas[0].CallID != "c1" {
+		t.Errorf("meta = %+v, want the conversation identifiers passed through", metas[0])
+	}
+
+	// A denied call is part of what happened. Leaving those out is how a
+	// success rate ends up describing only the calls that got as far as
+	// running.
+	got, metas = nil, nil
+	mutating := m
+	mutating.SideEffect = ops.SideEffectMutating
+	g = New(Config{
+		Registry:  fakeReg{m.Name: mutating},
+		Executors: map[string]Executor{m.Server: &recorder{}},
+		Sink:      SinkFunc(func(_ context.Context, _ CallMeta, res Result) { got = append(got, res) }),
+	})
+	if _, err := g.Execute(context.Background(), prodContext(), ops.OriginModel, "k8s_get_pods", nil); err == nil {
+		t.Fatal("expected a denial")
+	}
+	if len(got) != 1 || got[0].Call.ErrKind != "denied" {
+		t.Errorf("sink saw %+v, want the denial recorded", got)
+	}
+
+	// So is an unroutable one.
+	got = nil
+	g = New(Config{
+		Registry: fakeReg{},
+		Sink:     SinkFunc(func(_ context.Context, _ CallMeta, res Result) { got = append(got, res) }),
+	})
+	if _, err := g.Execute(context.Background(), nil, ops.OriginModel, "nope", nil); err == nil {
+		t.Fatal("expected an unknown-tool error")
+	}
+	if len(got) != 1 || got[0].Call.ErrKind != "unknown_tool" {
+		t.Errorf("sink saw %+v, want the routing failure recorded", got)
 	}
 }

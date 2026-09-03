@@ -21,6 +21,12 @@ type mcpInput struct {
 	URL       string            `json:"url"`
 	Headers   map[string]string `json:"headers"`
 	Enabled   bool              `json:"enabled"`
+
+	// Tools whitelists which of the server's tools to load. A nil value means
+	// "leave whatever is stored alone" — distinct from an empty array, which
+	// means "load everything". Without that distinction, saving any unrelated
+	// field from the console would wipe a whitelist written by hand.
+	Tools []string `json:"tools"`
 }
 
 // handleListMCP lists configured MCP servers. Secret values (env/headers) are
@@ -36,13 +42,15 @@ func (s *Server) handleListMCP(w http.ResponseWriter, _ *http.Request) {
 		EnvKeys    []string `json:"env_keys,omitempty"`
 		HeaderKeys []string `json:"header_keys,omitempty"`
 		Enabled    bool     `json:"enabled"`
+		Tools      []string `json:"tools,omitempty"`
 	}
 	servers := s.engine().Config().MCP
 	out := make([]mcpDTO, 0, len(servers))
 	for _, m := range servers {
 		out = append(out, mcpDTO{
 			Name: m.Name, Transport: m.Transport, Command: m.Command, Args: m.Args,
-			URL: m.URL, EnvKeys: sortedKeys(m.Env), HeaderKeys: sortedKeys(m.Headers), Enabled: m.Enabled,
+			URL: m.URL, EnvKeys: sortedKeys(m.Env), HeaderKeys: sortedKeys(m.Headers),
+			Enabled: m.Enabled, Tools: m.Tools,
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"servers": out})
@@ -85,6 +93,15 @@ func (s *Server) handleSaveMCP(w http.ResponseWriter, r *http.Request) {
 	if idx := indexOfMCP(raw.MCP, srv.Name); idx >= 0 {
 		srv.Env = mergeSecrets(raw.MCP[idx].Env, srv.Env)
 		srv.Headers = mergeSecrets(raw.MCP[idx].Headers, srv.Headers)
+		// A nil Tools means the caller said nothing about the whitelist, so
+		// keep the stored one. This is the same trap config.Save has: a
+		// handler that rebuilds the whole record from its input silently drops
+		// every field the input does not carry, and the symptom — a whitelist
+		// that vanishes when someone toggles "enabled" — points nowhere near
+		// the cause.
+		if srv.Tools == nil {
+			srv.Tools = raw.MCP[idx].Tools
+		}
 		raw.MCP[idx] = srv
 	} else {
 		raw.MCP = append(raw.MCP, srv)
@@ -218,6 +235,7 @@ func normalizeMCP(in mcpInput) (config.MCPServer, error) {
 		URL:       strings.TrimSpace(in.URL),
 		Headers:   in.Headers,
 		Enabled:   in.Enabled,
+		Tools:     in.Tools,
 	}
 	if srv.Name == "" {
 		return srv, errBadInput("name 不能为空")

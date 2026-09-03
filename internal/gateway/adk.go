@@ -213,7 +213,16 @@ func (w *Wrapped) Run(ctx agent.ToolContext, args any) (map[string]any, error) {
 		ic = w.context(ctx)
 	}
 
-	res, err := w.gw.Execute(WithToolContext(ctx, ctx), ic, w.origin, w.meta.Name, modelArgs)
+	// The conversation identifiers come from the tool context, so the recorded
+	// row can be attributed to a session and an invocation — without them a
+	// row says what happened but not during what.
+	meta := CallMeta{
+		SessionID:    ctx.SessionID(),
+		InvocationID: ctx.InvocationID(),
+		Agent:        ctx.AgentName(),
+		CallID:       ctx.FunctionCallID(),
+	}
+	res, err := w.gw.ExecuteAs(WithToolContext(ctx, ctx), meta, ic, w.origin, w.meta.Name, modelArgs)
 	if err != nil {
 		// Returned as an error, not as a payload: ADK's after-tool callback
 		// receives it either way, and an error keeps the failure legible to

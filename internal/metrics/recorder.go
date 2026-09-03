@@ -62,7 +62,9 @@ CREATE TABLE IF NOT EXISTS tool_calls (
 	ok            INTEGER NOT NULL,
 	err_kind      TEXT    NOT NULL DEFAULT '',
 	err           TEXT    NOT NULL DEFAULT '',
-	result_bytes  INTEGER NOT NULL DEFAULT 0
+	result_bytes  INTEGER NOT NULL DEFAULT 0,
+	evidence_id   TEXT    NOT NULL DEFAULT '',
+	replayed      INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_tool_calls_at      ON tool_calls(at);
 CREATE INDEX IF NOT EXISTS idx_tool_calls_session ON tool_calls(session_id);
@@ -104,7 +106,40 @@ func NewRecorder(dbPath string) (*Recorder, error) {
 		db.Close()
 		return nil, fmt.Errorf("metrics: migrate: %w", err)
 	}
+	if err := addMissingColumns(db); err != nil {
+		db.Close()
+		return nil, err
+	}
 	return &Recorder{db: db}, nil
+}
+
+// addMissingColumns brings an existing table up to the current schema.
+//
+// CREATE TABLE IF NOT EXISTS does nothing to a table that already exists, so a
+// column added to the schema above is missing from every database created
+// before it — and the insert fails at runtime, on a machine that has been
+// running fine. Each column is added separately and a duplicate-column error
+// is the expected outcome on an up-to-date database.
+func addMissingColumns(db *sql.DB) error {
+	for _, col := range []struct{ name, ddl string }{
+		{"evidence_id", "ALTER TABLE tool_calls ADD COLUMN evidence_id TEXT NOT NULL DEFAULT ''"},
+		{"replayed", "ALTER TABLE tool_calls ADD COLUMN replayed INTEGER NOT NULL DEFAULT 0"},
+	} {
+		var count int
+		err := db.QueryRow(
+			`SELECT count(*) FROM pragma_table_info('tool_calls') WHERE name = ?`, col.name,
+		).Scan(&count)
+		if err != nil {
+			return fmt.Errorf("metrics: inspect column %s: %w", col.name, err)
+		}
+		if count > 0 {
+			continue
+		}
+		if _, err := db.Exec(col.ddl); err != nil {
+			return fmt.Errorf("metrics: add column %s: %w", col.name, err)
+		}
+	}
+	return nil
 }
 
 // Record appends one row. A nil Recorder is a no-op, so callers that failed to
@@ -174,4 +209,62 @@ func boolToInt(b bool) int {
 		return 1
 	}
 	return 0
+}
+
+// RecordGatewayCall stores what the gateway actually did.
+//
+// This is the authoritative row, and it replaces recording from ADK's tool
+// callback rather than joining it. The callback sees the model's arguments and
+// whichever alias it used; the gateway sees the arguments after injection, the
+// canonical tool name, its own cause bucket, and the evidence ID a conclusion
+// will cite. Two rows per call would double every count, and the wrong one
+// would win a tie.
+func (r *Recorder) RecordGatewayCall(c GatewayCall) error {
+	if r == nil || r.db == nil {
+		return nil
+	}
+	at := c.StartedAt
+	if at.IsZero() {
+		at = time.Now()
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	_, err := r.db.Exec(
+		`INSERT INTO tool_calls
+		 (at, session_id, invocation_id, agent, call_id, tool, args,
+		  duration_ms, ok, err_kind, err, result_bytes, evidence_id, replayed)
+		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		at.UTC().Format(time.RFC3339Nano), c.SessionID, c.InvocationID, c.Agent,
+		c.CallID, c.Tool, encodeArgs(c.Args), c.Duration.Milliseconds(),
+		boolToInt(c.OK), c.ErrKind, truncate(c.Err, 1000), c.ResultBytes,
+		c.EvidenceID, boolToInt(c.Replayed),
+	)
+	if err != nil {
+		return fmt.Errorf("metrics: insert gateway call: %w", err)
+	}
+	return nil
+}
+
+// GatewayCall is one call as the gateway saw it.
+type GatewayCall struct {
+	SessionID    string
+	InvocationID string
+	Agent        string
+	CallID       string
+
+	Tool      string
+	Args      map[string]any
+	StartedAt time.Time
+	Duration  time.Duration
+
+	OK          bool
+	ErrKind     string
+	Err         string
+	ResultBytes int
+	Replayed    bool
+
+	// EvidenceID links the row to the observation a conclusion can cite. A
+	// row without one either failed or produced nothing to cite — and that
+	// distinction is what makes Seal's checks verifiable against the record.
+	EvidenceID string
 }

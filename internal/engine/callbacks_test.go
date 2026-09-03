@@ -11,6 +11,7 @@ import (
 
 	"github.com/jelly-agent/jelly-agent/internal/config"
 	jellymetrics "github.com/jelly-agent/jelly-agent/internal/metrics"
+	"github.com/jelly-agent/jelly-agent/internal/ops"
 )
 
 // fakeToolCtx supplies only the identifiers the telemetry callbacks read. Every
@@ -151,5 +152,25 @@ func TestModelCallbacksNeverAlterExecution(t *testing.T) {
 				t.Fatalf("after = (%v, %v), want (nil, nil) — a non-nil return replaces the response", got, err)
 			}
 		})
+	}
+}
+
+// A fixed widest ceiling made the policy unable to deny anything, which made
+// the whole mechanism decoration. Derived from configuration, a deployment
+// that never enables scripts gets a policy that would refuse one.
+func TestSideEffectCeilingFollowsConfiguration(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Memory.Core.Dir = t.TempDir()
+
+	e := New(cfg)
+	if got := e.sideEffectCeiling(); got != ops.SideEffectMutating {
+		t.Errorf("ceiling = %q with scripts off, want %q — remember/forget need mutating, nothing needs more",
+			got, ops.SideEffectMutating)
+	}
+
+	cfg.Skills.AllowScripts = true
+	if got := e.sideEffectCeiling(); got != ops.SideEffectRisky {
+		t.Errorf("ceiling = %q with scripts on, want %q — run_script declares risky",
+			got, ops.SideEffectRisky)
 	}
 }

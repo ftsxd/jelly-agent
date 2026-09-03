@@ -231,25 +231,75 @@ func (e *Engine) toolRegistry() (*toolreg.Store, *gateway.Gateway) {
 		}
 		e.toolStore.Swap(reg)
 
-		// The ceiling is the widest level any built-in declares, because this
-		// change must not take away a tool that works today: remember and
-		// forget write local memory, and run_script runs sandboxed code. A
-		// narrower ceiling here would silently disable them — a regression
-		// dressed up as a safety improvement.
+		// The ceiling is derived from what is actually configured, not set to
+		// the widest level and left there.
 		//
-		// Tightening this is the second half of the work, and it needs an
-		// approval path behind it (ADK's RequestConfirmation into a DingTalk
-		// card) rather than a smaller constant. The per-tool levels are
-		// already recorded, so that change becomes a policy edit.
+		// A fixed widest ceiling was the first version and it was wrong in a
+		// specific way: it made the policy unable to deny anything, so the
+		// whole mechanism read as decoration. Deriving it means a deployment
+		// that never enables scripts gets a policy that would refuse one.
+		//
+		// AllowApprovalRequired stays on, and that is the remaining gap: no
+		// tool sets NeedsApproval yet, so nothing is waved through today, but
+		// the flag would wave it through the moment one did. Closing it needs
+		// somewhere for a human to answer — ADK's RequestConfirmation into a
+		// DingTalk card — which is its own change, not a smaller constant.
 		e.gw = gateway.New(gateway.Config{
 			Registry: gateway.Snapshot(reg),
 			Policy: gateway.Policy{
-				MaxSideEffect:         ops.SideEffectRisky,
+				MaxSideEffect:         e.sideEffectCeiling(),
 				AllowApprovalRequired: true,
 			},
+			// The gateway records its own calls, because it is the only place
+			// that knows the arguments after injection, the canonical tool
+			// name, and the evidence ID a conclusion will cite. Recording from
+			// the ADK callback captured the model's arguments instead — a
+			// record of what was asked for rather than of what was done, and
+			// one Seal's citations could not be checked against.
+			Sink: gateway.SinkFunc(e.recordGatewayCall),
 		})
 	})
 	return e.toolStore, e.gw
+}
+
+// sideEffectCeiling is the strongest side effect this deployment permits.
+//
+// Derived rather than fixed: remember and forget write local memory on every
+// deployment, so mutating is the floor; risky is admitted only when script
+// execution is actually enabled, because run_script is the only tool that
+// declares it. A deployment with scripts off therefore gets a policy that
+// would refuse one — which is the difference between a permission check and a
+// formality.
+func (e *Engine) sideEffectCeiling() ops.SideEffectLevel {
+	if e.cfg.Skills.AllowScripts {
+		return ops.SideEffectRisky
+	}
+	return ops.SideEffectMutating
+}
+
+// recordGatewayCall stores what the gateway actually did.
+//
+// A failed insert must not fail the call: the row is observability, the call is
+// the product.
+func (e *Engine) recordGatewayCall(_ context.Context, meta gateway.CallMeta, res gateway.Result) {
+	row := jellymetrics.GatewayCall{
+		SessionID: meta.SessionID, InvocationID: meta.InvocationID,
+		Agent: meta.Agent, CallID: meta.CallID,
+
+		Tool: res.Call.Tool, Args: res.Call.Args,
+		StartedAt: res.Call.StartedAt, Duration: res.Call.Duration,
+		OK: res.Call.OK, ErrKind: res.Call.ErrKind, Err: res.Call.Err,
+		ResultBytes: res.Call.ResultBytes, Replayed: res.Call.Replayed,
+	}
+	if res.Evidence != nil {
+		row.EvidenceID = res.Evidence.ID
+	}
+	if rec := e.Metrics().Recorder(); rec != nil {
+		if err := rec.RecordGatewayCall(row); err != nil {
+			slog.Warn("工具调用记录写入失败", logging.Err(err), "tool", row.Tool)
+		}
+	}
+	jellytelemetry.RecordToolCall(context.Background(), row.Tool, row.OK, row.ErrKind, row.Duration)
 }
 
 // incidentFor supplies the incident a tool call belongs to.
@@ -336,11 +386,28 @@ func (e *Engine) SetMetrics(tr *jellymetrics.Tracker) {
 func (e *Engine) toolCallbacks() ([]llmagent.BeforeToolCallback, []llmagent.AfterToolCallback) {
 	tr := e.Metrics()
 
+	// These callbacks now only cover tools the gateway does not: an MCP tool
+	// or anything without metadata still reaches ADK directly, and a call with
+	// no record at all would be worse than one recorded from the model's own
+	// arguments. A gatewayed tool is skipped here, because the gateway's sink
+	// already wrote the authoritative row — recording both would double every
+	// count, and the less accurate row could win a tie.
+	isGatewayed := func(t adktool.Tool) bool {
+		_, wrapped := t.(*gateway.Wrapped)
+		return wrapped
+	}
+
 	before := func(ctx agent.ToolContext, t adktool.Tool, args map[string]any) (map[string]any, error) {
+		if isGatewayed(t) {
+			return nil, nil
+		}
 		tr.Start(ctx.FunctionCallID(), t.Name(), args)
 		return nil, nil
 	}
 	after := func(ctx agent.ToolContext, t adktool.Tool, args, result map[string]any, err error) (map[string]any, error) {
+		if isGatewayed(t) {
+			return nil, nil
+		}
 		row := tr.Finish(jellymetrics.CallMeta{
 			SessionID:    ctx.SessionID(),
 			InvocationID: ctx.InvocationID(),
@@ -348,10 +415,6 @@ func (e *Engine) toolCallbacks() ([]llmagent.BeforeToolCallback, []llmagent.Afte
 			CallID:       ctx.FunctionCallID(),
 			Tool:         t.Name(),
 		}, result, err)
-		// The same judgement, published twice for two different questions: the
-		// row answers "what did this task do", the metric answers "how is this
-		// tool trending". Finish already decided success and cause, so the
-		// metric cannot disagree with the table.
 		jellytelemetry.RecordToolCall(ctx, row.Tool, row.OK, string(row.ErrKind), row.Duration)
 		return nil, nil
 	}

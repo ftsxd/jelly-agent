@@ -133,6 +133,15 @@ func (t *Tracker) Pending() int {
 	return len(t.pending)
 }
 
+// Recorder exposes the underlying store, for a caller that has its own row to
+// write — the gateway, which knows more about a call than this tracker can.
+func (t *Tracker) Recorder() *Recorder {
+	if t == nil {
+		return nil
+	}
+	return t.rec
+}
+
 // Close releases the underlying recorder.
 func (t *Tracker) Close() error {
 	if t == nil {

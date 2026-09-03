@@ -2,8 +2,10 @@ package metrics
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -248,5 +250,107 @@ func TestPercentileNearestRank(t *testing.T) {
 				t.Errorf("percentile = %d, want %d", got, tc.want)
 			}
 		})
+	}
+}
+
+// A column added to the schema is missing from every database created before
+// it, because CREATE TABLE IF NOT EXISTS does nothing to an existing table.
+// The insert then fails at runtime on a machine that had been running fine.
+func TestRecorderMigratesAnOlderTable(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.db")
+
+	// A database as an earlier version created it: no evidence_id, no replayed.
+	old, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := old.Exec(`CREATE TABLE tool_calls (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		at TEXT NOT NULL, session_id TEXT NOT NULL DEFAULT '',
+		invocation_id TEXT NOT NULL DEFAULT '', agent TEXT NOT NULL DEFAULT '',
+		call_id TEXT NOT NULL DEFAULT '', tool TEXT NOT NULL,
+		args TEXT NOT NULL DEFAULT '', duration_ms INTEGER NOT NULL DEFAULT 0,
+		ok INTEGER NOT NULL, err_kind TEXT NOT NULL DEFAULT '',
+		err TEXT NOT NULL DEFAULT '', result_bytes INTEGER NOT NULL DEFAULT 0)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := old.Exec(`INSERT INTO tool_calls (at, tool, ok) VALUES ('2026-09-01T00:00:00Z', 'legacy', 1)`); err != nil {
+		t.Fatal(err)
+	}
+	old.Close()
+
+	rec, err := NewRecorder(path)
+	if err != nil {
+		t.Fatalf("opening an older database failed: %v", err)
+	}
+	defer rec.Close()
+
+	// The new columns are usable...
+	if err := rec.RecordGatewayCall(GatewayCall{
+		Tool: "k8s_get_pods", OK: true, EvidenceID: "e1",
+		Args: map[string]any{"cluster": "prod-a"},
+	}); err != nil {
+		t.Fatalf("insert after migration failed: %v", err)
+	}
+	// ...and the existing row survived.
+	var n int
+	if err := rec.db.QueryRow(`SELECT count(*) FROM tool_calls`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 2 {
+		t.Errorf("rows = %d, want the legacy row plus the new one", n)
+	}
+
+	// Migrating twice is a no-op.
+	rec2, err := NewRecorder(path)
+	if err != nil {
+		t.Fatalf("reopening a migrated database failed: %v", err)
+	}
+	rec2.Close()
+}
+
+// The gateway's row is the authoritative one: arguments after injection, the
+// canonical tool name, and the evidence a conclusion can cite.
+func TestRecordGatewayCallStoresInjectedArgsAndEvidence(t *testing.T) {
+	rec, err := NewRecorder(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rec.Close()
+
+	if err := rec.RecordGatewayCall(GatewayCall{
+		SessionID: "s1", CallID: "c1",
+		Tool: "k8s_get_pods", // canonical, not whichever alias the model used
+		Args: map[string]any{
+			"cluster":   "prod-a", // injected — the model never sent this
+			"namespace": "payment",
+			"selector":  "app=payment",
+		},
+		Duration: 350 * time.Millisecond, OK: true,
+		ResultBytes: 1200, EvidenceID: "e1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	var tool, args, evidenceID string
+	var ok, replayed int
+	if err := rec.db.QueryRow(
+		`SELECT tool, args, evidence_id, ok, replayed FROM tool_calls`,
+	).Scan(&tool, &args, &evidenceID, &ok, &replayed); err != nil {
+		t.Fatal(err)
+	}
+	if tool != "k8s_get_pods" {
+		t.Errorf("tool = %q", tool)
+	}
+	// The stored arguments are what was sent, not what was asked for — that is
+	// the whole difference between this row and one taken from ADK's callback.
+	if !strings.Contains(args, "prod-a") || !strings.Contains(args, "payment") {
+		t.Errorf("args = %q, want the injected values", args)
+	}
+	if evidenceID != "e1" {
+		t.Errorf("evidence_id = %q; Seal's citations could not be checked against the record", evidenceID)
+	}
+	if ok != 1 || replayed != 0 {
+		t.Errorf("ok = %d, replayed = %d", ok, replayed)
 	}
 }

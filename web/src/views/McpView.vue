@@ -10,7 +10,7 @@ const notice = ref('')
 
 const editing = ref(false) // false | 'new' | name
 const saving = ref(false)
-const form = reactive({ name: '', transport: 'stdio', command: '', argsText: '', envText: '', url: '', headersText: '', enabled: true })
+const form = reactive({ name: '', transport: 'stdio', command: '', argsText: '', envText: '', url: '', headersText: '', enabled: true, toolsText: '' })
 
 // per-server live test state, keyed by name: {loading, tools, error}
 const tests = reactive({})
@@ -31,7 +31,7 @@ async function load() {
 
 function startNew() {
   editing.value = 'new'
-  Object.assign(form, { name: '', transport: 'stdio', command: '', argsText: '', envText: '', url: '', headersText: '', enabled: true })
+  Object.assign(form, { name: '', transport: 'stdio', command: '', argsText: '', envText: '', url: '', headersText: '', enabled: true, toolsText: '' })
 }
 
 function startEdit(s) {
@@ -46,6 +46,7 @@ function startEdit(s) {
     url: s.url || '',
     headersText: (s.header_keys || []).map((k) => `${k}=`).join('\n'),
     enabled: s.enabled,
+    toolsText: (s.tools || []).join('\n'),
   })
 }
 
@@ -77,7 +78,26 @@ function payload() {
     url: form.url.trim(),
     headers: parseKV(form.headersText),
     enabled: form.enabled,
+    // Always sent, so an emptied box really clears the whitelist. The API
+    // treats a missing field as "leave it alone", which is right for other
+    // callers but wrong for a form the user just edited.
+    tools: parseLines(form.toolsText),
   }
+}
+
+// Clicking a tool name in the test result toggles it in the whitelist. Typing
+// two dozen names by hand is what makes a whitelist go unused, and the list is
+// right there on screen.
+function toggleTool(name) {
+  const current = parseLines(form.toolsText)
+  const i = current.indexOf(name)
+  if (i >= 0) current.splice(i, 1)
+  else current.push(name)
+  form.toolsText = current.join('\n')
+}
+
+function inWhitelist(name) {
+  return parseLines(form.toolsText).includes(name)
 }
 
 async function submit() {
@@ -120,7 +140,7 @@ async function test(s) {
   tests[s.name] = { loading: true, tools: null, error: '' }
   try {
     const res = await api.testMCP({ name: s.name })
-    tests[s.name] = { loading: false, tools: res.tools, error: '' }
+    tests[s.name] = { loading: false, tools: res.tools, conflicts: res.conflicts || [], error: '' }
   } catch (e) {
     tests[s.name] = { loading: false, tools: null, error: e.message }
   }
@@ -132,7 +152,7 @@ async function testForm() {
   tests[key] = { loading: true, tools: null, error: '' }
   try {
     const res = await api.testMCP(payload())
-    tests[key] = { loading: false, tools: res.tools, error: '' }
+    tests[key] = { loading: false, tools: res.tools, conflicts: res.conflicts || [], error: '' }
   } catch (e) {
     tests[key] = { loading: false, tools: null, error: e.message }
   }
@@ -198,6 +218,13 @@ async function testForm() {
             </label>
           </template>
 
+          <label class="field span2">
+            <span>工具白名单（每行一个，留空表示全部加载）</span>
+            <textarea v-model="form.toolsText" class="input mono" rows="3"
+              placeholder="get_pods&#10;get_events"></textarea>
+            <span class="hint">一个 MCP 服务器常暴露二三十个工具，而一次诊断只用到几个。未列入的工具不会进入模型上下文，也不会与其他服务器重名冲突。</span>
+          </label>
+
           <label class="check span2">
             <input type="checkbox" v-model="form.enabled" />
             <span>启用（注入到 Agent 工具集）</span>
@@ -207,9 +234,21 @@ async function testForm() {
         <div v-if="tests.__form__" class="test-result">
           <div v-if="tests.__form__.loading" class="muted"><span class="spinner" /> 连接中…</div>
           <div v-else-if="tests.__form__.error" class="error-bar"><Icon name="alert" :size="14" /> {{ tests.__form__.error }}</div>
-          <div v-else class="tool-tags">
-            <span class="badge badge-accent">{{ tests.__form__.tools.length }} 个工具</span>
-            <span v-for="t in tests.__form__.tools" :key="t.name" class="badge mono" :title="t.description">{{ t.name }}</span>
+          <div v-else>
+            <div v-if="tests.__form__.conflicts?.length" class="error-bar conflicts">
+              <Icon name="alert" :size="14" />
+              <div>
+                <b>{{ tests.__form__.conflicts.length }} 个工具名与已有服务器冲突</b>
+                <div v-for="c in tests.__form__.conflicts" :key="c.tool" class="mono conflict-line">{{ c.reason }}</div>
+              </div>
+            </div>
+            <div class="tool-tags">
+              <span class="badge badge-accent">{{ tests.__form__.tools.length }} 个工具</span>
+              <span class="muted pick-hint">点击工具名加入/移出白名单</span>
+              <button v-for="t in tests.__form__.tools" :key="t.name" type="button"
+                class="badge mono pick" :class="{ picked: inWhitelist(t.name) }"
+                :title="t.description" @click="toggleTool(t.name)">{{ t.name }}</button>
+            </div>
           </div>
         </div>
 
@@ -261,9 +300,22 @@ async function testForm() {
           <div v-if="tests[s.name]" class="test-result">
             <div v-if="tests[s.name].loading" class="muted"><span class="spinner" /> 连接中…</div>
             <div v-else-if="tests[s.name].error" class="error-bar"><Icon name="alert" :size="14" /> {{ tests[s.name].error }}</div>
-            <div v-else class="tool-tags">
-              <span class="badge badge-accent">{{ tests[s.name].tools.length }} 个工具</span>
-              <span v-for="t in tests[s.name].tools" :key="t.name" class="badge mono" :title="t.description">{{ t.name }}</span>
+            <div v-else>
+              <div v-if="tests[s.name].conflicts?.length" class="error-bar conflicts">
+                <Icon name="alert" :size="14" />
+                <div>
+                  <b>{{ tests[s.name].conflicts.length }} 个工具名冲突，这些工具不会生效</b>
+                  <div v-for="c in tests[s.name].conflicts" :key="c.tool" class="mono conflict-line">{{ c.reason }}</div>
+                  <div class="conflict-fix">改法：给它们起不同的名字（工具元数据里的 name），或用白名单只加载其中一个服务器的。</div>
+                </div>
+              </div>
+              <div class="tool-tags">
+                <span class="badge badge-accent">{{ tests[s.name].tools.length }} 个工具</span>
+                <span v-if="s.tools?.length" class="badge">白名单 {{ s.tools.length }} 个</span>
+                <span v-for="t in tests[s.name].tools" :key="t.name" class="badge mono"
+                  :class="{ 'badge-dim': s.tools?.length && !s.tools.includes(t.name) }"
+                  :title="s.tools?.length && !s.tools.includes(t.name) ? '未列入白名单，不会加载：' + (t.description || '') : t.description">{{ t.name }}</span>
+              </div>
             </div>
           </div>
         </div>
@@ -273,6 +325,61 @@ async function testForm() {
 </template>
 
 <style scoped>
+.hint {
+  font-size: 12px;
+  color: var(--text-muted);
+  line-height: 1.55;
+}
+
+/* A conflicting tool silently does nothing, so the report needs room to say
+   which two entries collided and how to fix it. */
+.conflicts {
+  align-items: flex-start;
+  gap: 8px;
+  margin-bottom: 10px;
+  text-align: left;
+  white-space: normal;
+}
+
+.conflict-line {
+  font-size: 12px;
+  margin-top: 4px;
+  opacity: 0.9;
+}
+
+.conflict-fix {
+  font-size: 12px;
+  margin-top: 6px;
+  opacity: 0.75;
+}
+
+.pick-hint {
+  font-size: 12px;
+}
+
+/* Typing two dozen tool names by hand is what makes a whitelist go unused, so
+   the names double as buttons. */
+.pick {
+  cursor: pointer;
+  border-color: var(--border);
+  background: transparent;
+}
+
+.pick:hover {
+  border-color: var(--border-strong);
+}
+
+.pick.picked {
+  border-color: var(--primary);
+  color: var(--primary);
+  background: var(--primary-tint);
+}
+
+/* A tool outside the whitelist is configured but will not load — shown, and
+   visibly inert. */
+.badge-dim {
+  opacity: 0.4;
+}
 .view {
   display: flex;
   flex-direction: column;

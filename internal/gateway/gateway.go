@@ -1,4 +1,12 @@
-// Package gateway is the single path every tool call takes.
+// Package gateway governs a tool call: admission, arguments, naming, shaping,
+// provenance.
+//
+// It is not yet the only path a call can take, and that gap is worth stating
+// plainly rather than aspiring past. Built-in tools go through it. MCP tools
+// and anything without metadata still reach ADK directly, so for those there
+// is no argument injection, no shaping, and no evidence — see WrapTools for
+// why an MCP toolset needs a different wrapper, and reportUnregistered in
+// internal/engine for how the remainder is surfaced instead of hidden.
 //
 // It exists because five problems live at exactly this point, and solving them
 // anywhere else means solving them twice — once for the deterministic workflow
@@ -127,7 +135,9 @@ func effectRank(l ops.SideEffectLevel) int {
 }
 
 // permits reports whether the policy admits a tool.
-func (p Policy) permits(m ops.ToolMetadata) error {
+// permits reports whether the policy admits a tool, and returns the level it
+// resolved — callers need it to decide whether a timeout may abandon the call.
+func (p Policy) permits(m ops.ToolMetadata) (ops.SideEffectLevel, error) {
 	// Resolve the tool's level first. Unset is not unknown: a built-in that
 	// declares nothing is read-only, while an MCP tool that declares nothing
 	// is assumed to mutate, because a third-party server's silence is not a
@@ -143,7 +153,7 @@ func (p Policy) permits(m ops.ToolMetadata) error {
 	if !level.Valid() {
 		// Naming the bad value matters: the fix is a one-character edit in a
 		// YAML file, and an operator cannot make it from "not permitted".
-		return fmt.Errorf("%w: %s 声明了无法识别的副作用等级 %q（应为 %s / %s / %s），已按最高风险拒绝",
+		return level, fmt.Errorf("%w: %s 声明了无法识别的副作用等级 %q（应为 %s / %s / %s），已按最高风险拒绝",
 			ErrNotPermitted, m.Name, level,
 			ops.SideEffectReadOnly, ops.SideEffectMutating, ops.SideEffectRisky)
 	}
@@ -155,13 +165,13 @@ func (p Policy) permits(m ops.ToolMetadata) error {
 		ceiling = ops.SideEffectReadOnly
 	}
 	if !ceiling.Valid() {
-		return fmt.Errorf("%w: 本次策略的 MaxSideEffect %q 无法识别（应为 %s / %s / %s）",
+		return level, fmt.Errorf("%w: 本次策略的 MaxSideEffect %q 无法识别（应为 %s / %s / %s）",
 			ErrNotPermitted, p.MaxSideEffect,
 			ops.SideEffectReadOnly, ops.SideEffectMutating, ops.SideEffectRisky)
 	}
 
 	if effectRank(level) > effectRank(ceiling) {
-		return fmt.Errorf("%w: %s 的副作用等级为 %s，本次仅允许 %s",
+		return level, fmt.Errorf("%w: %s 的副作用等级为 %s，本次仅允许 %s",
 			ErrNotPermitted, m.Name, level, ceiling)
 	}
 	if m.NeedsApproval && !p.AllowApprovalRequired {
@@ -169,9 +179,39 @@ func (p Policy) permits(m ops.ToolMetadata) error {
 		if reason == "" {
 			reason = "该工具被标记为需要人工确认"
 		}
-		return fmt.Errorf("%w: %s（%s）", ErrApprovalRequired, m.Name, reason)
+		return level, fmt.Errorf("%w: %s（%s）", ErrApprovalRequired, m.Name, reason)
 	}
-	return nil
+	return level, nil
+}
+
+// Sink receives every completed call and the evidence it produced.
+//
+// It exists because the gateway is the only place that knows what actually
+// happened: the arguments after injection, the canonical tool name rather than
+// whichever alias the model used, the cause bucket, and the evidence ID a
+// conclusion will cite. Recording from ADK's tool callback instead captures
+// the model's own arguments — a record of what was asked for, not of what was
+// done, and one that cannot be checked against the evidence at all.
+//
+// Called synchronously on every path out of a call, so an implementation must
+// be quick and must not fail: a recorder is observability, the call is the
+// product.
+type Sink interface {
+	Record(ctx context.Context, meta CallMeta, res Result)
+}
+
+// SinkFunc adapts a function to Sink.
+type SinkFunc func(ctx context.Context, meta CallMeta, res Result)
+
+func (f SinkFunc) Record(ctx context.Context, meta CallMeta, res Result) { f(ctx, meta, res) }
+
+// CallMeta identifies the conversation a call belongs to. The gateway does not
+// read it; it passes it through so a sink can attribute the row.
+type CallMeta struct {
+	SessionID    string
+	InvocationID string
+	Agent        string
+	CallID       string
 }
 
 // Config wires a gateway.
@@ -185,6 +225,8 @@ type Config struct {
 	// the metadata's byte ceiling.
 	Shapers map[string]Shaper
 	Policy  Policy
+	// Sink records completed calls. Optional; nil records nothing.
+	Sink Sink
 }
 
 // Gateway executes tool calls under policy, with arguments injected,
@@ -198,6 +240,7 @@ type Gateway struct {
 	reg     Registry
 	shapers map[string]Shaper
 	policy  Policy
+	sink    Sink
 
 	// executors is guarded because it is filled after construction: the
 	// gateway is built once per engine, while the executor for a set of tools
@@ -224,6 +267,7 @@ func New(cfg Config) *Gateway {
 		executors: execs,
 		shapers:   cfg.Shapers,
 		policy:    cfg.Policy,
+		sink:      cfg.Sink,
 	}
 }
 
@@ -267,7 +311,22 @@ type Result struct {
 // context is authoritative and a model-supplied cluster is exactly the
 // confident mistake this design removes.
 func (g *Gateway) Execute(ctx context.Context, ic *ops.IncidentContext, origin ops.Origin, name string, args map[string]any) (Result, error) {
+	return g.ExecuteAs(ctx, CallMeta{}, ic, origin, name, args)
+}
+
+// ExecuteAs is Execute with the conversation identifiers a sink needs to
+// attribute the row.
+func (g *Gateway) ExecuteAs(ctx context.Context, meta CallMeta, ic *ops.IncidentContext, origin ops.Origin, name string, args map[string]any) (res Result, err error) {
 	started := time.Now()
+	// Recorded on every path out, including the early rejections: a call that
+	// was denied or unroutable is part of what happened, and leaving those out
+	// of the record is how a success rate ends up describing only the calls
+	// that got as far as running.
+	defer func() {
+		if g.sink != nil {
+			g.sink.Record(ctx, meta, res)
+		}
+	}()
 	call := ops.ToolCall{
 		ID:        "c" + strconv.FormatUint(g.callSeq.Add(1), 10),
 		Tool:      name,
@@ -287,7 +346,8 @@ func (g *Gateway) Execute(ctx context.Context, ic *ops.IncidentContext, origin o
 	// would appear under several names in every statistic.
 	call.Tool = m.Name
 
-	if err := g.policy.permits(m); err != nil {
+	level, err := g.policy.permits(m)
+	if err != nil {
 		call.Duration = time.Since(started)
 		call.ErrKind = "denied"
 		call.Err = err.Error()
@@ -305,9 +365,11 @@ func (g *Gateway) Execute(ctx context.Context, ic *ops.IncidentContext, origin o
 	final := PrepareArgs(m, ic, args)
 	call.Args = final
 
-	raw, err := runWithTimeout(ctx, m.Timeout, func(runCtx context.Context) (map[string]any, error) {
-		return exec.Execute(runCtx, m.Remote(), final)
-	})
+	// Only a read-only call may be abandoned on timeout. See runWithTimeout.
+	raw, err := runWithTimeout(ctx, m.Timeout, level == ops.SideEffectReadOnly,
+		func(runCtx context.Context) (map[string]any, error) {
+			return exec.Execute(runCtx, m.Remote(), final)
+		})
 	call.Duration = time.Since(started)
 	if err != nil {
 		call.Err = err.Error()
@@ -456,31 +518,43 @@ func payloadError(raw map[string]any) string {
 	}
 }
 
-// runWithTimeout bounds a call at the tool's declared timeout.
+// runWithTimeout bounds a read-only call at the tool's declared timeout.
 //
-// The deadline is enforced here rather than handed to the tool, because ADK's
-// ToolContext cannot carry one: only InvocationContext has WithContext. So a
-// tool that ignores its context is abandoned rather than interrupted — the
-// caller stops waiting and reports a timeout, and the goroutine finishes into
-// a buffered channel nobody reads.
+// Abandoning a call is only safe when it cannot change anything. ADK's
+// ToolContext carries no deadline (only InvocationContext has WithContext), so
+// a tool that ignores its context keeps running after we stop waiting — and
+// for a mutating tool that produces the worst possible outcome: the caller
+// reports a failure, the write lands a moment later, and a retry does it
+// twice. "Restart failed" followed by two restarts is not a timeout, it is a
+// duplicated side effect.
 //
-// That leaks a goroutine for as long as the tool runs. It is the lesser
-// problem: the alternative is a diagnosis that hangs on one slow tool, and a
-// five-minute budget has no room for that.
-func runWithTimeout(ctx context.Context, timeout time.Duration, fn func(context.Context) (map[string]any, error)) (map[string]any, error) {
+// So only read-only tools are abandoned. A mutating tool is awaited to
+// completion, on the reasoning that an honest "this took 40 seconds" beats a
+// false "this failed" about a change that actually happened. Bounding those
+// properly needs cancellation the tool respects — which is a property of the
+// tool, not something a caller can add.
+func runWithTimeout(ctx context.Context, timeout time.Duration, abandonable bool, fn func(context.Context) (map[string]any, error)) (map[string]any, error) {
 	if timeout <= 0 {
 		return fn(ctx)
 	}
 	runCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
+	if !abandonable {
+		// Awaited inline: the deadline still reaches a tool that honours its
+		// context, but one that does not is allowed to finish.
+		defer cancel()
+		return fn(runCtx)
+	}
 
 	type outcome struct {
 		result map[string]any
 		err    error
 	}
-	// Buffered, so the goroutine can always finish even after we stop waiting.
+	// Buffered so the abandoned goroutine can finish and exit; cancel is
+	// deferred to the goroutine rather than this function, or abandoning the
+	// call would cancel a context the goroutine is still using.
 	done := make(chan outcome, 1)
 	go func() {
+		defer cancel()
 		result, err := fn(runCtx)
 		done <- outcome{result, err}
 	}()

@@ -47,12 +47,19 @@ func (k keyedReg) ByKey(key string) (ops.ToolMetadata, bool) {
 	return m, ok
 }
 
-// toolCtx is the minimum ToolContext the wrapper path touches.
+// toolCtx is the minimum ToolContext the wrapper path touches. Anything else
+// panics (StrictContextMock), so a wrapper that starts reading more state
+// fails here rather than depending on something a real hook may not have.
 type toolCtx struct{ agent.StrictContextMock }
 
 func newToolCtx() *toolCtx {
 	return &toolCtx{agent.StrictContextMock{Ctx: context.Background()}}
 }
+
+func (c *toolCtx) SessionID() string      { return "session-1" }
+func (c *toolCtx) InvocationID() string   { return "invocation-1" }
+func (c *toolCtx) AgentName() string      { return "jelly" }
+func (c *toolCtx) FunctionCallID() string { return "call-1" }
 
 func k8sDecl() *genai.FunctionDeclaration {
 	return &genai.FunctionDeclaration{
