@@ -103,32 +103,63 @@ type Policy struct {
 	AllowApprovalRequired bool
 }
 
-// effectRank orders side effects so a policy can compare them.
+// effectRank orders the three known levels.
+//
+// It is only ever called on a value already checked by Valid, so it has no
+// case for anything else. An earlier version ranked unknown values above
+// everything, which looked safe and was not: an unset policy is also an
+// unknown value, so it ranked highest too and therefore admitted everything.
+// The empty string means two different things — a tool that declared nothing,
+// and a policy nobody configured — and conflating them in one ranking is what
+// produced that hole. Both are now resolved to a real level before comparison.
 func effectRank(l ops.SideEffectLevel) int {
 	switch l {
 	case ops.SideEffectRisky:
 		return 2
 	case ops.SideEffectMutating:
 		return 1
-	default:
+	default: // read_only
 		return 0
 	}
 }
 
 // permits reports whether the policy admits a tool.
 func (p Policy) permits(m ops.ToolMetadata) error {
+	// Resolve the tool's level first. Unset is not unknown: a built-in that
+	// declares nothing is read-only, while an MCP tool that declares nothing
+	// is assumed to mutate, because a third-party server's silence is not a
+	// safety guarantee.
 	level := m.SideEffect
 	if level == "" {
-		// An MCP tool that declares nothing is not assumed safe; a built-in is.
 		if m.Server != "" {
 			level = ops.SideEffectMutating
 		} else {
 			level = ops.SideEffectReadOnly
 		}
 	}
-	if effectRank(level) > effectRank(p.MaxSideEffect) {
+	if !level.Valid() {
+		// Naming the bad value matters: the fix is a one-character edit in a
+		// YAML file, and an operator cannot make it from "not permitted".
+		return fmt.Errorf("%w: %s 声明了无法识别的副作用等级 %q（应为 %s / %s / %s），已按最高风险拒绝",
+			ErrNotPermitted, m.Name, level,
+			ops.SideEffectReadOnly, ops.SideEffectMutating, ops.SideEffectRisky)
+	}
+	// Resolve the policy's ceiling. Unset means read-only — the safe default
+	// for a call path that has not thought about it — and a misspelt ceiling
+	// is refused outright rather than guessed at.
+	ceiling := p.MaxSideEffect
+	if ceiling == "" {
+		ceiling = ops.SideEffectReadOnly
+	}
+	if !ceiling.Valid() {
+		return fmt.Errorf("%w: 本次策略的 MaxSideEffect %q 无法识别（应为 %s / %s / %s）",
+			ErrNotPermitted, p.MaxSideEffect,
+			ops.SideEffectReadOnly, ops.SideEffectMutating, ops.SideEffectRisky)
+	}
+
+	if effectRank(level) > effectRank(ceiling) {
 		return fmt.Errorf("%w: %s 的副作用等级为 %s，本次仅允许 %s",
-			ErrNotPermitted, m.Name, level, orReadOnly(p.MaxSideEffect))
+			ErrNotPermitted, m.Name, level, ceiling)
 	}
 	if m.NeedsApproval && !p.AllowApprovalRequired {
 		reason := m.ApprovalReason
@@ -138,13 +169,6 @@ func (p Policy) permits(m ops.ToolMetadata) error {
 		return fmt.Errorf("%w: %s（%s）", ErrApprovalRequired, m.Name, reason)
 	}
 	return nil
-}
-
-func orReadOnly(l ops.SideEffectLevel) ops.SideEffectLevel {
-	if l == "" {
-		return ops.SideEffectReadOnly
-	}
-	return l
 }
 
 // Config wires a gateway.
@@ -285,8 +309,17 @@ func (g *Gateway) Execute(ctx context.Context, ic *ops.IncidentContext, origin o
 		ev.Summary = fmt.Sprintf("结果整形失败（%v），以下为原始返回", err)
 		ev.Data = rawJSON(raw)
 	}
-	if m.MaxResultBytes > 0 && len(ev.Data) > m.MaxResultBytes {
-		ev.Data = ev.Data[:m.MaxResultBytes]
+	if bounded, cut := boundPayload(ev.Data, m.MaxResultBytes); cut {
+		// A nil result is deliberate, not a failure: below a few bytes there
+		// is no payload worth carrying, and Truncated says so.
+		ev.Data = bounded
+		ev.Truncated = true
+	}
+	if bounded, cut := boundSummary(ev.Summary, m.MaxResultBytes); cut {
+		// The summary is what actually reaches the prompt, so a ceiling that
+		// only bounded Data would let a tool returning one enormous content
+		// field walk straight past the context budget.
+		ev.Summary = bounded
 		ev.Truncated = true
 	}
 	call.Truncated = ev.Truncated
@@ -412,6 +445,121 @@ func payloadSize(raw map[string]any) int {
 		return 0
 	}
 	return len(b)
+}
+
+// maxSummaryChars caps a summary even when a tool declares no ceiling.
+//
+// A summary is one line in a prompt and one line in a report. Nothing legible
+// needs more than this, and a tool returning a whole document in its "content"
+// field would otherwise spend the context budget by itself.
+const maxSummaryChars = 600
+
+// truncMarker tells a reader the text is an excerpt. Without it an excerpt
+// reads as the whole thing, which is worse than a longer excerpt.
+const truncMarker = "…（已截断）"
+
+// boundPayload keeps a JSON payload under a byte ceiling while leaving it
+// valid JSON.
+//
+// Slicing the bytes is what the obvious implementation does and it produces
+// invalid JSON — worse, an unmarshalable json.RawMessage makes the whole
+// Evidence, and therefore the whole DiagnosisResult, fail to serialize. So the
+// payload is re-encoded with its string values shortened instead, and if even
+// that does not fit it is replaced by a note rather than by a broken fragment.
+func boundPayload(data json.RawMessage, maxBytes int) (json.RawMessage, bool) {
+	if maxBytes <= 0 || len(data) <= maxBytes {
+		return data, false
+	}
+	var v any
+	if err := json.Unmarshal(data, &v); err != nil {
+		// Not JSON we can walk; a note beats a truncated fragment.
+		return droppedNote(maxBytes), true
+	}
+	// Shrink the string leaves until the encoding fits. Halving converges in
+	// a few passes and keeps the structure — which is the part a reader needs
+	// to see — intact.
+	limit := maxBytes
+	for i := 0; i < 12; i++ {
+		limit /= 2
+		if limit < 16 {
+			break
+		}
+		shrunk := shrinkStrings(v, limit)
+		out, err := json.Marshal(shrunk)
+		if err != nil {
+			break
+		}
+		if len(out) <= maxBytes {
+			return out, true
+		}
+	}
+	return droppedNote(maxBytes), true
+}
+
+// droppedNote is the last resort when nothing legible fits.
+//
+// It obeys the ceiling too. A fallback that overruns the very limit it is
+// enforcing is not a fallback — and below a handful of bytes the honest answer
+// is no payload at all: Evidence.Data is optional, Truncated already records
+// that something was dropped, and Summary still carries the observation.
+func droppedNote(maxBytes int) json.RawMessage {
+	for _, note := range []string{
+		`{"truncated":"结果超出上限，已省略"}`,
+		`{"truncated":"已省略"}`,
+		`{"truncated":true}`,
+	} {
+		if len(note) <= maxBytes {
+			return json.RawMessage(note)
+		}
+	}
+	return nil
+}
+
+// shrinkStrings walks a decoded payload and shortens every string leaf.
+func shrinkStrings(v any, limit int) any {
+	switch t := v.(type) {
+	case string:
+		return truncRunes(t, limit)
+	case map[string]any:
+		out := make(map[string]any, len(t))
+		for k, val := range t {
+			out[k] = shrinkStrings(val, limit)
+		}
+		return out
+	case []any:
+		out := make([]any, len(t))
+		for i, val := range t {
+			out[i] = shrinkStrings(val, limit)
+		}
+		return out
+	default:
+		return v
+	}
+}
+
+// boundSummary caps the line that reaches the prompt.
+func boundSummary(summary string, maxBytes int) (string, bool) {
+	limit := maxSummaryChars
+	if maxBytes > 0 && maxBytes < limit {
+		limit = maxBytes
+	}
+	if len([]rune(summary)) <= limit {
+		return summary, false
+	}
+	return truncRunes(summary, limit), true
+}
+
+// truncRunes cuts on a rune boundary, so a multi-byte character is never split
+// into invalid UTF-8, and marks the result as an excerpt.
+func truncRunes(s string, limit int) string {
+	r := []rune(s)
+	if len(r) <= limit {
+		return s
+	}
+	if limit <= 0 {
+		return truncMarker
+	}
+	return string(r[:limit]) + truncMarker
 }
 
 func rawJSON(raw map[string]any) json.RawMessage {

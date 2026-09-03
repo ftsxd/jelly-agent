@@ -230,6 +230,10 @@ type IncidentContext struct {
 
 // Env returns the primary target's environment, which is what routes a call to
 // one of several servers for the same backend.
+//
+// Primary first, then any target that declares one: the primary is the thing
+// under diagnosis, and a secondary target in another environment must not
+// redirect the call.
 func (c *IncidentContext) Env() string {
 	if c == nil {
 		return ""
@@ -248,19 +252,32 @@ func (c *IncidentContext) Env() string {
 // Backends lists the distinct backends reachable for this incident. Tool
 // selection uses it to drop candidates whose backend has no handle — a
 // deterministic cut that costs nothing, unlike relevance scoring.
+//
+// Primary is walked alongside Targets and must be: a normalizer that resolved
+// one target and set it as primary need not also copy it into the slice. If
+// this looked only at Targets, HandleFor would resolve a backend that Backends
+// denied, and selection would silently hide tools the incident can actually
+// reach — the worst kind of filtering bug, because the model simply never sees
+// the tool and nothing is logged.
 func (c *IncidentContext) Backends() []string {
 	if c == nil {
 		return nil
 	}
 	seen := map[string]bool{}
 	var out []string
-	for _, t := range c.Targets {
+	add := func(t Target) {
 		for b := range t.Handles {
 			if !seen[b] {
 				seen[b] = true
 				out = append(out, b)
 			}
 		}
+	}
+	if c.Primary != nil {
+		add(*c.Primary)
+	}
+	for _, t := range c.Targets {
+		add(t)
 	}
 	return out
 }

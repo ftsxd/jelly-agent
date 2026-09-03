@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/jelly-agent/jelly-agent/internal/ops"
 	"github.com/jelly-agent/jelly-agent/internal/toolreg"
@@ -476,5 +478,241 @@ func TestSnapshotAdaptsTheRealRegistry(t *testing.T) {
 	}
 	if rec.remote != "get_pods" {
 		t.Errorf("remote = %q", rec.remote)
+	}
+}
+
+// Regression: a permission check that treats what it does not understand as
+// harmless is not a permission check. This value comes from a YAML file, and a
+// one-character typo used to let a mutating tool run under a read-only policy.
+func TestUnknownSideEffectLevelDeniesRatherThanAdmits(t *testing.T) {
+	m := ops.ToolMetadata{
+		Name: "k8s_restart", RemoteName: "restart", Server: "kubernetes-prod",
+		Backend: "kubernetes", SideEffect: ops.SideEffectLevel("mutatting"), // typo
+	}
+	rec := &recorder{result: map[string]any{"summary": "restarted"}}
+	g := newGW(t, m, rec, Policy{}) // read-only
+
+	_, err := g.Execute(context.Background(), prodContext(), ops.OriginModel, "k8s_restart", nil)
+	if !errors.Is(err, ErrNotPermitted) {
+		t.Fatalf("err = %v, want the call denied", err)
+	}
+	if rec.remote != "" {
+		t.Error("a tool with an unrecognized level reached the executor")
+	}
+	// The fix is a one-character edit in a file; an operator cannot make it
+	// from "not permitted".
+	if !strings.Contains(err.Error(), "mutatting") {
+		t.Errorf("error %q does not quote the bad value", err)
+	}
+	if !strings.Contains(err.Error(), string(ops.SideEffectMutating)) {
+		t.Errorf("error %q does not list the legal values", err)
+	}
+
+	// Even the most permissive policy must not admit it: the level is unknown,
+	// so its true danger is unknown.
+	g = newGW(t, m, rec, Policy{MaxSideEffect: ops.SideEffectRisky})
+	if _, err := g.Execute(context.Background(), prodContext(), ops.OriginModel, "k8s_restart", nil); !errors.Is(err, ErrNotPermitted) {
+		t.Errorf("err = %v, want denial even under the widest policy", err)
+	}
+
+	// A misspelt policy is equally suspect.
+	g = newGW(t, k8sMeta(), rec, Policy{MaxSideEffect: ops.SideEffectLevel("readonly")})
+	if _, err := g.Execute(context.Background(), prodContext(), ops.OriginModel, "k8s_get_pods", nil); !errors.Is(err, ErrNotPermitted) {
+		t.Errorf("err = %v, want denial on an unrecognized policy level", err)
+	}
+}
+
+// Regression: byte-slicing a JSON payload produced an unmarshalable
+// json.RawMessage, which made the whole Evidence — and therefore the whole
+// DiagnosisResult — fail to serialize. One oversized tool result used to lose
+// an entire diagnosis.
+func TestBoundedPayloadStaysValidJSONAndSerializable(t *testing.T) {
+	cases := map[string]map[string]any{
+		"long CJK string":  {"content": strings.Repeat("数据", 400)},
+		"nested structure": {"pods": []any{map[string]any{"name": strings.Repeat("p", 300), "status": "Running"}}},
+		"many keys":        {"a": strings.Repeat("x", 200), "b": strings.Repeat("y", 200), "c": 42},
+	}
+	for name, payload := range cases {
+		t.Run(name, func(t *testing.T) {
+			m := k8sMeta()
+			m.MaxResultBytes = 60
+			g := newGW(t, m, &recorder{result: payload}, Policy{})
+
+			res, err := g.Execute(context.Background(), prodContext(), ops.OriginModel, "k8s_get_pods", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !res.Evidence.Truncated {
+				t.Error("truncation was not recorded; an excerpt would read as the whole")
+			}
+			var v any
+			if err := json.Unmarshal(res.Evidence.Data, &v); err != nil {
+				t.Fatalf("bounded data is not valid JSON: %v\n  %q", err, res.Evidence.Data)
+			}
+			if _, err := json.Marshal(res.Evidence); err != nil {
+				t.Fatalf("Evidence no longer serializes: %v", err)
+			}
+			// And the whole result, which is what actually gets written out.
+			d := &ops.DiagnosisResult{Evidence: []ops.Evidence{*res.Evidence}}
+			if _, err := json.Marshal(d); err != nil {
+				t.Fatalf("DiagnosisResult no longer serializes: %v", err)
+			}
+			if len(res.Evidence.Data) > m.MaxResultBytes {
+				t.Errorf("data is %d bytes, want at most %d", len(res.Evidence.Data), m.MaxResultBytes)
+			}
+		})
+	}
+}
+
+// A multi-byte character must never be split into invalid UTF-8.
+func TestTruncationRespectsRuneBoundaries(t *testing.T) {
+	if got := truncRunes("数据数据数据", 3); !utf8.ValidString(got) {
+		t.Errorf("truncRunes produced invalid UTF-8: %q", got)
+	}
+	if got := truncRunes("数据", 10); got != "数据" {
+		t.Errorf("truncRunes shortened a string that fit: %q", got)
+	}
+	if got := truncRunes("数据", 1); !strings.Contains(got, truncMarker) {
+		t.Errorf("truncRunes did not mark the excerpt: %q", got)
+	}
+}
+
+// The summary is what actually reaches the prompt, so a ceiling that only
+// bounded Data would let a tool returning one enormous content field walk
+// straight past the context budget.
+func TestSummaryIsBoundedNotJustTheData(t *testing.T) {
+	huge := strings.Repeat("这是很长的一段内容。", 500)
+	g := newGW(t, k8sMeta(), &recorder{result: map[string]any{"summary": huge}}, Policy{})
+
+	res, err := g.Execute(context.Background(), prodContext(), ops.OriginModel, "k8s_get_pods", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := len([]rune(res.Evidence.Summary)); n > maxSummaryChars+len([]rune(truncMarker)) {
+		t.Errorf("summary is %d runes; nothing legible in a prompt needs that", n)
+	}
+	if !res.Evidence.Truncated {
+		t.Error("a bounded summary was not marked truncated")
+	}
+
+	// A tool's own tighter ceiling wins over the default.
+	m := k8sMeta()
+	m.MaxResultBytes = 20
+	g = newGW(t, m, &recorder{result: map[string]any{"summary": huge}}, Policy{})
+	res, _ = g.Execute(context.Background(), prodContext(), ops.OriginModel, "k8s_get_pods", nil)
+	if n := len([]rune(res.Evidence.Summary)); n > 20+len([]rune(truncMarker)) {
+		t.Errorf("summary is %d runes, want the tool's ceiling of 20 to apply", n)
+	}
+}
+
+// Regression on the fix itself. Ranking unknown levels above everything looks
+// like the safe way to fail closed, and it is not: an unset policy is also an
+// unknown value, so it ranks highest too and admits everything. The empty
+// string means two different things and must be resolved before comparison,
+// not ranked.
+func TestAnUnsetPolicyIsReadOnlyNotUnlimited(t *testing.T) {
+	mutating := ops.ToolMetadata{
+		Name: "k8s_restart", RemoteName: "restart", Server: "kubernetes-prod",
+		Backend: "kubernetes", SideEffect: ops.SideEffectMutating,
+	}
+	rec := &recorder{result: map[string]any{"summary": "restarted"}}
+
+	// The zero Policy — what a caller that never thought about permissions
+	// gets — must deny a mutating tool.
+	g := newGW(t, mutating, rec, Policy{})
+	if _, err := g.Execute(context.Background(), prodContext(), ops.OriginModel, "k8s_restart", nil); !errors.Is(err, ErrNotPermitted) {
+		t.Fatalf("err = %v, want the zero Policy to behave as read-only", err)
+	}
+	if rec.remote != "" {
+		t.Error("a mutating tool ran under the zero Policy")
+	}
+
+	// A read-only tool passes under the same zero Policy, so the default is a
+	// ceiling and not a blanket refusal.
+	g = newGW(t, k8sMeta(), rec, Policy{})
+	if _, err := g.Execute(context.Background(), prodContext(), ops.OriginModel, "k8s_get_pods", nil); err != nil {
+		t.Errorf("a read-only tool was denied under the zero Policy: %v", err)
+	}
+}
+
+// The ceiling has to be hard, including for the code that enforces it: an
+// earlier fallback note was 46 bytes and overran the 40-byte limit it was
+// applying.
+func TestTheFallbackNoteObeysTheCeilingItEnforces(t *testing.T) {
+	for _, limit := range []int{60, 40, 20, 8, 1} {
+		m := k8sMeta()
+		m.MaxResultBytes = limit
+		g := newGW(t, m, &recorder{result: map[string]any{"content": strings.Repeat("数据", 500)}}, Policy{})
+
+		res, err := g.Execute(context.Background(), prodContext(), ops.OriginModel, "k8s_get_pods", nil)
+		if err != nil {
+			t.Fatalf("limit %d: %v", limit, err)
+		}
+		if len(res.Evidence.Data) > limit {
+			t.Errorf("limit %d: data is %d bytes — the enforcer broke its own limit: %q",
+				limit, len(res.Evidence.Data), res.Evidence.Data)
+		}
+		// Below a few bytes the payload is dropped entirely, which is the
+		// honest answer: Data is optional and Truncated records the loss.
+		if len(res.Evidence.Data) == 0 {
+			if !res.Evidence.Truncated {
+				t.Errorf("limit %d: payload dropped without recording it", limit)
+			}
+			if res.Evidence.Summary == "" {
+				t.Errorf("limit %d: both payload and summary are empty; the observation is gone", limit)
+			}
+			continue
+		}
+		var v any
+		if err := json.Unmarshal(res.Evidence.Data, &v); err != nil {
+			t.Errorf("limit %d: data is not valid JSON: %v (%q)", limit, err, res.Evidence.Data)
+		}
+	}
+}
+
+// The gateway claims to be safe for concurrent use, and evidence IDs come from
+// a counter that several goroutines touch. A claim like that is worth proving
+// under -race rather than asserting in a comment.
+func TestConcurrentCallsProduceUniqueEvidenceIDs(t *testing.T) {
+	// A stateless executor: the shared recorder is a test double with no
+	// locking, and its own fields would race before the gateway's did.
+	m := k8sMeta()
+	g := New(Config{
+		Registry: fakeReg{m.Name: m},
+		Executors: map[string]Executor{m.Server: ExecutorFunc(
+			func(context.Context, string, map[string]any) (map[string]any, error) {
+				return map[string]any{"summary": "ok"}, nil
+			})},
+	})
+
+	const workers, each = 8, 20
+	ids := make(chan string, workers*each)
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < each; j++ {
+				res, err := g.Execute(context.Background(), prodContext(), ops.OriginModel, "k8s_get_pods", nil)
+				if err != nil {
+					t.Error(err)
+					return
+				}
+				ids <- res.Evidence.ID
+			}
+		}()
+	}
+	wg.Wait()
+	close(ids)
+
+	seen := map[string]bool{}
+	for id := range ids {
+		if seen[id] {
+			t.Fatalf("duplicate evidence ID %q under concurrency", id)
+		}
+		seen[id] = true
+	}
+	if len(seen) != workers*each {
+		t.Errorf("got %d distinct IDs, want %d", len(seen), workers*each)
 	}
 }

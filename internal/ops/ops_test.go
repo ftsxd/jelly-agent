@@ -321,3 +321,35 @@ func TestNilContextAccessorsAreSafe(t *testing.T) {
 		t.Error("nil context resolved a handle")
 	}
 }
+
+// Regression: a handle present only on Primary must still be reachable.
+//
+// A normalizer that resolved one target and set it as primary need not also
+// copy it into Targets. When Backends looked only at the slice, HandleFor
+// resolved a backend that Backends denied — and selection silently hid tools
+// the incident could actually reach. Nothing is logged when that happens; the
+// model simply never sees the tool.
+func TestBackendsIncludesThePrimaryTarget(t *testing.T) {
+	c := &IncidentContext{
+		Primary: &Target{
+			Canonical: "payment-gateway", Env: "prod",
+			Handles: map[string]Handle{"kubernetes": {Backend: "kubernetes"}},
+		},
+	}
+	bs := c.Backends()
+	if len(bs) != 1 || bs[0] != "kubernetes" {
+		t.Fatalf("Backends = %v, want [kubernetes]", bs)
+	}
+	// The two must agree: anything HandleFor can resolve, Backends must list.
+	if _, ok := c.HandleFor("kubernetes"); !ok {
+		t.Fatal("HandleFor cannot resolve what Backends lists")
+	}
+
+	// And no duplicates when the primary also appears in the slice, which is
+	// the other way a normalizer may fill this in.
+	c.Targets = []Target{*c.Primary, {Handles: map[string]Handle{"mysql": {Backend: "mysql"}}}}
+	bs = c.Backends()
+	if len(bs) != 2 {
+		t.Errorf("Backends = %v, want kubernetes and mysql exactly once each", bs)
+	}
+}

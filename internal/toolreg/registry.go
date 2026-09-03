@@ -126,7 +126,15 @@ func Build(metas []ops.ToolMetadata) (*Registry, []Conflict) {
 
 	for _, m := range metas {
 		if m.Name == "" && m.RemoteName == "" {
-			conflicts = append(conflicts, Conflict{Kind: ConflictNoName, ExistingKey: m.Server})
+			conflicts = append(conflicts, Conflict{
+				Kind: ConflictNoName,
+				// Key must be set even though there is no name to form one:
+				// CheckAgainst filters conflicts by the incoming keys, and an
+				// entry with an empty key would be filtered out — letting a
+				// nameless tool pass the very validation meant to catch it.
+				Key:         m.Server + "/(未命名)",
+				ExistingKey: m.Server,
+			})
 			continue
 		}
 		if m.Name == "" {
@@ -283,6 +291,10 @@ func (r *Registry) CheckAgainst(metas []ops.ToolMetadata) []Conflict {
 	// the wrong change.
 	incoming := map[string]bool{}
 	for _, m := range metas {
+		if m.Name == "" && m.RemoteName == "" {
+			incoming[m.Server+"/(未命名)"] = true
+			continue
+		}
 		if m.Name == "" {
 			m.Name = m.RemoteName
 		}

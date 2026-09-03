@@ -17,6 +17,22 @@ const (
 	SideEffectRisky    SideEffectLevel = "mutating_risky" // destructive or hard to undo
 )
 
+// Valid reports whether the level is one this code knows.
+//
+// It exists because this value arrives from a YAML file, and a permission
+// check that silently accepts an unrecognized level fails open: "mutatting"
+// would compare as weaker than read_only and let a mutating tool through. A
+// misspelt level must be treated as the most dangerous thing it could be, not
+// the safest.
+func (l SideEffectLevel) Valid() bool {
+	switch l {
+	case SideEffectReadOnly, SideEffectMutating, SideEffectRisky:
+		return true
+	default:
+		return false
+	}
+}
+
 // LatencyClass is the expected cost of a call, used to order equally relevant
 // candidates so a cheap check runs before an expensive scan.
 type LatencyClass string

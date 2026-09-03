@@ -2,7 +2,9 @@ package toolreg
 
 import (
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/jelly-agent/jelly-agent/internal/ops"
 )
@@ -303,4 +305,79 @@ func TestConflictKindsAreDistinguished(t *testing.T) {
 	if !strings.Contains(conflicts[0].Error(), "broken") {
 		t.Errorf("message does not name the server: %q", conflicts[0].Error())
 	}
+}
+
+// Regression: the pre-save check must report a nameless entry.
+//
+// ConflictNoName had no Key, and CheckAgainst filters conflicts by the
+// incoming keys — so the one conflict a save-time check exists to catch was
+// the one it dropped.
+func TestCheckAgainstReportsNamelessEntries(t *testing.T) {
+	base, _ := Build([]ops.ToolMetadata{meta("kubernetes-prod", "get_pods", "k8s_get_pods")})
+
+	conflicts := base.CheckAgainst([]ops.ToolMetadata{{Server: "broken"}})
+	if len(conflicts) != 1 {
+		t.Fatalf("conflicts = %+v, want the nameless entry reported", conflicts)
+	}
+	if conflicts[0].Kind != ConflictNoName {
+		t.Errorf("Kind = %q, want %q", conflicts[0].Kind, ConflictNoName)
+	}
+	if !strings.Contains(conflicts[0].Error(), "broken") {
+		t.Errorf("error %q does not name the server", conflicts[0].Error())
+	}
+	// A valid addition alongside a broken one is still reported once, for the
+	// broken one only.
+	conflicts = base.CheckAgainst([]ops.ToolMetadata{
+		meta("mysql", "slow_log", "mysql_slow_log"),
+		{Server: "broken2"},
+	})
+	if len(conflicts) != 1 || conflicts[0].Kind != ConflictNoName {
+		t.Errorf("conflicts = %+v, want only the nameless entry", conflicts)
+	}
+}
+
+// The store exists so a hot metadata reload cannot change a tool's definition
+// mid-run. Readers and a swapper therefore race by construction, and the claim
+// is only worth as much as a -race run proving it.
+func TestStoreIsSafeUnderConcurrentReadAndSwap(t *testing.T) {
+	s := NewStore()
+	v1, _ := Build([]ops.ToolMetadata{{Name: "k8s_get_pods", Backend: "kubernetes"}})
+	s.Swap(v1)
+
+	var wg sync.WaitGroup
+
+	// Readers hold a snapshot and keep using it, which is what a diagnosis in
+	// flight does. A fixed number of rounds rather than a stop channel, so the
+	// test cannot outlive its own signalling.
+	for i := 0; i < 6; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for round := 0; round < 100; round++ {
+				held := s.Load()
+				for j := 0; j < 20; j++ {
+					if _, ok := held.Lookup("k8s_get_pods"); !ok {
+						t.Error("a held snapshot lost its entry")
+						return
+					}
+					_ = held.Len()
+					_ = held.All()
+				}
+			}
+		}()
+	}
+
+	// A swapper installs new snapshots underneath them.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 200; i++ {
+			r, _ := Build([]ops.ToolMetadata{
+				{Name: "k8s_get_pods", Backend: "kubernetes", Timeout: time.Duration(i)},
+			})
+			s.Swap(r)
+		}
+	}()
+
+	wg.Wait()
 }
