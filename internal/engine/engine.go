@@ -23,6 +23,7 @@ import (
 	"github.com/jelly-agent/jelly-agent/internal/history"
 	jellymcp "github.com/jelly-agent/jelly-agent/internal/mcp"
 	"github.com/jelly-agent/jelly-agent/internal/memory"
+	jellymetrics "github.com/jelly-agent/jelly-agent/internal/metrics"
 	jellymodel "github.com/jelly-agent/jelly-agent/internal/model"
 	"github.com/jelly-agent/jelly-agent/internal/sandbox"
 	jellysession "github.com/jelly-agent/jelly-agent/internal/session"
@@ -74,6 +75,12 @@ type Engine struct {
 	mcpOnce    sync.Once
 	mcpSets    map[string]adktool.Toolset // enabled MCP toolsets, keyed by server name
 	extraTools []adktool.Tool
+
+	// Tool-call telemetry. Built once and shared by every agent this engine
+	// builds, so the in-flight table pairs a call's start and finish even when
+	// the web server rebuilds the agent between them.
+	metricsOnce sync.Once
+	metrics     *jellymetrics.Tracker
 }
 
 // New wraps a loaded config in an engine.
@@ -92,6 +99,9 @@ func (e *Engine) SetExtraTools(tools []adktool.Tool) { e.extraTools = tools }
 func (e *Engine) Close() {
 	if e.mcpCancel != nil {
 		e.mcpCancel()
+	}
+	if err := e.metrics.Close(); err != nil {
+		log.Printf("metrics: close: %v", err)
 	}
 }
 
@@ -165,6 +175,58 @@ func (e *Engine) Search() (*memory.Search, error) {
 		return nil, fmt.Errorf("init memory search: %w", err)
 	}
 	return s, nil
+}
+
+// Metrics returns the shared tool-call tracker, opening the store on first use.
+//
+// A store that cannot be opened is not an error the caller has to handle: the
+// tracker still times calls and simply drops the rows. Losing telemetry must
+// never cost a tool call.
+func (e *Engine) Metrics() *jellymetrics.Tracker {
+	e.metricsOnce.Do(func() {
+		dbPath, err := jellysession.DefaultDBPath()
+		if err != nil {
+			log.Printf("metrics: resolve db path: %v (telemetry off)", err)
+			e.metrics = jellymetrics.NewTracker(nil)
+			return
+		}
+		rec, err := jellymetrics.NewRecorder(dbPath)
+		if err != nil {
+			log.Printf("metrics: open store: %v (telemetry off)", err)
+			rec = nil
+		}
+		e.metrics = jellymetrics.NewTracker(rec)
+	})
+	return e.metrics
+}
+
+// toolCallbacks adapts the tracker to ADK's tool hooks.
+//
+// Both callbacks return (nil, nil) unconditionally, and that is the whole
+// contract here: ADK treats a non-nil return from BeforeToolCallback as "skip
+// the tool, use this result", and from AfterToolCallback as "replace the tool's
+// output". A measurement hook that ever returns a value would silently swallow
+// real tool calls — the kind of bug that looks like a model regression. When
+// this seam later grows de-duplication or result shaping, those must be
+// separate callbacks with their own tests, not extra branches in these two.
+func (e *Engine) toolCallbacks() ([]llmagent.BeforeToolCallback, []llmagent.AfterToolCallback) {
+	tr := e.Metrics()
+
+	before := func(ctx agent.ToolContext, t adktool.Tool, args map[string]any) (map[string]any, error) {
+		tr.Start(ctx.FunctionCallID(), t.Name(), args)
+		return nil, nil
+	}
+	after := func(ctx agent.ToolContext, t adktool.Tool, args, result map[string]any, err error) (map[string]any, error) {
+		tr.Finish(jellymetrics.CallMeta{
+			SessionID:    ctx.SessionID(),
+			InvocationID: ctx.InvocationID(),
+			Agent:        ctx.AgentName(),
+			CallID:       ctx.FunctionCallID(),
+			Tool:         t.Name(),
+		}, result, err)
+		return nil, nil
+	}
+	return []llmagent.BeforeToolCallback{before}, []llmagent.AfterToolCallback{after}
 }
 
 // Tools builds the built-in tool set: web_search always, the L1 core tools when
@@ -404,6 +466,8 @@ func (e *Engine) buildNode(name, description, provider, instruction string, tool
 		}
 	}
 
+	beforeTool, afterTool := e.toolCallbacks()
+
 	a, err := llmagent.New(llmagent.Config{
 		Name:        name,
 		Model:       mdl,
@@ -426,6 +490,13 @@ func (e *Engine) buildNode(name, description, provider, instruction string, tool
 		Tools:     tools,
 		Toolsets:  toolsets,  // external MCP servers (all enabled, or a selected subset)
 		SubAgents: subAgents, // delegation targets (transfer_to_agent), nil for a leaf
+
+		// Telemetry only — see toolCallbacks for why these must not return a
+		// value. OnToolErrorCallbacks is deliberately left unset: ADK calls
+		// AfterToolCallbacks for failures too, and hooking both would double
+		// count every error.
+		BeforeToolCallbacks: beforeTool,
+		AfterToolCallbacks:  afterTool,
 	})
 	if err != nil {
 		return nil, prov, fmt.Errorf("create agent: %w", err)
