@@ -7,6 +7,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 
 	"github.com/jelly-agent/jelly-agent/internal/config"
 	"github.com/jelly-agent/jelly-agent/internal/engine"
+	"github.com/jelly-agent/jelly-agent/internal/logging"
 	"github.com/jelly-agent/jelly-agent/internal/memory"
 	"github.com/jelly-agent/jelly-agent/internal/tracing"
 )
@@ -58,6 +60,20 @@ func loadConfig() (*config.Config, error) {
 	return config.LoadOrEnv(configPath)
 }
 
+// setupLogging installs the structured logger from config.
+//
+// It runs before anything else a command does, so a failure later in startup is
+// reported in the same format as everything after it.
+func setupLogging(cfg *config.Config) {
+	logging.Setup(logging.Config{
+		Level:     cfg.Logging.Level,
+		Format:    cfg.Logging.Format,
+		AddSource: cfg.Logging.AddSource,
+		Service:   "jelly-agent",
+		Version:   version,
+	})
+}
+
 // startTracing installs the span exporter for a command that runs an agent, and
 // returns the flush to defer.
 //
@@ -84,14 +100,14 @@ func startTracing(cfg *config.Config) func() {
 		CaptureContent: t.CaptureContent,
 	})
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "警告: 链路追踪未启用: %v\n", err)
+		slog.Warn("链路追踪未启用", logging.Err(err))
 		return func() {}
 	}
 	return func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		if err := shutdown(ctx); err != nil {
-			fmt.Fprintf(os.Stderr, "警告: 链路追踪 flush 失败: %v\n", err)
+			slog.Warn("链路追踪 flush 失败", logging.Err(err))
 		}
 	}
 }

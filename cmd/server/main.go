@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/jelly-agent/jelly-agent/internal/config"
 	"github.com/jelly-agent/jelly-agent/internal/engine"
+	"github.com/jelly-agent/jelly-agent/internal/logging"
 	"github.com/jelly-agent/jelly-agent/internal/server"
 	"github.com/jelly-agent/jelly-agent/web"
 )
@@ -23,25 +25,37 @@ func main() {
 	addr := envOr("JELLY_ADDR", "127.0.0.1:6185")
 	configPath := os.Getenv("JELLY_CONFIG")
 
+	// Install a default logger before anything can fail, so even a bad config
+	// path is reported in the same JSON stream as everything after it — this is
+	// a daemon, and its first error is usually the one a container log needs to
+	// carry. Re-installed below once the config says which level and format.
+	logging.Setup(logging.Config{Service: "jelly-agent"})
+
 	cfg, err := config.LoadOrEnv(configPath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: load config: %v\n", err)
+		slog.Error("加载配置失败", logging.Err(err), "path", configPath)
 		os.Exit(1)
 	}
+	logging.Setup(logging.Config{
+		Level:     cfg.Logging.Level,
+		Format:    cfg.Logging.Format,
+		AddSource: cfg.Logging.AddSource,
+		Service:   "jelly-agent",
+	})
 
 	if password, err := server.BootstrapAdmin(cfg); err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		slog.Error("初始化管理员账户失败", logging.Err(err))
 		os.Exit(1)
 	} else if password != "" {
 		fmt.Printf("\n首次管理员账户已创建：用户名 admin\n一次性初始密码：%s\n请立刻登录控制台并修改密码。\n\n", password)
 		cfg, err = config.LoadOrEnv(configPath)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "error: reload config: %v\n", err)
+			slog.Error("重新加载配置失败", logging.Err(err), "path", configPath)
 			os.Exit(1)
 		}
 	}
 	if err := server.ValidateAdmin(cfg.Web.Admin); err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		slog.Error("管理员配置不合法", logging.Err(err))
 		os.Exit(1)
 	}
 	eng := engine.New(cfg)
@@ -69,7 +83,7 @@ func main() {
 		fmt.Printf("jelly-agent dashboard 监听 http://%s  [%s]\n", addr, embedded)
 		fmt.Printf("配置来源: %s   默认 Provider: %s\n", cfg.SourcePath, cfg.DefaultProvider)
 		if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			fmt.Fprintf(os.Stderr, "error: server: %v\n", err)
+			slog.Error("HTTP 服务异常退出", logging.Err(err), "addr", addr)
 			stop()
 		}
 	}()
@@ -79,7 +93,7 @@ func main() {
 	shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := httpSrv.Shutdown(shutCtx); err != nil {
-		fmt.Fprintf(os.Stderr, "error: shutdown: %v\n", err)
+		slog.Error("关闭服务器失败", logging.Err(err))
 		os.Exit(1)
 	}
 }

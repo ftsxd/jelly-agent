@@ -2,8 +2,11 @@ package server
 
 import (
 	"context"
+	"log/slog"
 	"os"
 	"time"
+
+	"github.com/jelly-agent/jelly-agent/internal/logging"
 )
 
 // defaultConfigPoll is how often Watch checks the config file for changes.
@@ -38,14 +41,14 @@ func statSig(path string) (fileSig, bool) {
 func (s *Server) Watch(ctx context.Context) {
 	path := s.watchPath()
 	if path == "" {
-		s.logf("无配置文件，热重载监听未启用（Web 编辑仍即时生效）")
+		slog.Info("无配置文件，热重载监听未启用（Web 编辑仍即时生效）")
 		return
 	}
 	interval := s.pollInterval
 	if interval <= 0 {
 		interval = defaultConfigPoll
 	}
-	s.logf("正在监听配置变更: %s", path)
+	slog.Info("正在监听配置变更", "path", path)
 
 	last, _ := statSig(path)
 	t := time.NewTicker(interval)
@@ -61,10 +64,10 @@ func (s *Server) Watch(ctx context.Context) {
 			}
 			last = sig
 			if err := s.reload(); err != nil {
-				s.logf("配置热重载失败，沿用旧配置: %v", err)
+				slog.Error("配置热重载失败，沿用旧配置", logging.Err(err), "path", path)
 				continue
 			}
-			s.logf("配置已变更，热重载完成: %s", path)
+			slog.Info("配置已变更，热重载完成", "path", path)
 		}
 	}
 }

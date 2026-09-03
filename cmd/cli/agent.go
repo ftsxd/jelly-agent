@@ -30,6 +30,7 @@ func newAgentRunCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			setupLogging(eng.Config())
 			defer startTracing(eng.Config())()
 
 			a, prov, _, search, err := eng.BuildAgent(provider)

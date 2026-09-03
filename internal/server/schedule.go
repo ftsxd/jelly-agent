@@ -12,12 +12,15 @@ import (
 	adktool "google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/functiontool"
 	"google.golang.org/genai"
+	"log/slog"
 	"net/http"
 	"regexp"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/jelly-agent/jelly-agent/internal/logging"
 )
 
 type scheduler struct {
@@ -124,7 +127,7 @@ func (s *Server) StartSchedules(ctx context.Context) {
 		}
 		task := t
 		if _, err := c.AddFunc(task.Cron, func() { s.runSchedule(runCtx, task) }); err != nil {
-			s.logf("周期任务 %q Cron 无效: %v", task.Name, err)
+			slog.Error("周期任务 Cron 表达式无效", "task", task.Name, "cron", task.Cron, logging.Err(err))
 		}
 	}
 	s.schedule.mu.Lock()
@@ -165,7 +168,7 @@ func (s *Server) runSchedule(ctx context.Context, t config.ScheduleTask) {
 	s.schedule.mu.Lock()
 	if s.schedule.running[t.Name] {
 		s.schedule.mu.Unlock()
-		s.logf("周期任务 %q 仍在执行，跳过本次触发", t.Name)
+		slog.Warn("周期任务仍在执行，跳过本次触发", "task", t.Name)
 		return
 	}
 	s.schedule.running[t.Name] = true
@@ -190,7 +193,7 @@ func (s *Server) runSchedule(ctx context.Context, t config.ScheduleTask) {
 			if delay <= 0 {
 				delay = 30 * time.Second
 			}
-			s.logf("周期任务 %q 失败，%s 后重试（%d/%d）", t.Name, delay, attempt+1, t.RetryCount)
+			slog.Warn("周期任务失败，准备重试", "task", t.Name, "retry_in", delay.String(), "attempt", attempt+1, "max_retries", t.RetryCount)
 			select {
 			case <-ctx.Done():
 			case <-time.After(delay):
@@ -199,7 +202,7 @@ func (s *Server) runSchedule(ctx context.Context, t config.ScheduleTask) {
 	}
 	if err != nil {
 		_ = schedule.Record(t.Name, started, "failed", out, err.Error())
-		s.logf("周期任务 %q 失败: %v", t.Name, err)
+		slog.Error("周期任务失败", "task", t.Name, logging.Err(err))
 		return
 	}
 	_ = schedule.Record(t.Name, started, "succeeded", out, "")

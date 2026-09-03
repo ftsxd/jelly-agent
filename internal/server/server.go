@@ -6,12 +6,9 @@ package server
 
 import (
 	"encoding/json"
-	"fmt"
-	"io"
 	"io/fs"
-	"log"
+	"log/slog"
 	"net/http"
-	"os"
 	"sync"
 	"time"
 
@@ -31,7 +28,6 @@ type Server struct {
 	configPath string // explicit --config path for reloads ("" = auto-resolve)
 
 	pollInterval time.Duration // config-watch poll interval; 0 = defaultConfigPoll
-	out          io.Writer     // hot-reload notices; nil = os.Stderr
 
 	bots     botManager // running messaging-platform bots (DingTalk, …)
 	auth     *authManager
@@ -46,12 +42,12 @@ func New(eng *engine.Engine, staticFS fs.FS) *Server {
 	// and events were removed together (SQLite foreign keys are off, so ADK's
 	// cascade never fired). Best-effort: a fresh/empty DB simply has none.
 	if n, err := jellysession.PurgeOrphanEvents(""); err == nil && n > 0 {
-		log.Printf("[session] 清理孤儿事件 %d 条", n)
+		slog.Info("清理孤儿会话事件", "rows", n)
 	}
 	// Same for the L2 search index: drop rows whose session was deleted before
 	// the index was purged alongside it, so load_memory can't surface them.
 	if n, err := memory.PurgeOrphanIndex(""); err == nil && n > 0 {
-		log.Printf("[memory] 清理孤儿检索索引 %d 条", n)
+		slog.Info("清理孤儿检索索引", "rows", n)
 	}
 	s := &Server{eng: eng, static: staticFS, auth: newAuthManager()}
 	s.attachScheduleTools(eng)
@@ -162,16 +158,6 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 // writeErr sends a JSON error envelope: {"error": "..."}.
 func writeErr(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg})
-}
-
-// logf writes an operational notice (e.g. config hot-reload events) to s.out,
-// defaulting to stderr. Tests redirect it to a buffer or io.Discard.
-func (s *Server) logf(format string, args ...any) {
-	w := s.out
-	if w == nil {
-		w = os.Stderr
-	}
-	fmt.Fprintf(w, "[jelly] "+format+"\n", args...)
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {

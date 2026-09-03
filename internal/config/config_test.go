@@ -102,6 +102,7 @@ func TestSaveRoundTripsEverySection(t *testing.T) {
 			Temperature: &temp, MaxTokens: 2048, TimeoutSec: 90, MaxRetries: &retries,
 		}},
 		History: History{MaxTokens: &budget, KeepRecent: 4, ToolResultTokens: 500},
+		Logging: Logging{Level: "debug", Format: "text", AddSource: true},
 		Tracing: Tracing{
 			Enabled: true, Endpoint: "localhost:4317", Protocol: "grpc",
 			Service: "jelly", SampleRatio: &ratio, Insecure: true, CaptureContent: true,
@@ -146,6 +147,10 @@ func TestSaveRoundTripsEverySection(t *testing.T) {
 	}
 	if out.Web.Admin.Username != "admin" || out.Web.Admin.PasswordHash != "$2a$hash" {
 		t.Errorf("web/admin section lost: %+v", out.Web)
+	}
+	lg := out.Logging
+	if lg.Level != "debug" || lg.Format != "text" || !lg.AddSource {
+		t.Errorf("logging section lost on save: %+v", lg)
 	}
 	tr := out.Tracing
 	if !tr.Enabled || tr.Endpoint != "localhost:4317" || tr.Protocol != "grpc" ||

@@ -5,7 +5,10 @@
 // and the platform code only does protocol plumbing.
 package platform
 
-import "context"
+import (
+	"context"
+	"log/slog"
+)
 
 // ReplyFunc answers one inbound message. sessionKey identifies the conversation
 // (the caller maps it to a persistent session); it returns the assistant's final
@@ -18,8 +21,10 @@ type ReplyFunc func(ctx context.Context, sessionKey, text string) (string, error
 // returned. onUpdate may be nil to ignore the stream and just take the result.
 type StreamReplyFunc func(ctx context.Context, sessionKey, text string, onUpdate func(full string)) (string, error)
 
-// Logf is the minimal logger the server passes in (its "[jelly]" notices).
-type Logf func(format string, args ...any)
+// Logger is the structured logger the server passes in, already scoped with the
+// platform's name — so a bot logs "回复失败" with fields instead of formatting
+// its own name into every message.
+type Logger = *slog.Logger
 
 // State is a bot's connection lifecycle state.
 type State string

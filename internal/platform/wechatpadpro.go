@@ -16,6 +16,8 @@ import (
 
 	"github.com/gorilla/websocket"
 	qrcode "github.com/skip2/go-qrcode"
+
+	"github.com/jelly-agent/jelly-agent/internal/logging"
 )
 
 // weChatPadProBot connects personal WeChat through a WeChatPadPro gateway (an
@@ -31,7 +33,7 @@ type weChatPadProBot struct {
 	wsBase   string // wechatpad_ws
 	adminKey string
 	reply    ReplyFunc
-	logf     Logf
+	log      Logger
 	http     *http.Client
 
 	mu     sync.Mutex
@@ -45,7 +47,7 @@ type weChatPadProBot struct {
 
 // NewWeChatPadProBot builds a WeChatPadPro-backed personal-WeChat bot from its
 // settings map (wechatpad_url, wechatpad_ws, admin_key, token, wxid).
-func NewWeChatPadProBot(name string, settings map[string]string, reply ReplyFunc, logf Logf) Bot {
+func NewWeChatPadProBot(name string, settings map[string]string, reply ReplyFunc, log Logger) Bot {
 	return &weChatPadProBot{
 		name:     name,
 		httpBase: settings["wechatpad_url"],
@@ -54,7 +56,7 @@ func NewWeChatPadProBot(name string, settings map[string]string, reply ReplyFunc
 		token:    settings["token"],
 		wxid:     settings["wxid"],
 		reply:    reply,
-		logf:     logf,
+		log:      log,
 		http:     &http.Client{Timeout: 30 * time.Second},
 		state:    StateStopped,
 	}
@@ -131,7 +133,7 @@ func (b *weChatPadProBot) run(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
-		b.logf("微信机器人 %q 连接断开，5s 后重连: %v", b.name, err)
+		b.log.Warn("微信机器人连接断开，准备重连", "retry_in", "5s", logging.Err(err))
 		b.setStatus(StateConnecting, "重连中", "")
 		if !sleepCtx(ctx, 5*time.Second) {
 			return
@@ -149,7 +151,7 @@ func (b *weChatPadProBot) ensureLoggedIn(ctx context.Context) error {
 	if err := b.refreshQR(ctx); err != nil {
 		return err
 	}
-	b.logf("微信机器人 %q 等待扫码登录（二维码已在「消息绑定」页显示）", b.name)
+	b.log.Info("微信机器人等待扫码登录（二维码已在「消息绑定」页显示）")
 
 	const qrTTL = 20 // re-fetch the QR roughly every 20 polls (~60s)
 	for polls := 0; ctx.Err() == nil; polls++ {
@@ -192,7 +194,7 @@ func (b *weChatPadProBot) runWS(ctx context.Context) error {
 	go func() { <-ctx.Done(); conn.Close() }()
 
 	b.setStatus(StateOnline, "", "")
-	b.logf("微信机器人 %q 已上线（WeChatPadPro）", b.name)
+	b.log.Info("微信机器人已上线（WeChatPadPro）")
 
 	for {
 		_, raw, err := conn.ReadMessage()
@@ -212,14 +214,14 @@ func (b *weChatPadProBot) handleMessage(ctx context.Context, raw []byte) {
 	}
 	answer, err := b.reply(ctx, key, text)
 	if err != nil {
-		b.logf("微信机器人 %q 处理消息失败: %v", b.name, err)
+		b.log.Error("微信机器人处理消息失败", logging.Err(err))
 		answer = "处理消息出错：" + err.Error()
 	}
 	if strings.TrimSpace(answer) == "" {
 		answer = "（无回复）"
 	}
 	if err := b.sendText(ctx, key, answer); err != nil {
-		b.logf("微信机器人 %q 回复失败: %v", b.name, err)
+		b.log.Error("微信机器人回复失败", logging.Err(err))
 	}
 }
 
@@ -231,7 +233,7 @@ func (b *weChatPadProBot) setSelfWxid(wxid string) {
 
 func (b *weChatPadProBot) fail(msg string) {
 	b.setStatus(StateError, msg, "")
-	b.logf("微信机器人 %q: %s", b.name, msg)
+	b.log.Info(msg)
 }
 
 // --- WeChatPadPro HTTP API ---------------------------------------------------

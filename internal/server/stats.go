@@ -1,7 +1,7 @@
 package server
 
 import (
-	"log"
+	"log/slog"
 	"net/http"
 	"sort"
 	"time"
@@ -10,6 +10,8 @@ import (
 
 	"github.com/jelly-agent/jelly-agent/internal/engine"
 	"github.com/jelly-agent/jelly-agent/internal/metrics"
+
+	"github.com/jelly-agent/jelly-agent/internal/logging"
 )
 
 // statsResponse is the aggregate the Monitor view renders.
@@ -181,7 +183,7 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	// gap this merge exists to expose.
 	timing := map[string]metrics.ToolLatency{}
 	if sum, err := eng.Metrics().Summary(time.Time{}); err != nil {
-		log.Printf("stats: tool timing unavailable: %v", err)
+		slog.Warn("工具耗时数据不可用", logging.Err(err))
 	} else {
 		out.Telemetry.Calls = sum.Calls
 		if !sum.Since.IsZero() {

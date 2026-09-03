@@ -52,6 +52,14 @@ type History struct {
 	ToolResultTokens int `mapstructure:"tool_result_tokens" yaml:"tool_result_tokens,omitempty"`
 }
 
+// Logging configures the process-wide structured logger. JSON is the default
+// because these records are meant to be shipped; text exists for local work.
+type Logging struct {
+	Level     string `mapstructure:"level" yaml:"level,omitempty"`   // debug|info|warn|error, 空为 info
+	Format    string `mapstructure:"format" yaml:"format,omitempty"` // json（默认）|text
+	AddSource bool   `mapstructure:"add_source" yaml:"add_source,omitempty"`
+}
+
 // Tracing configures OpenTelemetry span export. ADK already instruments the
 // agent loop against the global TracerProvider, so this section only decides
 // where those spans go — see internal/tracing.
@@ -78,6 +86,7 @@ type Config struct {
 	Memory          Memory     `mapstructure:"memory" yaml:"memory"`
 	History         History    `mapstructure:"history" yaml:"history,omitempty"`
 	Tracing         Tracing    `mapstructure:"tracing" yaml:"tracing,omitempty"`
+	Logging         Logging    `mapstructure:"logging" yaml:"logging,omitempty"`
 	Skills          Skills     `mapstructure:"skills" yaml:"skills,omitempty"`
 	Sandbox         Sandbox    `mapstructure:"sandbox" yaml:"sandbox,omitempty"`
 	Web             Web        `mapstructure:"web" yaml:"web,omitempty"`
@@ -312,6 +321,7 @@ func Save(c *Config, path string) error {
 		Memory          *Memory                      `yaml:"memory,omitempty"`
 		History         *History                     `yaml:"history,omitempty"`
 		Tracing         *Tracing                     `yaml:"tracing,omitempty"`
+		Logging         *Logging                     `yaml:"logging,omitempty"`
 		Skills          *Skills                      `yaml:"skills,omitempty"`
 		Sandbox         *Sandbox                     `yaml:"sandbox,omitempty"`
 		Web             *Web                         `yaml:"web,omitempty"`
@@ -342,6 +352,10 @@ func Save(c *Config, path string) error {
 	if c.Tracing != (Tracing{}) {
 		tr := c.Tracing
 		p.Tracing = &tr
+	}
+	if c.Logging != (Logging{}) {
+		lg := c.Logging
+		p.Logging = &lg
 	}
 	if c.History != (History{}) {
 		h := c.History

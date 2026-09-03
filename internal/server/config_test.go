@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -78,7 +79,10 @@ func TestConfigFileHotReload(t *testing.T) {
 	}
 	s := New(engine.New(cfg), nil).WithConfigPath(path)
 	s.pollInterval = 5 * time.Millisecond
-	s.out = io.Discard
+	// The watcher logs each reload; silence it so the test output stays about
+	// the test. Logging is process-wide now, so this is a logger swap rather
+	// than a per-server sink.
+	quietLogs(t)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -142,4 +146,12 @@ func TestProviderCreateRequiresFields(t *testing.T) {
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400 (missing base_url/model)", w.Code)
 	}
+}
+
+// quietLogs points the default logger at io.Discard for the duration of a test.
+func quietLogs(t *testing.T) {
+	t.Helper()
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(io.Discard, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
 }

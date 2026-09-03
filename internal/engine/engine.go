@@ -7,7 +7,7 @@ package engine
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"strings"
 	"sync"
 	"time"
@@ -31,6 +31,8 @@ import (
 	"github.com/jelly-agent/jelly-agent/internal/skill"
 	jellytool "github.com/jelly-agent/jelly-agent/internal/tool"
 	jellytracing "github.com/jelly-agent/jelly-agent/internal/tracing"
+
+	"github.com/jelly-agent/jelly-agent/internal/logging"
 )
 
 // Wire a default audit sink so every sandboxed script run leaves a log line for
@@ -43,8 +45,9 @@ func init() {
 		} else if ev.Err != "" {
 			status = "start-error: " + ev.Err
 		}
-		log.Printf("[sandbox] backend=%s file=%q args=%v %s dur=%s",
-			ev.Backend, ev.File, ev.Args, status, ev.Duration.Round(time.Millisecond))
+		slog.Info("沙箱执行",
+			"backend", ev.Backend, "file", ev.File, "args", ev.Args,
+			"status", status, "duration_ms", ev.Duration.Milliseconds())
 	}
 }
 
@@ -107,7 +110,7 @@ func (e *Engine) Close() {
 		e.mcpCancel()
 	}
 	if err := e.metrics.Close(); err != nil {
-		log.Printf("metrics: close: %v", err)
+		slog.Warn("关闭指标存储失败", logging.Err(err))
 	}
 }
 
@@ -192,13 +195,13 @@ func (e *Engine) Metrics() *jellymetrics.Tracker {
 	e.metricsOnce.Do(func() {
 		dbPath, err := jellysession.DefaultDBPath()
 		if err != nil {
-			log.Printf("metrics: resolve db path: %v (telemetry off)", err)
+			slog.Warn("无法解析指标库路径，埋点已关闭", logging.Err(err))
 			e.metrics = jellymetrics.NewTracker(nil)
 			return
 		}
 		rec, err := jellymetrics.NewRecorder(dbPath)
 		if err != nil {
-			log.Printf("metrics: open store: %v (telemetry off)", err)
+			slog.Warn("无法打开指标存储，埋点已关闭", logging.Err(err))
 			rec = nil
 		}
 		e.metrics = jellymetrics.NewTracker(rec)
@@ -455,8 +458,12 @@ func (e *Engine) withCompaction(llm adkmodel.LLM, agentName string, canRecall bo
 			TruncatedTools:  r.Truncated,
 		})
 		if r.Changed() {
-			log.Printf("[jelly] 上下文压缩 (%s): %d→%d token，省略 %d 条、截断 %d 个工具结果",
-				agentName, r.BeforeTokens, r.AfterTokens, r.Dropped, r.Truncated)
+			// Context carries the active span, so this line lands on the same
+			// trace as the model call it shortened.
+			slog.InfoContext(ctx, "上下文压缩",
+				"agent", agentName,
+				"tokens_before", r.BeforeTokens, "tokens_after", r.AfterTokens,
+				"dropped", r.Dropped, "truncated", r.Truncated)
 		}
 	})
 }

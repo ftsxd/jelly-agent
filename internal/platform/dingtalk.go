@@ -9,6 +9,8 @@ import (
 
 	"github.com/open-dingtalk/dingtalk-stream-sdk-go/chatbot"
 	"github.com/open-dingtalk/dingtalk-stream-sdk-go/client"
+
+	"github.com/jelly-agent/jelly-agent/internal/logging"
 )
 
 // dingTalkBot is a DingTalk Stream-mode chatbot. It connects out over a
@@ -22,7 +24,7 @@ type dingTalkBot struct {
 	cardTemplateID string // when set, replies stream into a DingTalk AI card
 	stream         StreamReplyFunc
 	cards          *dingCardClient // non-nil iff cardTemplateID is set
-	logf           Logf
+	log            Logger
 
 	mu     sync.Mutex
 	cli    *client.StreamClient
@@ -31,13 +33,13 @@ type dingTalkBot struct {
 }
 
 // NewDingTalkBot builds a DingTalk bot. stream runs one engine turn for an
-// incoming message; logf receives operational notices. When cardTemplateID is
+// incoming message; log receives operational notices. When cardTemplateID is
 // non-empty, replies stream incrementally into a DingTalk AI card bound to that
 // template; otherwise they're sent as a single Markdown message.
-func NewDingTalkBot(name, clientID, clientSecret, cardTemplateID string, stream StreamReplyFunc, logf Logf) Bot {
+func NewDingTalkBot(name, clientID, clientSecret, cardTemplateID string, stream StreamReplyFunc, log Logger) Bot {
 	b := &dingTalkBot{
 		name: name, clientID: clientID, clientSecret: clientSecret,
-		cardTemplateID: cardTemplateID, stream: stream, logf: logf, state: StateStopped,
+		cardTemplateID: cardTemplateID, stream: stream, log: log, state: StateStopped,
 	}
 	if cardTemplateID != "" {
 		b.cards = newDingCardClient(clientID, clientSecret)
@@ -76,7 +78,7 @@ func (b *dingTalkBot) Start(ctx context.Context) error {
 	b.cli = cli
 	b.state, b.detail = StateOnline, ""
 	b.mu.Unlock()
-	b.logf("钉钉机器人 %q 已连接（Stream 模式）", b.name)
+	b.log.Info("钉钉机器人已连接（Stream 模式）")
 	return nil
 }
 
@@ -115,7 +117,7 @@ func (b *dingTalkBot) replyViaText(ctx context.Context, data *chatbot.BotCallbac
 	replier := chatbot.NewChatbotReplier()
 	answer, err := b.stream(ctx, data.ConversationId, text, nil)
 	if err != nil {
-		b.logf("钉钉机器人 %q 处理消息失败: %v", b.name, err)
+		b.log.Error("钉钉机器人处理消息失败", logging.Err(err))
 		_ = replier.SimpleReplyText(ctx, data.SessionWebhook, []byte("处理消息出错："+err.Error()))
 		return
 	}
@@ -123,7 +125,7 @@ func (b *dingTalkBot) replyViaText(ctx context.Context, data *chatbot.BotCallbac
 		answer = "（无回复）"
 	}
 	if err := replier.SimpleReplyMarkdown(ctx, data.SessionWebhook, []byte("jelly-agent"), []byte(answer)); err != nil {
-		b.logf("钉钉机器人 %q 回复失败: %v", b.name, err)
+		b.log.Error("钉钉机器人回复失败", logging.Err(err))
 	}
 }
 
@@ -132,7 +134,7 @@ func (b *dingTalkBot) replyViaText(ctx context.Context, data *chatbot.BotCallbac
 func (b *dingTalkBot) replyViaCard(ctx context.Context, data *chatbot.BotCallbackDataModel, text string) {
 	trackID, err := b.cards.createCard(ctx, b.cardTemplateID, data.ConversationType, data.ConversationId, data.SenderStaffId, text)
 	if err != nil {
-		b.logf("钉钉机器人 %q 创建卡片失败，回退文本: %v", b.name, err)
+		b.log.Warn("钉钉卡片创建失败，回退为文本", logging.Err(err))
 		b.replyViaText(ctx, data, text)
 		return
 	}
@@ -144,18 +146,18 @@ func (b *dingTalkBot) replyViaCard(ctx context.Context, data *chatbot.BotCallbac
 		}
 		lastPush = time.Now()
 		if err := b.cards.streamCard(ctx, trackID, full, false); err != nil {
-			b.logf("钉钉机器人 %q 卡片更新失败: %v", b.name, err)
+			b.log.Warn("钉钉卡片更新失败", logging.Err(err))
 		}
 	}
 	answer, err := b.stream(ctx, data.ConversationId, text, onUpdate)
 	if err != nil {
-		b.logf("钉钉机器人 %q 处理消息失败: %v", b.name, err)
+		b.log.Error("钉钉机器人处理消息失败", logging.Err(err))
 		answer = "处理消息出错：" + err.Error()
 	}
 	if strings.TrimSpace(answer) == "" {
 		answer = "（无回复）"
 	}
 	if err := b.cards.streamCard(ctx, trackID, answer, true); err != nil {
-		b.logf("钉钉机器人 %q 卡片收尾失败: %v", b.name, err)
+		b.log.Warn("钉钉卡片收尾失败", logging.Err(err))
 	}
 }

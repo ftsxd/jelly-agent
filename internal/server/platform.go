@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
 	"sort"
@@ -17,6 +18,8 @@ import (
 	"github.com/jelly-agent/jelly-agent/internal/config"
 	"github.com/jelly-agent/jelly-agent/internal/engine"
 	"github.com/jelly-agent/jelly-agent/internal/platform"
+
+	"github.com/jelly-agent/jelly-agent/internal/logging"
 )
 
 // botReplyTimeout bounds one platform-driven engine turn, so a stuck model can't
@@ -71,13 +74,13 @@ func (s *Server) restartBots(cfg *config.Config) {
 		}
 		bot, err := s.buildBot(pb)
 		if err != nil {
-			s.logf("平台 %q 跳过: %v", pb.Name, err)
+			slog.Warn("平台已跳过", "platform", pb.Name, logging.Err(err))
 			continue
 		}
 		started = append(started, bot)
 		go func(b platform.Bot, name string) {
 			if err := b.Start(ctx); err != nil {
-				s.logf("平台 %q 启动失败: %v", name, err)
+				slog.Error("平台启动失败", "platform", name, logging.Err(err))
 			}
 		}(bot, pb.Name)
 	}
@@ -126,12 +129,16 @@ func (s *Server) buildBot(pb config.PlatformBot) (platform.Bot, error) {
 		}
 	}
 
+	// Scope the logger with the platform's name once, so every line a bot
+	// emits is attributable without the bot formatting its own name in.
+	botLog := slog.With("platform", pb.Name, "type", pb.Type)
+
 	switch pb.Type {
 	case "dingtalk":
 		if pb.ClientID == "" || pb.ClientSecret == "" {
 			return nil, fmt.Errorf("dingtalk 需要 client_id 与 client_secret")
 		}
-		return platform.NewDingTalkBot(pb.Name, pb.ClientID, pb.ClientSecret, pb.Settings["card_template_id"], streamReplyWith("dingtalk-"), s.logf), nil
+		return platform.NewDingTalkBot(pb.Name, pb.ClientID, pb.ClientSecret, pb.Settings["card_template_id"], streamReplyWith("dingtalk-"), botLog), nil
 	case "wechatpadpro":
 		if pb.Settings["wechatpad_url"] == "" || pb.Settings["wechatpad_ws"] == "" {
 			return nil, fmt.Errorf("wechatpadpro 需要 wechatpad_url 与 wechatpad_ws")
@@ -139,7 +146,7 @@ func (s *Server) buildBot(pb config.PlatformBot) (platform.Bot, error) {
 		if pb.Settings["admin_key"] == "" && pb.Settings["token"] == "" {
 			return nil, fmt.Errorf("wechatpadpro 需要 admin_key 或 token")
 		}
-		return platform.NewWeChatPadProBot(pb.Name, pb.Settings, replyWith("wechat-"), s.logf), nil
+		return platform.NewWeChatPadProBot(pb.Name, pb.Settings, replyWith("wechat-"), botLog), nil
 	default:
 		return nil, fmt.Errorf("不支持的平台类型 %q", pb.Type)
 	}
