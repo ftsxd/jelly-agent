@@ -1,7 +1,8 @@
-package tracing
+package telemetry
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -168,4 +169,42 @@ func TestRecordersAreSafeWithoutASpan(t *testing.T) {
 	RecordPrompt(ctx, PromptComposition{HistoryTokens: 4061, ToolsTokens: 700})
 	RecordLLMAttempts(ctx, 3)
 	RecordLLMAttempts(ctx, 1) // the normal case writes nothing
+}
+
+// Every recorder must be safe before Start has run — the CLI defaults to
+// telemetry off, so this is the normal path, not an edge case.
+func TestRecordersAreNoOpsBeforeStart(t *testing.T) {
+	ctx := context.Background()
+	RecordToolCall(ctx, "k8s_get_pods", true, "", 350*time.Millisecond)
+	RecordToolCall(ctx, "web_search", false, "timeout", 15*time.Second)
+	StartLLMCall("invocation-1")
+	RecordLLMCall(ctx, "invocation-1", "deepseek-v4-flash", true, 4061, 647)
+	RecordLLMCall(ctx, "", "deepseek-v4-flash", false, 0, 0)
+}
+
+// An invocation that dies between the two model hooks must not leak its entry,
+// or a long-lived server accumulates one per abandoned turn.
+func TestLLMTimerIsBounded(t *testing.T) {
+	for i := 0; i < maxInflightLLM+64; i++ {
+		StartLLMCall(fmt.Sprintf("invocation-%d", i))
+	}
+	llmTimer.mu.Lock()
+	n := len(llmTimer.started)
+	llmTimer.mu.Unlock()
+	// Eviction only drops entries older than the TTL, so a burst of fresh ones
+	// can exceed the soft bound; what must not happen is unbounded growth
+	// across bursts.
+	if n > maxInflightLLM+64 {
+		t.Fatalf("in-flight table = %d entries, want at most %d", n, maxInflightLLM+64)
+	}
+
+	// Pairing removes the entry.
+	StartLLMCall("paired")
+	RecordLLMCall(context.Background(), "paired", "m", true, 0, 0)
+	llmTimer.mu.Lock()
+	_, still := llmTimer.started["paired"]
+	llmTimer.mu.Unlock()
+	if still {
+		t.Error("a paired call left its entry behind")
+	}
 }

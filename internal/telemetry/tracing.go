@@ -1,26 +1,37 @@
-// Package tracing exports the agent's OpenTelemetry spans to an OTLP endpoint.
+// Package telemetry exports the agent's OpenTelemetry signals to an OTLP
+// endpoint: traces, metrics, and — when content capture is on — logs.
 //
-// There is no instrumentation code here, on purpose. ADK already traces the
+// Traces need no instrumentation code here, on purpose. ADK already traces the
 // whole agent loop through the global TracerProvider — one span per agent
 // invocation, one per model call (carrying gen_ai.usage.* token counts), one
 // per tool execution — so installing a provider is the entire job. Adding our
 // own spans around the same calls would duplicate what already exists and make
 // the waterfall harder to read, not easier.
 //
-// This is separate from internal/metrics, and neither replaces the other.
-// Traces answer "what happened in this one run, and where did the time go";
-// they are typically sampled and kept for days. The metrics tables answer
-// "what is the success rate of this tool over the last two months"; they are
-// unsampled and kept indefinitely. A trace backend is the wrong place for the
-// second question and a SQL table is a poor answer to the first.
-package tracing
+// Metrics are the opposite: ADK publishes none, so every instrument in
+// meters.go is ours. The numbers were already being computed for the SQLite
+// tables and the span attributes; the instruments publish a second copy to
+// somewhere Prometheus can scrape.
+//
+// This package is separate from internal/metrics, and neither replaces the
+// other. Both names contain "metric" and they answer different questions:
+//
+//   - internal/metrics owns the durable record — every tool call, unsampled,
+//     kept indefinitely, queried per task and per scenario. That is what an
+//     evaluation harness reads and what a two-month accuracy figure comes from.
+//   - this package owns the export pipeline — spans for one run, and
+//     aggregated series for dashboards and alerts. Sampled, short-lived, and
+//     unable to answer a question about a specific past task.
+package telemetry
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 
+	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploggrpc"
 	"go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploghttp"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace"
@@ -117,7 +128,7 @@ func Start(ctx context.Context, cfg Config) (Shutdown, error) {
 		semconv.ServiceVersionKey.String(cfg.Version),
 	))
 	if err != nil {
-		return noop, fmt.Errorf("tracing: build resource: %w", err)
+		return noop, fmt.Errorf("telemetry: build resource: %w", err)
 	}
 
 	tp := sdktrace.NewTracerProvider(
@@ -150,11 +161,34 @@ func Start(ctx context.Context, cfg Config) (Shutdown, error) {
 		if lp != nil {
 			_ = lp.Shutdown(ctx)
 		}
-		return noop, fmt.Errorf("tracing: init adk providers: %w", err)
+		return noop, fmt.Errorf("telemetry: init adk providers: %w", err)
 	}
 	providers.SetGlobalOtelProviders()
 
-	return func(ctx context.Context) error { return providers.Shutdown(ctx) }, nil
+	// Metrics are ours end to end — ADK publishes none — so the meter provider
+	// is built and installed here rather than handed to ADK's helper.
+	mp, err := newMeterProvider(ctx, cfg, res)
+	if err != nil {
+		_ = providers.Shutdown(ctx)
+		return noop, err
+	}
+	ms, err := buildInstruments(mp)
+	if err != nil {
+		_ = providers.Shutdown(ctx)
+		_ = mp.Shutdown(ctx)
+		return noop, fmt.Errorf("telemetry: build instruments: %w", err)
+	}
+	otel.SetMeterProvider(mp)
+	instruments.Store(ms)
+
+	return func(ctx context.Context) error {
+		// Metrics first: the periodic reader holds up to exportInterval of
+		// unsent points, and they are the ones describing the run that just
+		// ended.
+		instruments.Store(nil)
+		err := mp.Shutdown(ctx)
+		return errors.Join(err, providers.Shutdown(ctx))
+	}, nil
 }
 
 // newLoggerProvider builds the pipeline that carries prompt and reply content.
@@ -171,7 +205,7 @@ func newLoggerProvider(ctx context.Context, cfg Config, res *resource.Resource) 
 		}
 		e, err := otlploggrpc.New(ctx, o...)
 		if err != nil {
-			return nil, fmt.Errorf("tracing: otlp grpc log exporter: %w", err)
+			return nil, fmt.Errorf("telemetry: otlp grpc log exporter: %w", err)
 		}
 		return sdklog.NewLoggerProvider(
 			sdklog.WithProcessor(sdklog.NewBatchProcessor(e)),
@@ -184,14 +218,14 @@ func newLoggerProvider(ctx context.Context, cfg Config, res *resource.Resource) 
 		}
 		e, err := otlploghttp.New(ctx, o...)
 		if err != nil {
-			return nil, fmt.Errorf("tracing: otlp http log exporter: %w", err)
+			return nil, fmt.Errorf("telemetry: otlp http log exporter: %w", err)
 		}
 		return sdklog.NewLoggerProvider(
 			sdklog.WithProcessor(sdklog.NewBatchProcessor(e)),
 			sdklog.WithResource(res),
 		), nil
 	default:
-		return nil, fmt.Errorf("tracing: unknown protocol %q (want %q or %q)", cfg.Protocol, ProtocolGRPC, ProtocolHTTP)
+		return nil, fmt.Errorf("telemetry: unknown protocol %q (want %q or %q)", cfg.Protocol, ProtocolGRPC, ProtocolHTTP)
 	}
 }
 
@@ -216,7 +250,7 @@ func newExporter(ctx context.Context, cfg Config) (*otlptrace.Exporter, error) {
 		}
 		exp, err := otlptracegrpc.New(ctx, opts...)
 		if err != nil {
-			return nil, fmt.Errorf("tracing: otlp grpc exporter: %w", err)
+			return nil, fmt.Errorf("telemetry: otlp grpc exporter: %w", err)
 		}
 		return exp, nil
 	case ProtocolHTTP:
@@ -226,11 +260,11 @@ func newExporter(ctx context.Context, cfg Config) (*otlptrace.Exporter, error) {
 		}
 		exp, err := otlptracehttp.New(ctx, opts...)
 		if err != nil {
-			return nil, fmt.Errorf("tracing: otlp http exporter: %w", err)
+			return nil, fmt.Errorf("telemetry: otlp http exporter: %w", err)
 		}
 		return exp, nil
 	default:
-		return nil, fmt.Errorf("tracing: unknown protocol %q (want %q or %q)", cfg.Protocol, ProtocolGRPC, ProtocolHTTP)
+		return nil, fmt.Errorf("telemetry: unknown protocol %q (want %q or %q)", cfg.Protocol, ProtocolGRPC, ProtocolHTTP)
 	}
 }
 

@@ -18,7 +18,7 @@ import (
 	"github.com/jelly-agent/jelly-agent/internal/engine"
 	"github.com/jelly-agent/jelly-agent/internal/logging"
 	"github.com/jelly-agent/jelly-agent/internal/memory"
-	"github.com/jelly-agent/jelly-agent/internal/tracing"
+	"github.com/jelly-agent/jelly-agent/internal/telemetry"
 )
 
 // appName and userID are sourced from the engine so the CLI and web server
@@ -89,7 +89,7 @@ func startTracing(cfg *config.Config) func() {
 	if t.SampleRatio != nil {
 		ratio = *t.SampleRatio
 	}
-	shutdown, err := tracing.Start(context.Background(), tracing.Config{
+	shutdown, err := telemetry.Start(context.Background(), telemetry.Config{
 		Enabled:        t.Enabled,
 		Endpoint:       t.Endpoint,
 		Protocol:       t.Protocol,

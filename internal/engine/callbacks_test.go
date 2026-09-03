@@ -6,6 +6,8 @@ import (
 	"testing"
 
 	"google.golang.org/adk/agent"
+	adkmodel "google.golang.org/adk/model"
+	"google.golang.org/genai"
 
 	"github.com/jelly-agent/jelly-agent/internal/config"
 	jellymetrics "github.com/jelly-agent/jelly-agent/internal/metrics"
@@ -101,5 +103,53 @@ func TestToolCallbacksPairStartAndFinish(t *testing.T) {
 	}
 	if got := e.Metrics().Pending(); got != 0 {
 		t.Errorf("Pending = %d after after(), want 0", got)
+	}
+}
+
+type fakeCallbackCtx struct {
+	agent.StrictContextMock
+}
+
+func (f *fakeCallbackCtx) InvocationID() string { return "invocation-1" }
+func (f *fakeCallbackCtx) SessionID() string    { return "session-1" }
+func (f *fakeCallbackCtx) AgentName() string    { return "jelly" }
+
+// The model hooks carry the same hazard as the tool hooks: ADK reads a non-nil
+// return as "use this response instead", so a measurement hook that returns a
+// value replaces the model's answer with nothing. That failure looks like the
+// model going silent, not like a telemetry bug.
+func TestModelCallbacksNeverAlterExecution(t *testing.T) {
+	e := newTestEngine(t)
+	before, after := e.modelCallbacks("deepseek-v4-flash")
+	if len(before) != 1 || len(after) != 1 {
+		t.Fatalf("callbacks = %d before / %d after, want 1 each", len(before), len(after))
+	}
+
+	ctx := &fakeCallbackCtx{agent.StrictContextMock{Ctx: context.Background()}}
+
+	got, err := before[0](ctx, &adkmodel.LLMRequest{Model: "deepseek-v4-flash"})
+	if got != nil || err != nil {
+		t.Fatalf("before = (%v, %v), want (nil, nil) — a non-nil result replaces the model call", got, err)
+	}
+
+	cases := []struct {
+		name string
+		resp *adkmodel.LLMResponse
+		err  error
+	}{
+		{"with usage", &adkmodel.LLMResponse{
+			ModelVersion:  "deepseek-v4-flash-0925",
+			UsageMetadata: &genai.GenerateContentResponseUsageMetadata{PromptTokenCount: 4061, CandidatesTokenCount: 647},
+		}, nil},
+		{"no usage metadata", &adkmodel.LLMResponse{}, nil},
+		{"nil response", nil, errors.New("upstream 503")},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := after[0](ctx, tc.resp, tc.err)
+			if got != nil || err != nil {
+				t.Fatalf("after = (%v, %v), want (nil, nil) — a non-nil return replaces the response", got, err)
+			}
+		})
 	}
 }

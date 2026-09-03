@@ -62,7 +62,7 @@ type Logging struct {
 
 // Tracing configures OpenTelemetry span export. ADK already instruments the
 // agent loop against the global TracerProvider, so this section only decides
-// where those spans go — see internal/tracing.
+// where those spans go — see internal/telemetry.
 type Tracing struct {
 	Enabled  bool   `mapstructure:"enabled" yaml:"enabled"`
 	Endpoint string `mapstructure:"endpoint" yaml:"endpoint,omitempty"` // host:port, no scheme

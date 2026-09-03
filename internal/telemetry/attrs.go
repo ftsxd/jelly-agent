@@ -1,4 +1,4 @@
-package tracing
+package telemetry
 
 import (
 	"context"
@@ -56,9 +56,16 @@ type PromptComposition struct {
 }
 
 // RecordPrompt annotates the span in ctx — ADK's generate_content span — with
-// the composition of the request that produced it. A context without a
-// recording span is a no-op, so callers need no guard.
+// the composition of the request that produced it, and publishes the same
+// numbers as metrics.
+//
+// Both destinations get the same data for different questions: the span
+// explains one turn, the histogram shows the history share creeping up across
+// a week. A context without a recording span still records metrics, so
+// dashboards keep working when tracing is sampled down.
 func RecordPrompt(ctx context.Context, c PromptComposition) {
+	recordPromptMetrics(ctx, c)
+
 	span := trace.SpanFromContext(ctx)
 	if !span.IsRecording() {
 		return

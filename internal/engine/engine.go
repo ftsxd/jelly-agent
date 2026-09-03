@@ -29,8 +29,8 @@ import (
 	"github.com/jelly-agent/jelly-agent/internal/sandbox"
 	jellysession "github.com/jelly-agent/jelly-agent/internal/session"
 	"github.com/jelly-agent/jelly-agent/internal/skill"
+	jellytelemetry "github.com/jelly-agent/jelly-agent/internal/telemetry"
 	jellytool "github.com/jelly-agent/jelly-agent/internal/tool"
-	jellytracing "github.com/jelly-agent/jelly-agent/internal/tracing"
 
 	"github.com/jelly-agent/jelly-agent/internal/logging"
 )
@@ -237,16 +237,54 @@ func (e *Engine) toolCallbacks() ([]llmagent.BeforeToolCallback, []llmagent.Afte
 		return nil, nil
 	}
 	after := func(ctx agent.ToolContext, t adktool.Tool, args, result map[string]any, err error) (map[string]any, error) {
-		tr.Finish(jellymetrics.CallMeta{
+		row := tr.Finish(jellymetrics.CallMeta{
 			SessionID:    ctx.SessionID(),
 			InvocationID: ctx.InvocationID(),
 			Agent:        ctx.AgentName(),
 			CallID:       ctx.FunctionCallID(),
 			Tool:         t.Name(),
 		}, result, err)
+		// The same judgement, published twice for two different questions: the
+		// row answers "what did this task do", the metric answers "how is this
+		// tool trending". Finish already decided success and cause, so the
+		// metric cannot disagree with the table.
+		jellytelemetry.RecordToolCall(ctx, row.Tool, row.OK, string(row.ErrKind), row.Duration)
 		return nil, nil
 	}
 	return []llmagent.BeforeToolCallback{before}, []llmagent.AfterToolCallback{after}
+}
+
+// modelCallbacks time model calls and publish their token usage.
+//
+// Same invariant as the tool hooks and for the same reason: ADK treats a
+// non-nil return from either as "use this response instead", so a measurement
+// hook that returns a value replaces the model's answer with nothing.
+//
+// Token counts come from the response's usage metadata, which is also what
+// ADK's generate_content span reports — this publishes them as a counter so a
+// dashboard can show spend over a window, which a span cannot.
+func (e *Engine) modelCallbacks(modelName string) ([]llmagent.BeforeModelCallback, []llmagent.AfterModelCallback) {
+	before := func(ctx agent.CallbackContext, req *adkmodel.LLMRequest) (*adkmodel.LLMResponse, error) {
+		jellytelemetry.StartLLMCall(ctx.InvocationID())
+		return nil, nil
+	}
+	after := func(ctx agent.CallbackContext, resp *adkmodel.LLMResponse, respErr error) (*adkmodel.LLMResponse, error) {
+		var in, out int64
+		name := modelName
+		if resp != nil {
+			if u := resp.UsageMetadata; u != nil {
+				in, out = int64(u.PromptTokenCount), int64(u.CandidatesTokenCount)
+			}
+			if resp.ModelVersion != "" {
+				// Prefer what the provider actually served: a config may name
+				// an alias that resolves to a different snapshot.
+				name = resp.ModelVersion
+			}
+		}
+		jellytelemetry.RecordLLMCall(ctx, ctx.InvocationID(), name, respErr == nil, in, out)
+		return nil, nil
+	}
+	return []llmagent.BeforeModelCallback{before}, []llmagent.AfterModelCallback{after}
 }
 
 // Tools builds the built-in tool set: web_search always, the L1 core tools when
@@ -447,8 +485,8 @@ func (e *Engine) withCompaction(llm adkmodel.LLM, agentName string, canRecall bo
 		if req != nil {
 			cfg = req.Config
 		}
-		sysTokens, toolTokens, toolCount := jellytracing.EstimateConfigTokens(cfg)
-		jellytracing.RecordPrompt(ctx, jellytracing.PromptComposition{
+		sysTokens, toolTokens, toolCount := jellytelemetry.EstimateConfigTokens(cfg)
+		jellytelemetry.RecordPrompt(ctx, jellytelemetry.PromptComposition{
 			HistoryTokens:   r.BeforeTokens,
 			TokensAfter:     r.AfterTokens,
 			ToolsTokens:     toolTokens,
@@ -510,6 +548,7 @@ func (e *Engine) buildNode(name, description, provider, instruction string, tool
 	}
 
 	beforeTool, afterTool := e.toolCallbacks()
+	beforeModel, afterModel := e.modelCallbacks(mdl.Name())
 
 	a, err := llmagent.New(llmagent.Config{
 		Name:        name,
@@ -538,8 +577,10 @@ func (e *Engine) buildNode(name, description, provider, instruction string, tool
 		// value. OnToolErrorCallbacks is deliberately left unset: ADK calls
 		// AfterToolCallbacks for failures too, and hooking both would double
 		// count every error.
-		BeforeToolCallbacks: beforeTool,
-		AfterToolCallbacks:  afterTool,
+		BeforeToolCallbacks:  beforeTool,
+		AfterToolCallbacks:   afterTool,
+		BeforeModelCallbacks: beforeModel,
+		AfterModelCallbacks:  afterModel,
 	})
 	if err != nil {
 		return nil, prov, fmt.Errorf("create agent: %w", err)
