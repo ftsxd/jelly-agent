@@ -13,6 +13,8 @@ import (
 	openai "github.com/sashabaranov/go-openai"
 	adkmodel "google.golang.org/adk/model"
 	"google.golang.org/genai"
+
+	"github.com/jelly-agent/jelly-agent/internal/tracing"
 )
 
 // ProviderConfig describes one OpenAI-compatible provider endpoint.
@@ -135,6 +137,10 @@ func (m *OpenAILLM) generateOnce(ctx context.Context, req *adkmodel.LLMRequest) 
 		for attempt := 0; ; attempt++ {
 			var resp openai.ChatCompletionResponse
 			resp, err = m.client.CreateChatCompletion(ctx, m.request(req))
+			// Retries happen inside the caller's span, so without this the
+			// span reads as one slow model call when it was two attempts and
+			// a backoff — a wrong answer to "why was this turn slow".
+			tracing.RecordLLMAttempts(ctx, attempt+1)
 			if err == nil {
 				yield(toLLMResponse(resp), nil)
 				return
@@ -160,6 +166,7 @@ func (m *OpenAILLM) generateStream(ctx context.Context, req *adkmodel.LLMRequest
 	return func(yield func(*adkmodel.LLMResponse, error) bool) {
 		for attempt := 0; ; attempt++ {
 			emitted, err := m.streamAttempt(ctx, req, yield)
+			tracing.RecordLLMAttempts(ctx, attempt+1)
 			if err == nil {
 				return
 			}

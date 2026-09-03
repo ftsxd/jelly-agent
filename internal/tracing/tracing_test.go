@@ -7,6 +7,7 @@ import (
 	"time"
 
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"google.golang.org/genai"
 )
 
 // Tracing must never be a precondition for running the agent. A disabled
@@ -104,4 +105,67 @@ func TestStartBuildsResourceAgainstAnySDKSchema(t *testing.T) {
 	// Shutdown may report the unreachable collector; that is not what this
 	// test is about, so only a panic or a hang would be a failure.
 	_ = shutdown(ctx)
+}
+
+// The prompt breakdown exists to turn one input-token total into an
+// explanation, so the tool-schema share has to be counted from what actually
+// reaches the model: name, description and the serialized parameter schema.
+func TestEstimateConfigTokensCountsSchemasNotJustNames(t *testing.T) {
+	sys, tools, count := EstimateConfigTokens(nil)
+	if sys != 0 || tools != 0 || count != 0 {
+		t.Errorf("nil config = (%d, %d, %d), want zeros", sys, tools, count)
+	}
+
+	cfg := &genai.GenerateContentConfig{
+		SystemInstruction: &genai.Content{Parts: []*genai.Part{{Text: "you are an SRE agent"}}},
+		Tools: []*genai.Tool{{FunctionDeclarations: []*genai.FunctionDeclaration{
+			{Name: "k8s_get_pods", Description: "列出 Pod 状态"},
+			{
+				Name:        "prometheus_query",
+				Description: "查询指标",
+				Parameters: &genai.Schema{
+					Type: genai.TypeObject,
+					Properties: map[string]*genai.Schema{
+						"query": {Type: genai.TypeString, Description: "PromQL 表达式"},
+						"step":  {Type: genai.TypeString, Description: "采样步长"},
+					},
+				},
+			},
+		}}},
+	}
+
+	sys, tools, count = EstimateConfigTokens(cfg)
+	if count != 2 {
+		t.Errorf("tool count = %d, want 2", count)
+	}
+	if sys == 0 {
+		t.Error("system instruction counted as 0 tokens")
+	}
+	if tools == 0 {
+		t.Fatal("tool schemas counted as 0 tokens")
+	}
+
+	// The parameter schema must be part of the number. Dropping it would
+	// under-report the largest fixed cost of a wide tool set — the exact thing
+	// this breakdown is for.
+	bare := &genai.GenerateContentConfig{
+		Tools: []*genai.Tool{{FunctionDeclarations: []*genai.FunctionDeclaration{
+			{Name: "k8s_get_pods", Description: "列出 Pod 状态"},
+			{Name: "prometheus_query", Description: "查询指标"},
+		}}},
+	}
+	_, bareTools, _ := EstimateConfigTokens(bare)
+	if tools <= bareTools {
+		t.Errorf("tools with a parameter schema = %d tokens, not more than without = %d", tools, bareTools)
+	}
+}
+
+// Both recorders take a context that may carry no span at all — the CLI runs
+// with tracing disabled by default — so neither may panic or require a guard
+// at the call site.
+func TestRecordersAreSafeWithoutASpan(t *testing.T) {
+	ctx := context.Background()
+	RecordPrompt(ctx, PromptComposition{HistoryTokens: 4061, ToolsTokens: 700})
+	RecordLLMAttempts(ctx, 3)
+	RecordLLMAttempts(ctx, 1) // the normal case writes nothing
 }

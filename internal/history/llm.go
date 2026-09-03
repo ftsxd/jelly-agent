@@ -16,15 +16,25 @@ import (
 type CompactingLLM struct {
 	inner adkmodel.LLM
 	pol   Policy
-	// onCompact, when set, is notified after a request was shortened. Used for
-	// logging; kept as a hook so this package does not depend on a logger.
-	onCompact func(Result)
+	// observe, when set, is notified about every request — not only the ones
+	// that were shortened.
+	//
+	// It fires unconditionally because the interesting number is often that
+	// nothing was dropped: "the history was 4,000 tokens and none of it was
+	// evicted" is what rules compaction out as the cause of a bad answer, and a
+	// hook that only fires on change can never say it.
+	//
+	// The request is passed along so a caller can account for the parts
+	// compaction does not touch (system instruction, tool schemas) without
+	// wrapping the model a second time. This package still depends on neither a
+	// logger nor a tracer.
+	observe func(context.Context, *adkmodel.LLMRequest, Result)
 }
 
 // Wrap layers compaction over llm. Callers that want compaction off should not
 // call Wrap at all — a zero Policy means "use the defaults", not "disabled".
-func Wrap(llm adkmodel.LLM, pol Policy, onCompact func(Result)) adkmodel.LLM {
-	return &CompactingLLM{inner: llm, pol: pol.withDefaults(), onCompact: onCompact}
+func Wrap(llm adkmodel.LLM, pol Policy, observe func(context.Context, *adkmodel.LLMRequest, Result)) adkmodel.LLM {
+	return &CompactingLLM{inner: llm, pol: pol.withDefaults(), observe: observe}
 }
 
 // Name implements model.LLM.
@@ -40,11 +50,11 @@ func (c *CompactingLLM) GenerateContent(ctx context.Context, req *adkmodel.LLMRe
 		return c.inner.GenerateContent(ctx, req, stream)
 	}
 	compacted, res := Compact(req.Contents, c.pol)
+	if c.observe != nil {
+		c.observe(ctx, req, res)
+	}
 	if !res.Changed() {
 		return c.inner.GenerateContent(ctx, req, stream)
-	}
-	if c.onCompact != nil {
-		c.onCompact(res)
 	}
 	shallow := *req
 	shallow.Contents = compacted

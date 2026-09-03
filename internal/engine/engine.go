@@ -18,6 +18,7 @@ import (
 	"google.golang.org/adk/runner"
 	adksession "google.golang.org/adk/session"
 	adktool "google.golang.org/adk/tool"
+	"google.golang.org/genai"
 
 	"github.com/jelly-agent/jelly-agent/internal/config"
 	"github.com/jelly-agent/jelly-agent/internal/history"
@@ -29,6 +30,7 @@ import (
 	jellysession "github.com/jelly-agent/jelly-agent/internal/session"
 	"github.com/jelly-agent/jelly-agent/internal/skill"
 	jellytool "github.com/jelly-agent/jelly-agent/internal/tool"
+	jellytracing "github.com/jelly-agent/jelly-agent/internal/tracing"
 )
 
 // Wire a default audit sink so every sandboxed script run leaves a log line for
@@ -434,9 +436,28 @@ func (e *Engine) withCompaction(llm adkmodel.LLM, agentName string, canRecall bo
 	if h.MaxTokens != nil {
 		pol.MaxTokens = *h.MaxTokens
 	}
-	return history.Wrap(llm, pol, func(r history.Result) {
-		log.Printf("[jelly] 上下文压缩 (%s): %d→%d token，省略 %d 条、截断 %d 个工具结果",
-			agentName, r.BeforeTokens, r.AfterTokens, r.Dropped, r.Truncated)
+	return history.Wrap(llm, pol, func(ctx context.Context, req *adkmodel.LLMRequest, r history.Result) {
+		// The trace gets every request; the log gets only the ones where
+		// something was actually dropped. A line per turn saying "nothing was
+		// compacted" is noise on a terminal and useful on a span.
+		var cfg *genai.GenerateContentConfig
+		if req != nil {
+			cfg = req.Config
+		}
+		sysTokens, toolTokens, toolCount := jellytracing.EstimateConfigTokens(cfg)
+		jellytracing.RecordPrompt(ctx, jellytracing.PromptComposition{
+			HistoryTokens:   r.BeforeTokens,
+			TokensAfter:     r.AfterTokens,
+			ToolsTokens:     toolTokens,
+			SystemTokens:    sysTokens,
+			ToolCount:       toolCount,
+			DroppedContents: r.Dropped,
+			TruncatedTools:  r.Truncated,
+		})
+		if r.Changed() {
+			log.Printf("[jelly] 上下文压缩 (%s): %d→%d token，省略 %d 条、截断 %d 个工具结果",
+				agentName, r.BeforeTokens, r.AfterTokens, r.Dropped, r.Truncated)
+		}
 	})
 }
 
