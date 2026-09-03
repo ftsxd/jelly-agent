@@ -8,6 +8,7 @@ import (
 
 	"github.com/jelly-agent/jelly-agent/internal/config"
 	jellymcp "github.com/jelly-agent/jelly-agent/internal/mcp"
+	"github.com/jelly-agent/jelly-agent/internal/ops"
 )
 
 // mcpInput is the body for POST /api/mcp (create/update) and /api/mcp/test.
@@ -151,7 +152,59 @@ func (s *Server) handleTestMCP(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadGateway, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "tools": tools})
+
+	// Report name clashes here, where someone is already looking at this
+	// server's tools and can act on it.
+	//
+	// The alternative is what ADK does on its own: fail while assembling a
+	// request, several turns after the server was added, with a message that
+	// names neither culprit. Two Kubernetes servers both exposing get_pods is
+	// not an edge case — it is what happens the moment a second environment is
+	// added.
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":        true,
+		"tools":     tools,
+		"conflicts": s.toolConflicts(srv.Name, tools),
+	})
+}
+
+// conflictReport is one clash, for the console to render next to the tool.
+type conflictReport struct {
+	Tool   string `json:"tool"`   // the server's own name for it
+	Reason string `json:"reason"` // what it collides with, both sides named
+}
+
+// toolConflicts reports which of a server's tools cannot be registered under
+// their own names.
+//
+// Tools already registered for this same server are excluded from the check:
+// re-testing a configured server would otherwise report every one of its tools
+// as conflicting with itself.
+func (s *Server) toolConflicts(server string, tools []jellymcp.ToolInfo) []conflictReport {
+	reg := s.engine().ToolRegistry()
+	if reg == nil || len(tools) == 0 {
+		return nil
+	}
+
+	incoming := make([]ops.ToolMetadata, 0, len(tools))
+	for _, t := range tools {
+		incoming = append(incoming, ops.ToolMetadata{
+			Name: t.Name, RemoteName: t.Name, Server: server, Description: t.Description,
+		})
+	}
+
+	var out []conflictReport
+	for _, c := range reg.CheckAgainst(incoming) {
+		if c.ExistingKey == "" {
+			continue
+		}
+		// Skip a clash with this same server: that is the entry being retested.
+		if strings.HasPrefix(c.ExistingKey, server+"/") {
+			continue
+		}
+		out = append(out, conflictReport{Tool: c.Name, Reason: c.Error()})
+	}
+	return out
 }
 
 // normalizeMCP validates and canonicalizes an MCP input into a config server.

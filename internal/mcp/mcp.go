@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"google.golang.org/adk/agent"
 	adktool "google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/mcptoolset"
 
@@ -62,12 +63,34 @@ func Transport(ctx context.Context, srv config.MCPServer) (mcp.Transport, error)
 
 // Toolset returns an ADK toolset for the server, suitable for llmagent.Config
 // Toolsets. The connection is established lazily on first use.
+//
+// A configured tool whitelist is applied at fetch time, so an unwanted tool
+// never becomes a tool at all: it claims no schema slot, adds no name for the
+// model to confuse with a similar one, and cannot collide with another
+// server's. This is the cheapest of the cuts that keep prompt size independent
+// of how many servers are registered.
+//
+// RequireConfirmation is deliberately left off. Approval belongs to the
+// gateway, which decides it from the tool's declared side-effect level; ADK's
+// own confirmation wrapper would sit outside ours and re-register the request
+// entry under its own name (tool/tool.go), so the two would fight over
+// dispatch.
 func Toolset(ctx context.Context, srv config.MCPServer) (adktool.Toolset, error) {
 	tr, err := Transport(ctx, srv)
 	if err != nil {
 		return nil, err
 	}
-	return mcptoolset.New(mcptoolset.Config{Transport: tr})
+	cfg := mcptoolset.Config{Transport: tr}
+	if len(srv.Tools) > 0 {
+		allowed := make(map[string]bool, len(srv.Tools))
+		for _, n := range srv.Tools {
+			allowed[n] = true
+		}
+		cfg.ToolFilter = func(_ agent.ReadonlyContext, t adktool.Tool) bool {
+			return allowed[t.Name()]
+		}
+	}
+	return mcptoolset.New(cfg)
 }
 
 // ToolInfo is a tool advertised by an MCP server, for display.

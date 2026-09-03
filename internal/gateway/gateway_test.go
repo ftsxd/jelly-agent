@@ -716,3 +716,106 @@ func TestConcurrentCallsProduceUniqueEvidenceIDs(t *testing.T) {
 		t.Errorf("got %d distinct IDs, want %d", len(seen), workers*each)
 	}
 }
+
+// Regression from a real run. The gateway wraps ctx with the tool's declared
+// timeout, and a wrapped context is no longer an agent.ToolContext — so an
+// executor that recovered it by asserting the type of ctx failed for every
+// tool that declared a timeout, which is every tool worth declaring one for.
+//
+// Unit tests missed it entirely: the fake executor never needed a ToolContext.
+// So this one asserts the deadline reaches the executor and the value survives
+// alongside it.
+func TestExecutorSeesTheDeadlineAndTheCarriedValue(t *testing.T) {
+	type probeKey struct{}
+
+	m := k8sMeta()
+	m.Timeout = 5 * time.Second
+
+	var sawDeadline bool
+	var sawValue any
+	g := New(Config{
+		Registry: fakeReg{m.Name: m},
+		Executors: map[string]Executor{m.Server: ExecutorFunc(
+			func(ctx context.Context, _ string, _ map[string]any) (map[string]any, error) {
+				_, sawDeadline = ctx.Deadline()
+				sawValue = ctx.Value(probeKey{})
+				return map[string]any{"summary": "ok"}, nil
+			})},
+	})
+
+	ctx := context.WithValue(context.Background(), probeKey{}, "carried")
+	if _, err := g.Execute(ctx, prodContext(), ops.OriginModel, "k8s_get_pods", nil); err != nil {
+		t.Fatal(err)
+	}
+	if !sawDeadline {
+		t.Error("the executor received no deadline; the declared timeout does nothing")
+	}
+	if sawValue != "carried" {
+		t.Errorf("carried value = %v; wrapping the context dropped it, and that is how the ToolContext went missing", sawValue)
+	}
+}
+
+// A tool that ignores its context must not hold up the run: the caller stops
+// waiting and reports a timeout.
+func TestAToolIgnoringItsContextIsAbandonedNotAwaited(t *testing.T) {
+	m := k8sMeta()
+	m.Timeout = 50 * time.Millisecond
+
+	release := make(chan struct{})
+	defer close(release)
+	g := New(Config{
+		Registry: fakeReg{m.Name: m},
+		Executors: map[string]Executor{m.Server: ExecutorFunc(
+			func(context.Context, string, map[string]any) (map[string]any, error) {
+				<-release // never returns within the timeout
+				return map[string]any{"summary": "late"}, nil
+			})},
+	})
+
+	start := time.Now()
+	res, err := g.Execute(context.Background(), prodContext(), ops.OriginModel, "k8s_get_pods", nil)
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("a hanging tool was awaited")
+	}
+	if res.Call.ErrKind != "timeout" {
+		t.Errorf("ErrKind = %q, want timeout", res.Call.ErrKind)
+	}
+	if elapsed > time.Second {
+		t.Errorf("waited %v; the timeout must bound the run, not the tool's goodwill", elapsed)
+	}
+}
+
+// The summary is the line that reaches the prompt and the report. "返回 2 个
+// 字段" was the earlier fallback and it told a reader only that something
+// happened.
+func TestDefaultSummaryNamesWhatItFound(t *testing.T) {
+	cases := map[string]struct {
+		raw  map[string]any
+		want string
+	}{
+		"conventional text key": {map[string]any{"title": "Example Domain"}, "Example Domain"},
+		"scalars":               {map[string]any{"target": "user", "stored": true}, "stored=true target=user"},
+		"empty":                 {map[string]any{}, "无返回内容"},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			if got := defaultSummary(tc.raw); got != tc.want {
+				t.Errorf("defaultSummary = %q, want %q", got, tc.want)
+			}
+		})
+	}
+
+	// Sorted, so the same payload always reads the same way.
+	raw := map[string]any{"z": 1, "a": 2, "m": 3}
+	if first := defaultSummary(raw); first != defaultSummary(raw) || !strings.HasPrefix(first, "a=") {
+		t.Errorf("defaultSummary is unstable or unsorted: %q", first)
+	}
+
+	// A structure with no scalars says where to look rather than inventing a
+	// summary it cannot make.
+	if got := defaultSummary(map[string]any{"rows": []any{1, 2}}); !strings.Contains(got, "data") {
+		t.Errorf("defaultSummary = %q, should point at the payload", got)
+	}
+}

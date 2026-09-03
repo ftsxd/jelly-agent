@@ -103,6 +103,7 @@ func TestSaveRoundTripsEverySection(t *testing.T) {
 		}},
 		History: History{MaxTokens: &budget, KeepRecent: 4, ToolResultTokens: 500},
 		Logging: Logging{Level: "debug", Format: "text", AddSource: true},
+		Tools:   Tools{MetadataDir: "/etc/jelly/tools.d"},
 		Tracing: Tracing{
 			Enabled: true, Endpoint: "localhost:4317", Protocol: "grpc",
 			Service: "jelly", SampleRatio: &ratio, Insecure: true, CaptureContent: true,
@@ -147,6 +148,9 @@ func TestSaveRoundTripsEverySection(t *testing.T) {
 	}
 	if out.Web.Admin.Username != "admin" || out.Web.Admin.PasswordHash != "$2a$hash" {
 		t.Errorf("web/admin section lost: %+v", out.Web)
+	}
+	if out.Tools.MetadataDir != "/etc/jelly/tools.d" {
+		t.Errorf("tools section lost on save: %+v", out.Tools)
 	}
 	lg := out.Logging
 	if lg.Level != "debug" || lg.Format != "text" || !lg.AddSource {

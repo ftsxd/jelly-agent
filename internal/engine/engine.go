@@ -21,16 +21,19 @@ import (
 	"google.golang.org/genai"
 
 	"github.com/jelly-agent/jelly-agent/internal/config"
+	"github.com/jelly-agent/jelly-agent/internal/gateway"
 	"github.com/jelly-agent/jelly-agent/internal/history"
 	jellymcp "github.com/jelly-agent/jelly-agent/internal/mcp"
 	"github.com/jelly-agent/jelly-agent/internal/memory"
 	jellymetrics "github.com/jelly-agent/jelly-agent/internal/metrics"
 	jellymodel "github.com/jelly-agent/jelly-agent/internal/model"
+	"github.com/jelly-agent/jelly-agent/internal/ops"
 	"github.com/jelly-agent/jelly-agent/internal/sandbox"
 	jellysession "github.com/jelly-agent/jelly-agent/internal/session"
 	"github.com/jelly-agent/jelly-agent/internal/skill"
 	jellytelemetry "github.com/jelly-agent/jelly-agent/internal/telemetry"
 	jellytool "github.com/jelly-agent/jelly-agent/internal/tool"
+	"github.com/jelly-agent/jelly-agent/internal/toolreg"
 
 	"github.com/jelly-agent/jelly-agent/internal/logging"
 )
@@ -90,6 +93,17 @@ type Engine struct {
 	// sessionDBPath overrides the shared store's location. Empty means the
 	// default path; only tests and embedders set it.
 	sessionDBPath string
+
+	// Tool registry and gateway. Built once per engine: the registry snapshot
+	// is immutable and the gateway is safe for concurrent use, so the many
+	// per-request agent builds the web server performs all share them.
+	toolsOnce sync.Once
+	toolStore *toolreg.Store
+	gw        *gateway.Gateway
+	// unregistered names the tools no metadata covers, reported once at
+	// startup rather than left invisible.
+	unregisteredOnce sync.Once
+	unregistered     []string
 }
 
 // New wraps a loaded config in an engine.
@@ -184,6 +198,96 @@ func (e *Engine) Search() (*memory.Search, error) {
 		return nil, fmt.Errorf("init memory search: %w", err)
 	}
 	return s, nil
+}
+
+// toolRegistry builds the registry and gateway on first use.
+//
+// Metadata comes from two sources in order: the built-in defaults, then any
+// YAML overlay. Order is significance — a later entry that clashes with an
+// earlier one loses, and Build reports every such loss rather than dropping it
+// silently.
+//
+// A metadata problem is logged and then tolerated. An unparsable overlay leaves
+// the built-in defaults in place, because refusing to start over a malformed
+// description would be a worse outcome than running with fewer wrapped tools.
+func (e *Engine) toolRegistry() (*toolreg.Store, *gateway.Gateway) {
+	e.toolsOnce.Do(func() {
+		e.toolStore = toolreg.NewStore()
+
+		sources := []toolreg.Source{jellytool.BuiltinMetadata()}
+		if dir := e.cfg.Tools.MetadataDir; dir != "" {
+			sources = append(sources, toolreg.NewFileSource(dir))
+		}
+		metas, err := toolreg.Merge(context.Background(), sources...)
+		if err != nil {
+			slog.Error("工具元数据加载失败，仅使用内置默认值", logging.Err(err))
+			metas, _ = jellytool.BuiltinMetadata().Load(context.Background())
+		}
+		reg, conflicts := toolreg.Build(metas)
+		for _, c := range conflicts {
+			// Named on both sides, unlike ADK's own "duplicate tool" — the
+			// point of catching this here is that someone can act on it.
+			slog.Error("工具注册冲突，该条目未生效", "detail", c.Error())
+		}
+		e.toolStore.Swap(reg)
+
+		// The ceiling is the widest level any built-in declares, because this
+		// change must not take away a tool that works today: remember and
+		// forget write local memory, and run_script runs sandboxed code. A
+		// narrower ceiling here would silently disable them — a regression
+		// dressed up as a safety improvement.
+		//
+		// Tightening this is the second half of the work, and it needs an
+		// approval path behind it (ADK's RequestConfirmation into a DingTalk
+		// card) rather than a smaller constant. The per-tool levels are
+		// already recorded, so that change becomes a policy edit.
+		e.gw = gateway.New(gateway.Config{
+			Registry: gateway.Snapshot(reg),
+			Policy: gateway.Policy{
+				MaxSideEffect:         ops.SideEffectRisky,
+				AllowApprovalRequired: true,
+			},
+		})
+	})
+	return e.toolStore, e.gw
+}
+
+// incidentFor supplies the incident a tool call belongs to.
+//
+// There is no incident normalizer yet, so every call gets a context carrying
+// only a default time window. That is already worth having: it is what stops
+// each tool from inventing its own "last 15 minutes", which is the failure
+// where an alert from three hours ago is diagnosed against a period when
+// nothing was wrong. Targets and handles arrive with the normalizer.
+func (e *Engine) incidentFor(agent.ToolContext) *ops.IncidentContext {
+	return &ops.IncidentContext{
+		Trigger: ops.TriggerUser,
+		Window:  ops.DefaultWindow(),
+	}
+}
+
+// reportUnregistered logs the tools no metadata covers, once.
+//
+// Reported rather than silent because an unwrapped tool bypasses the gateway
+// entirely — no argument injection, no shaping, no evidence — and that is
+// exactly the kind of gap that is invisible until someone wonders why one
+// tool's results are shaped and another's are not.
+func (e *Engine) reportUnregistered(names []string) {
+	if len(names) == 0 {
+		return
+	}
+	e.unregisteredOnce.Do(func() {
+		e.unregistered = names
+		slog.Warn("以下工具没有元数据，未经过 Gateway（无参数注入与结果整形）",
+			"tools", names, "count", len(names))
+	})
+}
+
+// ToolRegistry exposes the current registry snapshot, for the API's pre-save
+// conflict check and for health output.
+func (e *Engine) ToolRegistry() *toolreg.Registry {
+	store, _ := e.toolRegistry()
+	return store.Load()
 }
 
 // Metrics returns the shared tool-call tracker, opening the store on first use.
@@ -546,6 +650,21 @@ func (e *Engine) buildNode(name, description, provider, instruction string, tool
 			}
 		}
 	}
+
+	// Route the built-in tools through the gateway: our name and schema, the
+	// incident's arguments, a shaped result, and evidence the conclusion can
+	// cite.
+	//
+	// MCP toolsets are deliberately left on the direct path for now. A
+	// toolset's tools are fetched per turn (set.Tools(ctx)), not at build
+	// time, so wrapping them needs a Toolset wrapper rather than a tool one —
+	// a separate change, and one worth making with a real MCP server in hand
+	// to test against.
+	store, gw := e.toolRegistry()
+	snapshot := gateway.Snapshot(store.Load())
+	gw.SetExecutor("", gateway.InnerExecutor(tools))
+	tools, unregistered := gateway.WrapTools(gw, snapshot, "", e.incidentFor, tools)
+	e.reportUnregistered(unregistered)
 
 	beforeTool, afterTool := e.toolCallbacks()
 	beforeModel, afterModel := e.modelCallbacks(mdl.Name())

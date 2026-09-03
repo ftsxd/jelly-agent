@@ -52,6 +52,14 @@ type History struct {
 	ToolResultTokens int `mapstructure:"tool_result_tokens" yaml:"tool_result_tokens,omitempty"`
 }
 
+// Tools configures the tool registry.
+type Tools struct {
+	// MetadataDir holds YAML files describing tools: the name the model sees,
+	// which arguments the host injects, how a result is reduced. One file per
+	// backend keeps diffs reviewable. Empty means built-in defaults only.
+	MetadataDir string `mapstructure:"metadata_dir" yaml:"metadata_dir,omitempty"`
+}
+
 // Logging configures the process-wide structured logger. JSON is the default
 // because these records are meant to be shipped; text exists for local work.
 type Logging struct {
@@ -87,6 +95,7 @@ type Config struct {
 	History         History    `mapstructure:"history" yaml:"history,omitempty"`
 	Tracing         Tracing    `mapstructure:"tracing" yaml:"tracing,omitempty"`
 	Logging         Logging    `mapstructure:"logging" yaml:"logging,omitempty"`
+	Tools           Tools      `mapstructure:"tools" yaml:"tools,omitempty"`
 	Skills          Skills     `mapstructure:"skills" yaml:"skills,omitempty"`
 	Sandbox         Sandbox    `mapstructure:"sandbox" yaml:"sandbox,omitempty"`
 	Web             Web        `mapstructure:"web" yaml:"web,omitempty"`
@@ -123,6 +132,15 @@ type MCPServer struct {
 	URL       string            `mapstructure:"url" yaml:"url,omitempty"`
 	Headers   map[string]string `mapstructure:"headers" yaml:"headers,omitempty"`
 	Enabled   bool              `mapstructure:"enabled" yaml:"enabled"`
+
+	// Tools whitelists which of the server's tools to load. Empty loads all.
+	//
+	// This is the cheapest of the three cuts that keep prompt size independent
+	// of registry size, and the only one that happens before a tool exists at
+	// all: a Kubernetes MCP server commonly advertises two or three dozen
+	// tools, of which a diagnosis needs a handful. The rest cost a schema slot
+	// each and add names for the model to confuse.
+	Tools []string `mapstructure:"tools" yaml:"tools,omitempty"`
 }
 
 // PlatformBot binds an external messaging platform (currently DingTalk) as a
@@ -322,6 +340,7 @@ func Save(c *Config, path string) error {
 		History         *History                     `yaml:"history,omitempty"`
 		Tracing         *Tracing                     `yaml:"tracing,omitempty"`
 		Logging         *Logging                     `yaml:"logging,omitempty"`
+		Tools           *Tools                       `yaml:"tools,omitempty"`
 		Skills          *Skills                      `yaml:"skills,omitempty"`
 		Sandbox         *Sandbox                     `yaml:"sandbox,omitempty"`
 		Web             *Web                         `yaml:"web,omitempty"`
@@ -356,6 +375,10 @@ func Save(c *Config, path string) error {
 	if c.Logging != (Logging{}) {
 		lg := c.Logging
 		p.Logging = &lg
+	}
+	if c.Tools != (Tools{}) {
+		tl := c.Tools
+		p.Tools = &tl
 	}
 	if c.History != (History{}) {
 		h := c.History

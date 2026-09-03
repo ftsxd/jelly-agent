@@ -31,7 +31,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strconv"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -192,10 +195,17 @@ type Config struct {
 // and a reader following a citation chain would take a gap for a lost
 // observation.
 type Gateway struct {
-	reg       Registry
+	reg     Registry
+	shapers map[string]Shaper
+	policy  Policy
+
+	// executors is guarded because it is filled after construction: the
+	// gateway is built once per engine, while the executor for a set of tools
+	// can only be made once those tools are assembled. Reads happen on every
+	// call from many goroutines, so this is a value swap rather than a
+	// per-call lock.
+	execMu    sync.RWMutex
 	executors map[string]Executor
-	shapers   map[string]Shaper
-	policy    Policy
 
 	callSeq atomic.Uint64
 	evSeq   atomic.Uint64
@@ -205,12 +215,38 @@ type Gateway struct {
 // ErrUnknownTool, which is the correct degraded behaviour: better to route
 // nothing than to route blindly.
 func New(cfg Config) *Gateway {
+	execs := make(map[string]Executor, len(cfg.Executors))
+	for k, v := range cfg.Executors {
+		execs[k] = v
+	}
 	return &Gateway{
 		reg:       cfg.Registry,
-		executors: cfg.Executors,
+		executors: execs,
 		shapers:   cfg.Shapers,
 		policy:    cfg.Policy,
 	}
+}
+
+// SetExecutor registers the executor for one server, replacing any previous
+// one. The empty key serves built-in tools.
+//
+// It exists because of an ordering constraint: the gateway is built once per
+// engine, but an executor over a set of ADK tools can only be made after those
+// tools are assembled — which happens per agent build.
+func (g *Gateway) SetExecutor(server string, e Executor) {
+	g.execMu.Lock()
+	defer g.execMu.Unlock()
+	if g.executors == nil {
+		g.executors = map[string]Executor{}
+	}
+	g.executors[server] = e
+}
+
+func (g *Gateway) executor(server string) (Executor, bool) {
+	g.execMu.RLock()
+	defer g.execMu.RUnlock()
+	e, ok := g.executors[server]
+	return e, ok
 }
 
 // Result is one completed call: the audit record, and the evidence it produced.
@@ -258,7 +294,7 @@ func (g *Gateway) Execute(ctx context.Context, ic *ops.IncidentContext, origin o
 		return Result{Call: call}, err
 	}
 
-	exec, ok := g.executors[m.Server]
+	exec, ok := g.executor(m.Server)
 	if !ok {
 		call.Duration = time.Since(started)
 		call.ErrKind = "no_executor"
@@ -269,14 +305,9 @@ func (g *Gateway) Execute(ctx context.Context, ic *ops.IncidentContext, origin o
 	final := PrepareArgs(m, ic, args)
 	call.Args = final
 
-	runCtx := ctx
-	if m.Timeout > 0 {
-		var cancel context.CancelFunc
-		runCtx, cancel = context.WithTimeout(ctx, m.Timeout)
-		defer cancel()
-	}
-
-	raw, err := exec.Execute(runCtx, m.Remote(), final)
+	raw, err := runWithTimeout(ctx, m.Timeout, func(runCtx context.Context) (map[string]any, error) {
+		return exec.Execute(runCtx, m.Remote(), final)
+	})
 	call.Duration = time.Since(started)
 	if err != nil {
 		call.Err = err.Error()
@@ -422,6 +453,43 @@ func payloadError(raw map[string]any) string {
 		return e.Error()
 	default:
 		return fmt.Sprintf("%v", e)
+	}
+}
+
+// runWithTimeout bounds a call at the tool's declared timeout.
+//
+// The deadline is enforced here rather than handed to the tool, because ADK's
+// ToolContext cannot carry one: only InvocationContext has WithContext. So a
+// tool that ignores its context is abandoned rather than interrupted — the
+// caller stops waiting and reports a timeout, and the goroutine finishes into
+// a buffered channel nobody reads.
+//
+// That leaks a goroutine for as long as the tool runs. It is the lesser
+// problem: the alternative is a diagnosis that hangs on one slow tool, and a
+// five-minute budget has no room for that.
+func runWithTimeout(ctx context.Context, timeout time.Duration, fn func(context.Context) (map[string]any, error)) (map[string]any, error) {
+	if timeout <= 0 {
+		return fn(ctx)
+	}
+	runCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	type outcome struct {
+		result map[string]any
+		err    error
+	}
+	// Buffered, so the goroutine can always finish even after we stop waiting.
+	done := make(chan outcome, 1)
+	go func() {
+		result, err := fn(runCtx)
+		done <- outcome{result, err}
+	}()
+
+	select {
+	case o := <-done:
+		return o.result, o.err
+	case <-runCtx.Done():
+		return nil, runCtx.Err()
 	}
 }
 
@@ -573,23 +641,53 @@ func rawJSON(raw map[string]any) json.RawMessage {
 	return b
 }
 
-// defaultSummary picks a human-readable line from a payload that has no
-// shaper. It looks for the conventional keys rather than dumping the map,
-// because the summary is what reaches the prompt.
+// defaultSummary picks a readable line from a payload that has no shaper.
+//
+// The conventional text keys come first, then a compact rendering of the
+// scalar fields. "返回 2 个字段" was the earlier fallback and it is worse than
+// nothing: the summary is the line that reaches the prompt and the report, so
+// a model reading it learns only that something happened. Naming the values it
+// found at least says what.
 func defaultSummary(raw map[string]any) string {
-	for _, k := range []string{"summary", "title", "text", "content", "result"} {
+	for _, k := range []string{"summary", "title", "text", "content", "result", "message"} {
 		if v, ok := raw[k]; ok {
 			if s, ok := v.(string); ok && s != "" {
 				return s
 			}
 		}
 	}
-	return fmt.Sprintf("返回 %d 个字段", len(raw))
+	if len(raw) == 0 {
+		return "无返回内容"
+	}
+
+	// Scalars in sorted order, so the same payload always reads the same way.
+	keys := make([]string, 0, len(raw))
+	for k := range raw {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	parts := make([]string, 0, len(keys))
+	for _, k := range keys {
+		switch v := raw[k].(type) {
+		case string, bool, float64, int, int64, json.Number:
+			parts = append(parts, fmt.Sprintf("%s=%v", k, v))
+		}
+		if len(parts) >= 6 {
+			break
+		}
+	}
+	if len(parts) == 0 {
+		return fmt.Sprintf("返回 %d 个结构化字段（详见 data）", len(raw))
+	}
+	return strings.Join(parts, " ")
 }
 
-// Snapshot adapts a registry snapshot to the gateway's Registry interface.
-func Snapshot(r *toolreg.Registry) Registry { return registrySnapshot{r} }
+// Snapshot adapts a registry snapshot to the interfaces this package reads.
+func Snapshot(r *toolreg.Registry) KeyedRegistry { return registrySnapshot{r} }
 
 type registrySnapshot struct{ r *toolreg.Registry }
 
 func (s registrySnapshot) Lookup(name string) (ops.ToolMetadata, bool) { return s.r.Lookup(name) }
+
+func (s registrySnapshot) ByKey(key string) (ops.ToolMetadata, bool) { return s.r.ByKey(key) }
