@@ -94,13 +94,18 @@ func TestSaveRoundTripsEverySection(t *testing.T) {
 	budget := 12000
 	retries := 3
 	temp := 0.4
+	ratio := 0.5
 	in := &Config{
 		DefaultProvider: "p1",
 		Providers: []Provider{{
 			Name: "p1", BaseURL: "http://x", APIKey: "k", Model: "m",
 			Temperature: &temp, MaxTokens: 2048, TimeoutSec: 90, MaxRetries: &retries,
 		}},
-		History:      History{MaxTokens: &budget, KeepRecent: 4, ToolResultTokens: 500},
+		History: History{MaxTokens: &budget, KeepRecent: 4, ToolResultTokens: 500},
+		Tracing: Tracing{
+			Enabled: true, Endpoint: "localhost:4317", Protocol: "grpc",
+			Service: "jelly", SampleRatio: &ratio, Insecure: true, CaptureContent: true,
+		},
 		DefaultAgent: "root",
 		SkillVars:    map[string]map[string]string{"s": {"K": "V"}},
 	}
@@ -141,6 +146,12 @@ func TestSaveRoundTripsEverySection(t *testing.T) {
 	}
 	if out.Web.Admin.Username != "admin" || out.Web.Admin.PasswordHash != "$2a$hash" {
 		t.Errorf("web/admin section lost: %+v", out.Web)
+	}
+	tr := out.Tracing
+	if !tr.Enabled || tr.Endpoint != "localhost:4317" || tr.Protocol != "grpc" ||
+		tr.Service != "jelly" || tr.SampleRatio == nil || *tr.SampleRatio != 0.5 ||
+		!tr.Insecure || !tr.CaptureContent {
+		t.Errorf("tracing section lost on save: %+v", tr)
 	}
 	if out.DefaultAgent != "root" || out.SkillVars["s"]["K"] != "V" {
 		t.Errorf("default_agent / skill_vars lost: %q %+v", out.DefaultAgent, out.SkillVars)

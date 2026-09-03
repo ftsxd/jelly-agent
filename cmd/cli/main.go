@@ -5,8 +5,10 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/spf13/cobra"
 	adktool "google.golang.org/adk/tool"
@@ -14,6 +16,7 @@ import (
 	"github.com/jelly-agent/jelly-agent/internal/config"
 	"github.com/jelly-agent/jelly-agent/internal/engine"
 	"github.com/jelly-agent/jelly-agent/internal/memory"
+	"github.com/jelly-agent/jelly-agent/internal/tracing"
 )
 
 // appName and userID are sourced from the engine so the CLI and web server
@@ -53,6 +56,44 @@ func newRootCmd() *cobra.Command {
 // loadConfig resolves and loads configuration for a command.
 func loadConfig() (*config.Config, error) {
 	return config.LoadOrEnv(configPath)
+}
+
+// startTracing installs the span exporter for a command that runs an agent, and
+// returns the flush to defer.
+//
+// The flush is not optional bookkeeping. Spans are batched, so without it the
+// last run's spans — the ones you started the command to look at — are dropped
+// when the process exits.
+//
+// An unreachable collector is reported and then ignored: tracing is an aid, and
+// a diagnosis must not fail because a trace backend is down.
+func startTracing(cfg *config.Config) func() {
+	t := cfg.Tracing
+	ratio := 1.0
+	if t.SampleRatio != nil {
+		ratio = *t.SampleRatio
+	}
+	shutdown, err := tracing.Start(context.Background(), tracing.Config{
+		Enabled:        t.Enabled,
+		Endpoint:       t.Endpoint,
+		Protocol:       t.Protocol,
+		ServiceName:    t.Service,
+		Version:        version,
+		SampleRatio:    ratio,
+		Insecure:       t.Insecure,
+		CaptureContent: t.CaptureContent,
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "警告: 链路追踪未启用: %v\n", err)
+		return func() {}
+	}
+	return func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := shutdown(ctx); err != nil {
+			fmt.Fprintf(os.Stderr, "警告: 链路追踪 flush 失败: %v\n", err)
+		}
+	}
 }
 
 // loadEngine loads config and wraps it in the shared runtime engine.

@@ -52,12 +52,32 @@ type History struct {
 	ToolResultTokens int `mapstructure:"tool_result_tokens" yaml:"tool_result_tokens,omitempty"`
 }
 
+// Tracing configures OpenTelemetry span export. ADK already instruments the
+// agent loop against the global TracerProvider, so this section only decides
+// where those spans go — see internal/tracing.
+type Tracing struct {
+	Enabled  bool   `mapstructure:"enabled" yaml:"enabled"`
+	Endpoint string `mapstructure:"endpoint" yaml:"endpoint,omitempty"` // host:port, no scheme
+	Protocol string `mapstructure:"protocol" yaml:"protocol,omitempty"` // grpc (default) | http
+	Service  string `mapstructure:"service" yaml:"service,omitempty"`
+	// SampleRatio: nil or 1 records every run. Agent runs are low-volume and
+	// expensive to reproduce, so sampling them down is rarely what you want.
+	SampleRatio *float64 `mapstructure:"sample_ratio" yaml:"sample_ratio,omitempty"`
+	// Insecure sends plaintext OTLP; right for localhost or in-cluster.
+	Insecure bool `mapstructure:"insecure" yaml:"insecure,omitempty"`
+	// CaptureContent puts prompts and model replies into spans. Invaluable
+	// while developing, and a data-exposure decision in production — a trace
+	// backend rarely has the access controls a database does.
+	CaptureContent bool `mapstructure:"capture_content" yaml:"capture_content,omitempty"`
+}
+
 // Config is the top-level jelly-agent configuration.
 type Config struct {
 	DefaultProvider string     `mapstructure:"default_provider" yaml:"default_provider"`
 	Providers       []Provider `mapstructure:"providers" yaml:"providers"`
 	Memory          Memory     `mapstructure:"memory" yaml:"memory"`
 	History         History    `mapstructure:"history" yaml:"history,omitempty"`
+	Tracing         Tracing    `mapstructure:"tracing" yaml:"tracing,omitempty"`
 	Skills          Skills     `mapstructure:"skills" yaml:"skills,omitempty"`
 	Sandbox         Sandbox    `mapstructure:"sandbox" yaml:"sandbox,omitempty"`
 	Web             Web        `mapstructure:"web" yaml:"web,omitempty"`
@@ -291,6 +311,7 @@ func Save(c *Config, path string) error {
 		Providers       []Provider                   `yaml:"providers"`
 		Memory          *Memory                      `yaml:"memory,omitempty"`
 		History         *History                     `yaml:"history,omitempty"`
+		Tracing         *Tracing                     `yaml:"tracing,omitempty"`
 		Skills          *Skills                      `yaml:"skills,omitempty"`
 		Sandbox         *Sandbox                     `yaml:"sandbox,omitempty"`
 		Web             *Web                         `yaml:"web,omitempty"`
@@ -317,6 +338,10 @@ func Save(c *Config, path string) error {
 	if c.Memory != (Memory{}) {
 		m := c.Memory
 		p.Memory = &m
+	}
+	if c.Tracing != (Tracing{}) {
+		tr := c.Tracing
+		p.Tracing = &tr
 	}
 	if c.History != (History{}) {
 		h := c.History

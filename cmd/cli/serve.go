@@ -38,6 +38,8 @@ func newServeCmd() *cobra.Command {
 			if err := server.ValidateAdmin(eng.Config().Web.Admin); err != nil {
 				return err
 			}
+			defer startTracing(eng.Config())()
+
 			srv := server.New(eng, web.DistFS()).WithConfigPath(configPath)
 			httpSrv := &http.Server{
 				Addr:              addr,
