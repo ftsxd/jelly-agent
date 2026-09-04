@@ -100,10 +100,14 @@ type Engine struct {
 	toolsOnce sync.Once
 	toolStore *toolreg.Store
 	gw        *gateway.Gateway
-	// unregistered names the tools no metadata covers, reported once at
-	// startup rather than left invisible.
-	unregisteredOnce sync.Once
-	unregistered     []string
+	// undeclared names the tools no metadata covers, per server, so an
+	// operator can see what is running on synthesized defaults.
+	//
+	// Keyed by server and logged once per server rather than once overall: a
+	// toolset re-binds every turn, and a single sync.Once would have logged
+	// whichever server happened to bind first and stayed quiet about the rest.
+	undeclaredMu sync.Mutex
+	undeclared   map[string][]string
 }
 
 // New wraps a loaded config in an engine.
@@ -148,14 +152,26 @@ func (e *Engine) buildToolsets() {
 	})
 }
 
+// NamedToolset pairs an MCP toolset with the server it was configured as.
+//
+// The pairing has to be carried explicitly because ADK's mcptoolset reports a
+// constant name — "mcp_tool_set" for every instance — so the only identifier
+// the Toolset interface offers cannot tell two servers apart. Executor
+// registration, routing keys and duplicate-name resolution all need the real
+// one.
+type NamedToolset struct {
+	Name string
+	Set  adktool.Toolset
+}
+
 // Toolsets returns every enabled MCP toolset (used by the web chat / default
 // agent, which loads all of them).
-func (e *Engine) Toolsets() []adktool.Toolset {
+func (e *Engine) Toolsets() []NamedToolset {
 	e.buildToolsets()
-	out := make([]adktool.Toolset, 0, len(e.mcpSets))
+	out := make([]NamedToolset, 0, len(e.mcpSets))
 	for _, srv := range e.cfg.MCP { // stable order = config order
 		if ts, ok := e.mcpSets[srv.Name]; ok {
-			out = append(out, ts)
+			out = append(out, NamedToolset{Name: srv.Name, Set: ts})
 		}
 	}
 	return out
@@ -163,12 +179,12 @@ func (e *Engine) Toolsets() []adktool.Toolset {
 
 // ToolsetsFor returns only the named enabled MCP toolsets, in the given order —
 // the basis for a bot loading a selected subset of MCP servers.
-func (e *Engine) ToolsetsFor(names []string) []adktool.Toolset {
+func (e *Engine) ToolsetsFor(names []string) []NamedToolset {
 	e.buildToolsets()
-	out := make([]adktool.Toolset, 0, len(names))
+	out := make([]NamedToolset, 0, len(names))
 	for _, n := range names {
 		if ts, ok := e.mcpSets[n]; ok {
-			out = append(out, ts)
+			out = append(out, NamedToolset{Name: n, Set: ts})
 		}
 	}
 	return out
@@ -262,6 +278,30 @@ func (e *Engine) toolRegistry() (*toolreg.Store, *gateway.Gateway) {
 	return e.toolStore, e.gw
 }
 
+// undeclaredFallback governs tools nobody has described.
+//
+// Govern is on, which is what makes "the gateway is the only path a tool call
+// takes" true rather than aspirational: without it every MCP tool bypasses
+// admission, telemetry and evidence, since an MCP server's tools are by
+// definition not in the built-in metadata and are unlikely to have a YAML
+// overlay before someone has needed one.
+//
+// Turning it on does not lock anything out that worked before. An undeclared
+// remote tool resolves to mutating, and the ceiling is mutating unless scripts
+// are enabled — so the ordinary deployment keeps running exactly the tools it
+// ran yesterday, now with a record of each call. A deployment that deliberately
+// sets a read-only ceiling is the one that will see MCP calls refused, which is
+// the point of setting it.
+//
+// The two bounds are the built-ins' own values. Zero would mean "no bound",
+// which is a fine default for a tool someone sized and a bad one for a remote
+// nobody did.
+var undeclaredFallback = gateway.Fallback{
+	Govern:         true,
+	Timeout:        30 * time.Second,
+	MaxResultBytes: 8000,
+}
+
 // sideEffectCeiling is the strongest side effect this deployment permits.
 //
 // Derived rather than fixed: remember and forget write local memory on every
@@ -316,21 +356,44 @@ func (e *Engine) incidentFor(agent.ToolContext) *ops.IncidentContext {
 	}
 }
 
-// reportUnregistered logs the tools no metadata covers, once.
+// reportUndeclared records and logs the tools no metadata covers.
 //
-// Reported rather than silent because an unwrapped tool bypasses the gateway
-// entirely — no argument injection, no shaping, no evidence — and that is
-// exactly the kind of gap that is invisible until someone wonders why one
-// tool's results are shaped and another's are not.
-func (e *Engine) reportUnregistered(names []string) {
+// Reported rather than silent because these tools run on synthesized defaults:
+// no use cases or anti-examples to select on, no declared side effect (so a
+// remote one is assumed to mutate), and a generic timeout and result bound
+// rather than sized ones. That is a working state, not a broken one, but it is
+// the kind of gap that stays invisible until someone wonders why one tool's
+// results are shaped and another's are not.
+func (e *Engine) reportUndeclared(server string, names []string) {
 	if len(names) == 0 {
 		return
 	}
-	e.unregisteredOnce.Do(func() {
-		e.unregistered = names
-		slog.Warn("以下工具没有元数据，未经过 Gateway（无参数注入与结果整形）",
-			"tools", names, "count", len(names))
-	})
+	e.undeclaredMu.Lock()
+	defer e.undeclaredMu.Unlock()
+	if e.undeclared == nil {
+		e.undeclared = map[string][]string{}
+	}
+	if _, seen := e.undeclared[server]; seen {
+		return // already logged for this server; a toolset re-binds every turn
+	}
+	e.undeclared[server] = names
+	where := server
+	if where == "" {
+		where = "（内置）"
+	}
+	slog.Warn("以下工具没有元数据，按合成的默认值治理",
+		"server", where, "tools", names, "count", len(names))
+}
+
+// Undeclared returns the tools running on synthesized metadata, by server.
+func (e *Engine) Undeclared() map[string][]string {
+	e.undeclaredMu.Lock()
+	defer e.undeclaredMu.Unlock()
+	out := make(map[string][]string, len(e.undeclared))
+	for k, v := range e.undeclared {
+		out[k] = append([]string(nil), v...)
+	}
+	return out
 }
 
 // ToolRegistry exposes the current registry snapshot, for the API's pre-save
@@ -679,7 +742,7 @@ func (e *Engine) withCompaction(llm adkmodel.LLM, agentName string, canRecall bo
 // is rendered fresh each turn (core memory + skill catalog prepended) via an
 // InstructionProvider. Shared by the legacy single agent and the multi-agent
 // tree so both behave identically.
-func (e *Engine) buildNode(name, description, provider, instruction string, toolsets []adktool.Toolset, subAgents []agent.Agent, core *memory.Core, withSearch bool) (agent.Agent, config.Provider, error) {
+func (e *Engine) buildNode(name, description, provider, instruction string, toolsets []NamedToolset, subAgents []agent.Agent, core *memory.Core, withSearch bool) (agent.Agent, config.Provider, error) {
 	llm, prov, err := e.reg.Get(provider)
 	if err != nil {
 		return nil, prov, err
@@ -714,20 +777,27 @@ func (e *Engine) buildNode(name, description, provider, instruction string, tool
 		}
 	}
 
-	// Route the built-in tools through the gateway: our name and schema, the
+	// Route every tool through the gateway: our name and schema, the
 	// incident's arguments, a shaped result, and evidence the conclusion can
 	// cite.
 	//
-	// MCP toolsets are deliberately left on the direct path for now. A
-	// toolset's tools are fetched per turn (set.Tools(ctx)), not at build
-	// time, so wrapping them needs a Toolset wrapper rather than a tool one —
-	// a separate change, and one worth making with a real MCP server in hand
-	// to test against.
+	// MCP toolsets included, which is the point — a third-party server is
+	// exactly the thing whose calls nobody could otherwise account for. Their
+	// tools are fetched per turn (set.Tools(ctx)) rather than at build time,
+	// so they are bound through a toolset wrapper instead of a tool one.
 	store, gw := e.toolRegistry()
-	snapshot := gateway.Snapshot(store.Load())
-	gw.SetExecutor("", gateway.InnerExecutor(tools))
-	tools, unregistered := gateway.WrapTools(gw, snapshot, "", e.incidentFor, tools)
-	e.reportUnregistered(unregistered)
+	binder := &gateway.Binder{
+		GW:       gw,
+		Registry: gateway.Snapshot(store.Load()),
+		Context:  e.incidentFor,
+		Fallback: undeclaredFallback,
+		Report:   e.reportUndeclared,
+	}
+	tools = binder.Tools("", tools)
+	bound := make([]adktool.Toolset, 0, len(toolsets))
+	for _, ts := range toolsets {
+		bound = append(bound, binder.Toolset(ts.Name, ts.Set))
+	}
 
 	beforeTool, afterTool := e.toolCallbacks()
 	beforeModel, afterModel := e.modelCallbacks(mdl.Name())
@@ -752,7 +822,7 @@ func (e *Engine) buildNode(name, description, provider, instruction string, tool
 			return base, nil
 		},
 		Tools:     tools,
-		Toolsets:  toolsets,  // external MCP servers (all enabled, or a selected subset)
+		Toolsets:  bound,     // external MCP servers, each bound to the gateway
 		SubAgents: subAgents, // delegation targets (transfer_to_agent), nil for a leaf
 
 		// Telemetry only — see toolCallbacks for why these must not return a

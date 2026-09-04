@@ -91,9 +91,11 @@ func wrapOne(t *testing.T, m ops.ToolMetadata, inner *innerTool, p Policy) (*Wra
 		Executors: map[string]Executor{m.Server: InnerExecutor(tools)},
 		Policy:    p,
 	})
-	wrapped, unwrapped := WrapTools(gw, reg, m.Server, func(agent.ToolContext) *ops.IncidentContext {
+	var unwrapped []string
+	b := &Binder{GW: gw, Registry: reg, Context: func(agent.ToolContext) *ops.IncidentContext {
 		return prodContext()
-	}, tools)
+	}, Report: func(_ string, names []string) { unwrapped = append(unwrapped, names...) }}
+	wrapped := b.Tools(m.Server, tools)
 	if len(unwrapped) != 0 {
 		t.Fatalf("a registered tool was left unwrapped: %v", unwrapped)
 	}
@@ -321,7 +323,10 @@ func TestUnregisteredToolsPassThroughAndAreReported(t *testing.T) {
 	}
 	gw := New(Config{Registry: reg})
 
-	wrapped, unwrapped := WrapTools(gw, reg, known.Server, nil, tools)
+	var unwrapped []string
+	b := &Binder{GW: gw, Registry: reg,
+		Report: func(_ string, names []string) { unwrapped = append(unwrapped, names...) }}
+	wrapped := b.Tools(known.Server, tools)
 	if len(wrapped) != 2 {
 		t.Fatalf("wrapped %d tools, want 2 — nothing may be dropped", len(wrapped))
 	}
@@ -349,11 +354,12 @@ func TestIncidentContextIsResolvedPerCall(t *testing.T) {
 	})
 
 	cluster := "prod-a"
-	wrapped, _ := WrapTools(gw, reg, m.Server, func(agent.ToolContext) *ops.IncidentContext {
+	b := &Binder{GW: gw, Registry: reg, Context: func(agent.ToolContext) *ops.IncidentContext {
 		ic := prodContext()
 		ic.Primary.Handles["kubernetes"].Ref["cluster"] = cluster
 		return ic
-	}, tools)
+	}}
+	wrapped := b.Tools(m.Server, tools)
 	w := wrapped[0].(*Wrapped)
 
 	if _, err := w.Run(newToolCtx(), nil); err != nil {

@@ -250,6 +250,24 @@ type Gateway struct {
 	execMu    sync.RWMutex
 	executors map[string]Executor
 
+	// discovered holds metadata synthesized for tools a server actually
+	// exposed but nobody described. It is kept apart from the registry
+	// because the two have different standing: the registry is what someone
+	// decided, this is what was found. A declared entry therefore always
+	// wins, and adopting a tool can never quietly redefine a configured one.
+	//
+	// It is filled at bind time from a real tool list, never from a name
+	// alone. A registry that answered every lookup would also answer for a
+	// name the model invented, and the gateway would then try to route a
+	// tool that does not exist.
+	discMu sync.RWMutex
+	// discovered maps our canonical name to the metadata.
+	discovered map[string]ops.ToolMetadata
+	// adopted maps "server/remote" to the canonical name already chosen for
+	// it, so re-binding the same toolset — which happens every turn — keeps
+	// the name stable instead of allocating a new one each time.
+	adopted map[string]string
+
 	callSeq atomic.Uint64
 	evSeq   atomic.Uint64
 }
@@ -421,10 +439,75 @@ func (g *Gateway) ExecuteAs(ctx context.Context, meta CallMeta, ic *ops.Incident
 }
 
 func (g *Gateway) lookup(name string) (ops.ToolMetadata, bool) {
-	if g.reg == nil {
-		return ops.ToolMetadata{}, false
+	if g.reg != nil {
+		if m, ok := g.reg.Lookup(name); ok {
+			return m, true
+		}
 	}
-	return g.reg.Lookup(name)
+	g.discMu.RLock()
+	defer g.discMu.RUnlock()
+	m, ok := g.discovered[name]
+	return m, ok
+}
+
+// adopt gives a discovered-but-undeclared tool a canonical name and records
+// its metadata, returning the metadata as the gateway will see it.
+//
+// Naming rule: keep the name the server gave it, and only prefix on an actual
+// collision. Renaming pre-emptively would cost what the metadata doc warns
+// about — the name is a hint the model reads, and "k8s__get_pods" selects
+// worse than "get_pods" — but a collision here is not hypothetical. Two MCP
+// servers both exposing get_pods, neither described, is the ordinary case, and
+// leaving them to share one name would route half the calls to the wrong
+// cluster while looking like it worked.
+//
+// Calling it again for the same (server, remote) returns the same name: a
+// toolset is re-bound every turn, and a name that drifted between turns would
+// invalidate the model's own memory of what it just called.
+func (g *Gateway) adopt(m ops.ToolMetadata) (ops.ToolMetadata, error) {
+	key := m.Server + "/" + m.Remote()
+
+	g.discMu.Lock()
+	defer g.discMu.Unlock()
+	if name, ok := g.adopted[key]; ok {
+		return g.discovered[name], nil
+	}
+
+	name := m.Remote()
+	if g.nameTakenLocked(name) {
+		if m.Server == "" {
+			// A built-in colliding with a declared entry is a programming
+			// error, not a deployment one, and there is no server to prefix
+			// with. Refusing beats inventing a name for it.
+			return m, fmt.Errorf("gateway: 内置工具 %q 与已声明的条目重名", name)
+		}
+		name = m.Server + "__" + m.Remote()
+		if g.nameTakenLocked(name) {
+			return m, fmt.Errorf("gateway: %s 与 %s 都已被占用，%s/%s 无法接管",
+				m.Remote(), name, m.Server, m.Remote())
+		}
+	}
+	m.Name = name
+
+	if g.discovered == nil {
+		g.discovered = map[string]ops.ToolMetadata{}
+		g.adopted = map[string]string{}
+	}
+	g.discovered[name] = m
+	g.adopted[key] = name
+	return m, nil
+}
+
+// nameTakenLocked reports whether a canonical name is already claimed, by a
+// declared entry or by an earlier adoption. Callers hold discMu.
+func (g *Gateway) nameTakenLocked(name string) bool {
+	if g.reg != nil {
+		if _, ok := g.reg.Lookup(name); ok {
+			return true
+		}
+	}
+	_, ok := g.discovered[name]
+	return ok
 }
 
 func (g *Gateway) shape(m ops.ToolMetadata, raw map[string]any, ev *ops.Evidence) error {

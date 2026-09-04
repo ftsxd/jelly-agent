@@ -4,12 +4,15 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
+	"time"
 
 	"google.golang.org/adk/agent"
 	adkmodel "google.golang.org/adk/model"
 	adktool "google.golang.org/adk/tool"
 	"google.golang.org/genai"
 
+	"github.com/jelly-agent/jelly-agent/internal/logging"
 	"github.com/jelly-agent/jelly-agent/internal/ops"
 )
 
@@ -52,21 +55,69 @@ type KeyedRegistry interface {
 	ByKey(key string) (ops.ToolMetadata, bool)
 }
 
-// WrapTools routes one server's ADK tools through the gateway. server is the
-// MCP server they came from, empty for built-ins.
+// Fallback governs tools that were found but never described.
 //
-// Only tools the registry knows are wrapped. An unregistered tool is returned
-// untouched rather than dropped: dropping it would make a working tool vanish
-// with nothing to explain why, and passing it through leaves today's behaviour
-// intact for anything metadata has not reached yet. The count of unwrapped
-// tools is returned so a caller can report it once at startup instead of
-// leaving it invisible.
+// Off (the zero value), an undeclared tool keeps the direct path it has today.
+// On, it is routed through the gateway under synthesized metadata, so the
+// claim that the gateway is the only path a tool call takes becomes true for
+// MCP too — where it matters most, since a third-party server is precisely the
+// thing whose calls nobody can otherwise account for.
 //
-// A tool ADK cannot call anyway (no Declaration, no Run) is also passed
-// through — wrapping it would claim a schema slot for something the model
-// could never invoke.
-func WrapTools(gw *Gateway, reg KeyedRegistry, server string, ic ContextFunc, tools []adktool.Tool) (wrapped []adktool.Tool, unwrapped []string) {
+// What it cannot synthesize is judgement. An undeclared tool has no declared
+// side effect, and Policy.permits already resolves that the conservative way:
+// a built-in that says nothing is read-only, a remote one that says nothing is
+// assumed to mutate, because a third-party server's silence is not a safety
+// guarantee.
+type Fallback struct {
+	// Govern routes undeclared tools through the gateway.
+	Govern bool
+	// Timeout and MaxResultBytes bound a call nobody has sized.
+	//
+	// They exist because zero in ToolMetadata means "no bound", which is a
+	// reasonable default for a tool someone looked at and a bad one for a
+	// remote nobody has: an MCP tool that answers with a 2MB pod list would
+	// otherwise put all of it in the context window, and a server that hangs
+	// would hang the turn.
+	Timeout        time.Duration
+	MaxResultBytes int
+}
+
+// Binder routes ADK tools and toolsets through a gateway.
+//
+// It carries the bundle — gateway, registry, incident lookup, fallback — so
+// that wrapping a toolset needs the same setup as wrapping a tool list rather
+// than a second, subtly different one. It also registers each server's
+// executor as it binds, which used to be the caller's job and is the kind of
+// step that is silently forgotten: wrapping without registering leaves every
+// call failing with "no executor", and only at call time.
+type Binder struct {
+	GW       *Gateway
+	Registry KeyedRegistry
+	Context  ContextFunc
+	Fallback Fallback
+	// Report is called with the tools that had no declared metadata, so the
+	// gap is visible instead of silent. It may be nil.
+	Report func(server string, undeclared []string)
+}
+
+// Tools routes one server's ADK tools through the gateway. server is the MCP
+// server they came from, empty for built-ins.
+//
+// A tool ADK cannot call anyway (no Declaration, no Run) is passed through —
+// wrapping it would claim a schema slot for something the model could never
+// invoke.
+//
+// An undeclared tool is passed through untouched unless Fallback.Govern is
+// set. Dropping it was never an option: a working tool would vanish with
+// nothing to explain why.
+func (b *Binder) Tools(server string, tools []adktool.Tool) []adktool.Tool {
+	// Registered before wrapping, and from the full list: the gateway routes
+	// by the tool's remote name, so the executor must know every tool the
+	// server offers, not only the ones that ended up wrapped.
+	b.GW.SetExecutor(server, InnerExecutor(tools))
+
 	out := make([]adktool.Tool, 0, len(tools))
+	var undeclared []string
 	for _, t := range tools {
 		r, ok := t.(runnable)
 		if !ok {
@@ -77,22 +128,77 @@ func WrapTools(gw *Gateway, reg KeyedRegistry, server string, ic ContextFunc, to
 		// name its own server gave it, and "get_pods" means nothing without
 		// knowing which server said it — the very ambiguity the registry
 		// exists to resolve.
-		m, known := reg.ByKey(server + "/" + t.Name())
+		m, known := b.Registry.ByKey(server + "/" + t.Name())
 		if !known {
-			out = append(out, t)
-			unwrapped = append(unwrapped, server+"/"+t.Name())
-			continue
+			undeclared = append(undeclared, server+"/"+t.Name())
+			if !b.Fallback.Govern {
+				out = append(out, t)
+				continue
+			}
+			adopted, err := b.GW.adopt(ops.ToolMetadata{
+				RemoteName:     t.Name(),
+				Server:         server,
+				Description:    r.Declaration().Description,
+				Timeout:        b.Fallback.Timeout,
+				MaxResultBytes: b.Fallback.MaxResultBytes,
+			})
+			if err != nil {
+				// Naming failed, so this tool has no addressable identity.
+				// Passing it through keeps it working on the direct path,
+				// which beats removing a tool over a bookkeeping problem.
+				slog.Error("工具无法接管，仍走直连路径", "tool", server+"/"+t.Name(), logging.Err(err))
+				out = append(out, t)
+				continue
+			}
+			m = adopted
 		}
 		out = append(out, &Wrapped{
 			meta:        m,
-			gw:          gw,
-			context:     ic,
+			gw:          b.GW,
+			context:     b.Context,
 			origin:      ops.OriginModel,
 			declaration: stripInjected(r.Declaration(), m),
 			inner:       r,
 		})
 	}
-	return out, unwrapped
+	if b.Report != nil && len(undeclared) > 0 {
+		b.Report(server, undeclared)
+	}
+	return out
+}
+
+// Toolset wraps an MCP toolset so its tools take the same path as built-ins.
+//
+// It has to be a toolset wrapper rather than a tool one because a toolset's
+// tools are fetched per turn (set.Tools(ctx)), not at build time: what a
+// server offers can change between turns, and a list captured once would go
+// stale. That per-turn call is also why adopt has to be idempotent.
+//
+// server must be the configured server name and cannot be taken from
+// set.Name(): ADK's mcptoolset returns the constant "mcp_tool_set" for every
+// instance (tool/mcptoolset/set.go:96). Binding by that name gave two servers
+// one executor slot, so the second registration silently took over the first
+// server's traffic, and their duplicate tool names looked like the same tool
+// being re-bound rather than a clash. Nothing failed; the calls just went to
+// the wrong cluster.
+func (b *Binder) Toolset(server string, set adktool.Toolset) adktool.Toolset {
+	return &boundToolset{binder: b, server: server, inner: set}
+}
+
+type boundToolset struct {
+	binder *Binder
+	server string
+	inner  adktool.Toolset
+}
+
+func (t *boundToolset) Name() string { return t.inner.Name() }
+
+func (t *boundToolset) Tools(ctx agent.ReadonlyContext) ([]adktool.Tool, error) {
+	tools, err := t.inner.Tools(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return t.binder.Tools(t.server, tools), nil
 }
 
 // InnerExecutor turns one server's ADK tools into the executor the gateway
