@@ -69,10 +69,19 @@ type Evidence struct {
 
 	// Summary is the one line that goes into the prompt and the report. Data is
 	// the structured payload, already shaped to the tool's ceiling.
-	Summary   string          `json:"summary"`
-	Data      json.RawMessage `json:"data,omitempty"`
-	Truncated bool            `json:"truncated,omitempty"`
-	Redacted  bool            `json:"redacted,omitempty"`
+	Summary string          `json:"summary"`
+	Data    json.RawMessage `json:"data,omitempty"`
+	// Truncated says the payload the model received is incomplete. It is not
+	// set by shortening the summary: the summary is a one-line preview, and
+	// the model reads Data. Conflating the two told the model that complete
+	// results were partial — which it then reported to the user, and narrowed
+	// its filters over.
+	Truncated bool `json:"truncated,omitempty"`
+	// SummaryTruncated says only the preview was shortened. It matters when
+	// the payload could not be rendered as JSON, because then the summary is
+	// all the model got and cutting it does lose information.
+	SummaryTruncated bool `json:"summary_truncated,omitempty"`
+	Redacted         bool `json:"redacted,omitempty"`
 	// Retrievable mirrors ToolCall.Retrievable, so a conclusion that cites
 	// this observation can say whether the full delivery is still readable.
 	Retrievable bool `json:"retrievable,omitempty"`

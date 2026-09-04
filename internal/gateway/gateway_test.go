@@ -592,8 +592,16 @@ func TestSummaryIsBoundedNotJustTheData(t *testing.T) {
 	if n := len([]rune(res.Evidence.Summary)); n > maxSummaryChars+len([]rune(truncMarker)) {
 		t.Errorf("summary is %d runes; nothing legible in a prompt needs that", n)
 	}
-	if !res.Evidence.Truncated {
-		t.Error("a bounded summary was not marked truncated")
+	if !res.Evidence.SummaryTruncated {
+		t.Error("a bounded summary was not recorded as bounded")
+	}
+	// And it must NOT be reported as a truncated result. The summary is a
+	// preview; the model reads Data, which here is complete. Marking this
+	// Truncated told the model that complete listings were partial — a real
+	// run showed four such results — and it narrowed its filters and told the
+	// user it had only part of the data.
+	if res.Evidence.Truncated {
+		t.Error("bounding the preview marked the result itself as incomplete")
 	}
 
 	// A tool's own tighter ceiling wins over the default.

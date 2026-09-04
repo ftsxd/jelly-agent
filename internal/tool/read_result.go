@@ -171,9 +171,10 @@ func NewSearchResultTool(store *record.Store, scope Scoper) (adktool.Tool, error
 	return functiontool.New(
 		functiontool.Config{
 			Name: SearchResultName,
-			Description: "在某次工具调用的完整返回里按正则搜索（按行匹配，可带上下文）。" +
-				"结果很大时先搜索定位，再用 read_result 读取命中附近的内容，" +
-				"不要逐段读完全文。返回会给出命中总数。",
+			Description: "在某次工具调用【被省略的】返回里按正则搜索（按行匹配，可带上下文）。" +
+				"仅在结果里 truncated 为真时使用——那说明进入上下文的只是一部分。" +
+				"若完整内容已经在上下文里，直接读上下文，不要再来搜索。" +
+				"定位到以后用 read_result 读取命中附近的内容，不要逐段读完全文。返回会给出命中总数。",
 		},
 		func(tc adktool.Context, args SearchResultArgs) (record.SearchResult, error) {
 			return searchResult(tc, store, scope(tc), args)

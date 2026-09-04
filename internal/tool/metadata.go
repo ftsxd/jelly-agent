@@ -129,15 +129,19 @@ func BuiltinMetadata() toolreg.Source {
 				Timeout: 10 * time.Second,
 			},
 			{
-				Name:        "search_result",
-				Description: "在某次工具调用的完整返回里按正则按行搜索，可带上下文。结果很大时先搜索定位，再读命中附近的内容。",
+				Name: "search_result",
+				// The trigger is "part of it is missing", not "it is large".
+				// Measured: the earlier wording said "结果很大时先搜索定位",
+				// and on a 42KB result that was already complete in the
+				// prompt the model searched it four times and read it three
+				// more — for bytes it already had, at four times the tokens.
+				Description: "在某次工具调用【被省略的】返回里按正则按行搜索，可带上下文。仅在结果里 truncated 为真时使用；完整内容已在上下文里就直接读上下文。",
 				UseCases: []string{
-					"在很长的返回里定位关键行",
-					"统计某类内容出现了多少次",
-					"从大结果里只取相关片段",
+					"结果被截断，要在被省略的部分里定位关键行",
+					"统计被省略部分里某类内容出现了多少次",
 				},
 				AntiExamples: []string{
-					"结果本来就不长时（直接读即可）",
+					"结果没有被截断时（完整内容已经在上下文里，再搜索是白花 token）",
 					"想重新执行一次工具时（这里只搜已保存的结果）",
 				},
 				Produces:     ops.KindText,

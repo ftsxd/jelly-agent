@@ -453,22 +453,49 @@ func toolPayload(ev *ops.Evidence) map[string]any {
 		"evidence_id": ev.ID,
 		"summary":     ev.Summary,
 	}
+	sentData := false
 	if len(ev.Data) > 0 {
 		var v any
 		if err := json.Unmarshal(ev.Data, &v); err == nil {
 			out["data"] = v
+			sentData = true
 		}
 	}
-	if ev.Truncated {
-		out["truncated"] = true
-		// Actionable, because "truncated" alone is read as "ask for less".
-		// That is what happened in practice: a model told only that a listing
-		// was cut retried it seven times with smaller and smaller pages,
-		// each attempt hitting the same ceiling and re-sending the whole
-		// history. What it needed to know is that the ceiling is on the
-		// response, so a different page size will not get past it.
-		out["truncated_note"] = "结果已超出返回上限被截断。重复调用或改变分页不会绕过该上限——请改用更精确的过滤条件，或向用户说明只取到了部分结果。"
+	// Always stated, never implied. read_result's own error message points at
+	// this field to explain why a handle did not resolve, so a model that was
+	// never shown it is being referred to something it cannot see.
+	out["retrievable"] = ev.Retrievable
+
+	// Incomplete means the model's copy is short of what the tool delivered.
+	// A shortened summary only counts when the summary is all it got.
+	incomplete := ev.Truncated || (ev.SummaryTruncated && !sentData)
+	if !incomplete {
+		return out
 	}
+	out["truncated"] = true
+
+	// The advice depends on whether the rest can still be fetched, and
+	// getting this wrong is expensive in both directions.
+	//
+	// It used to say, unconditionally, that repeating the call or changing the
+	// page size would not get past the ceiling. That was right when the only
+	// recourse was calling the tool again — a model told merely "truncated"
+	// retried a listing seven times with smaller pages, each attempt hitting
+	// the same ceiling and re-sending the whole history.
+	//
+	// It is wrong now. Everything a tool delivers is committed to durable
+	// storage before it is shortened, and read_result pages through it while
+	// search_result searches it — so for a retrievable result, paging and
+	// narrowing genuinely do work. Leaving the old wording in place would
+	// suppress the exact recovery path the store exists to provide.
+	if ev.Retrievable {
+		out["truncated_note"] = "只有部分内容进入了本次上下文，完整返回已保存。" +
+			"用 search_result 按 evidence_id 搜索定位需要的部分，或用 read_result 分段读取——" +
+			"这两条都能拿到被省略的内容，不需要重新调用本工具。"
+		return out
+	}
+	out["truncated_note"] = "结果已超出返回上限被截断，且完整返回未能保存，因此无法找回被省略的部分。" +
+		"重复调用或改变分页不会绕过该上限——请改用更精确的过滤条件，或向用户说明只取到了部分结果。"
 	return out
 }
 

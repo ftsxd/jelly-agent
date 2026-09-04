@@ -386,3 +386,93 @@ func keysOf(m map[string]any) []string {
 	}
 	return out
 }
+
+// Three defects a real run exposed and no unit test did. They are grouped
+// because they share a cause: the payload the model reads was assembled from
+// assumptions about a store that did not exist when the code was written, and
+// nothing re-checked those assumptions once it did.
+func TestToolPayloadTellsTheModelTheTruthAboutRecovery(t *testing.T) {
+	t.Run("完整结果不能标成截断", func(t *testing.T) {
+		// A summary is always bounded — maxSummaryChars applies even with no
+		// declared ceiling — so a shortened preview must not mark a complete
+		// payload as partial. In the run that found this, four of nine
+		// results were flagged truncated with none of their data cut.
+		out := toolPayload(&ops.Evidence{
+			ID: "e1", Summary: "shortened preview",
+			SummaryTruncated: true,
+			Data:             []byte(`{"list":[1,2,3]}`),
+			Retrievable:      true,
+		})
+		if _, present := out["truncated"]; present {
+			t.Error("a complete payload with a shortened preview was reported as truncated")
+		}
+		if out["data"] == nil {
+			t.Error("the complete data was not sent")
+		}
+	})
+
+	t.Run("正文送不出去时，摘要被裁才算截断", func(t *testing.T) {
+		// Data that cannot be rendered as JSON is not sent at all, so the
+		// summary is the whole of what the model receives and cutting it does
+		// lose information.
+		out := toolPayload(&ops.Evidence{
+			ID: "e1", Summary: "shortened preview",
+			SummaryTruncated: true,
+			Data:             []byte("not json at all"),
+			Retrievable:      true,
+		})
+		if out["truncated"] != true {
+			t.Error("the summary was all the model got and was cut, but nothing said so")
+		}
+	})
+
+	t.Run("retrievable 必须明说", func(t *testing.T) {
+		// read_result's own failure message points at this field to explain
+		// why a handle did not resolve. A model that was never shown it is
+		// being referred to something it cannot see.
+		for _, retrievable := range []bool{true, false} {
+			out := toolPayload(&ops.Evidence{ID: "e1", Summary: "s", Retrievable: retrievable})
+			got, present := out["retrievable"]
+			if !present {
+				t.Fatalf("retrievable=%v: the field is absent from what the model reads", retrievable)
+			}
+			if got != retrievable {
+				t.Errorf("retrievable = %v, want %v", got, retrievable)
+			}
+		}
+	})
+
+	t.Run("可找回时必须说分页与搜索有效", func(t *testing.T) {
+		// The old note said, unconditionally, that repeating the call or
+		// changing the page size would not get past the ceiling. With the
+		// delivery store in place that is false for a retrievable result, and
+		// leaving it would suppress the recovery path the store exists for.
+		out := toolPayload(&ops.Evidence{
+			ID: "e9", Summary: "s", Truncated: true, Retrievable: true,
+			Data: []byte(`{"partial":true}`),
+		})
+		note, _ := out["truncated_note"].(string)
+		for _, want := range []string{"search_result", "read_result"} {
+			if !strings.Contains(note, want) {
+				t.Errorf("note does not point at %s: %q", want, note)
+			}
+		}
+		if strings.Contains(note, "不会绕过该上限") {
+			t.Error("a retrievable result was told paging cannot help, which is false and suppresses recovery")
+		}
+	})
+
+	t.Run("找不回时才说重试无用", func(t *testing.T) {
+		out := toolPayload(&ops.Evidence{
+			ID: "e9", Summary: "s", Truncated: true, Retrievable: false,
+			Data: []byte(`{"partial":true}`),
+		})
+		note, _ := out["truncated_note"].(string)
+		if !strings.Contains(note, "无法找回") {
+			t.Errorf("note does not say the rest is unrecoverable: %q", note)
+		}
+		if strings.Contains(note, "read_result") {
+			t.Error("the model was pointed at read_result for a result that was never stored")
+		}
+	})
+}

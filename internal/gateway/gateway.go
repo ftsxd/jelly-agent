@@ -490,11 +490,18 @@ func (g *Gateway) ExecuteAs(ctx context.Context, meta CallMeta, ic *ops.Incident
 		ev.Truncated = true
 	}
 	if bounded, cut := boundSummary(ev.Summary, m.MaxResultBytes); cut {
-		// The summary is what actually reaches the prompt, so a ceiling that
-		// only bounded Data would let a tool returning one enormous content
-		// field walk straight past the context budget.
+		// Recorded separately from Truncated. A summary is a one-line preview
+		// and is always bounded — maxSummaryChars applies even when a tool
+		// declares no ceiling — so setting Truncated here marked almost every
+		// sizeable result as partial. A real run showed four such results,
+		// none of whose data had been cut at all: the model was told complete
+		// listings were incomplete, and said so to the user.
+		//
+		// It still matters when the payload is not renderable as JSON,
+		// because then the summary is the only thing the model receives.
+		// toolPayload decides that, since it is what knows what it emitted.
 		ev.Summary = bounded
-		ev.Truncated = true
+		ev.SummaryTruncated = true
 	}
 	call.Truncated = ev.Truncated
 	// Retrievable travels with the evidence too, so a report that cites e3 can
