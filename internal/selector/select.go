@@ -114,7 +114,7 @@ func Select(query string, tools []ops.ToolMetadata, cfg Config) Result {
 		order[m.Name] = i
 		tiers[m.Name] = tierOf(m, relevance)
 		cands = append(cands, ops.Candidate{
-			Tool: m.Name, Score: sc, Reason: reason,
+			Tool: m.Name, Score: sc, Reason: reason, Matched: relevance > 0,
 			Baseline: m.Baseline, Fallback: m.Fallback,
 		})
 	}

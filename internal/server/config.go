@@ -24,10 +24,11 @@ type providerInput struct {
 	Model       string `json:"model"`
 	MakeDefault bool   `json:"make_default"`
 
-	Temperature *float64 `json:"temperature"`
-	MaxTokens   *int     `json:"max_tokens"`
-	TimeoutSec  *int     `json:"timeout_sec"`
-	MaxRetries  *int     `json:"max_retries"`
+	Temperature   *float64 `json:"temperature"`
+	MaxTokens     *int     `json:"max_tokens"`
+	TimeoutSec    *int     `json:"timeout_sec"`
+	MaxRetries    *int     `json:"max_retries"`
+	ContextWindow *int     `json:"context_window"`
 }
 
 // applyTuning copies the supplied tuning fields onto p, leaving absent ones
@@ -52,6 +53,9 @@ func (in providerInput) applyTuning(p *config.Provider) {
 	if in.MaxRetries != nil {
 		n := max(0, *in.MaxRetries)
 		p.MaxRetries = &n
+	}
+	if in.ContextWindow != nil {
+		p.ContextWindow = max(0, *in.ContextWindow)
 	}
 }
 

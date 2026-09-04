@@ -24,8 +24,8 @@ func desc(d string) func(*ops.ToolMetadata) {
 func anti(cases ...string) func(*ops.ToolMetadata) {
 	return func(m *ops.ToolMetadata) { m.AntiExamples = cases }
 }
-func fallback(m *ops.ToolMetadata)  { m.Fallback = true }
-func baseline(m *ops.ToolMetadata)  { m.Baseline = true }
+func fallback(m *ops.ToolMetadata) { m.Fallback = true }
+func baseline(m *ops.ToolMetadata) { m.Baseline = true }
 func tags(t ...string) func(*ops.ToolMetadata) {
 	return func(m *ops.ToolMetadata) { m.Tags = t }
 }
@@ -370,4 +370,31 @@ func scoreOf(r Result, tool string) float64 {
 		return c.Score
 	}
 	return 0
+}
+
+// Matched must mean "the question hit this tool", not "this tool scored above
+// zero". The score carries the latency tiebreaker, so a fast tool that matched
+// nothing still scores positive — and a caller that used the score to decide
+// which tools have earned a slot would pin padding in place, displacing the
+// tools a previous turn actually used.
+func TestMatchedIsNotJustAPositiveScore(t *testing.T) {
+	fast := func(m *ops.ToolMetadata) { m.Latency = ops.LatencyFast }
+	tools := []ops.ToolMetadata{
+		meta("quick_but_irrelevant", fast),
+		meta("get_logs", use("查看日志")),
+	}
+	r := Select("查看日志", tools, Config{})
+
+	byName := map[string]ops.Candidate{}
+	for _, c := range r.Candidates {
+		byName[c.Tool] = c
+	}
+	if c := byName["quick_but_irrelevant"]; c.Score <= 0 {
+		t.Fatalf("premise broken: the fast tool scored %v, expected the latency bonus", c.Score)
+	} else if c.Matched {
+		t.Error("a fast tool that matched nothing was reported as matched")
+	}
+	if !byName["get_logs"].Matched {
+		t.Error("the tool the question hit was not reported as matched")
+	}
 }

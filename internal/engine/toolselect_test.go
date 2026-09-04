@@ -24,7 +24,10 @@ import (
 type askingCtx struct {
 	agent.StrictContextMock
 	question string
+	session  string
 }
+
+func (c *askingCtx) SessionID() string { return c.session }
 
 func (c *askingCtx) UserContent() *genai.Content {
 	return &genai.Content{Parts: []*genai.Part{{Text: c.question}}}
@@ -65,7 +68,7 @@ func TestSelectionRanksRealMCPTools(t *testing.T) {
 
 	names := func(question string) []string {
 		t.Helper()
-		got, err := sel.Tools(&askingCtx{agent.StrictContextMock{Ctx: ctx}, question})
+		got, err := sel.Tools(&askingCtx{StrictContextMock: agent.StrictContextMock{Ctx: ctx}, question: question})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -142,6 +145,17 @@ func TestUnwrappedToolIsStillRankable(t *testing.T) {
 type stubTool struct {
 	name string
 	desc string
+	// meta, when set, is what selection ranks against — the same path a
+	// gateway-wrapped tool takes. Without it a stub can only carry a name and
+	// a description, which is not enough to exercise fields like latency.
+	meta *ops.ToolMetadata
+}
+
+func (s *stubTool) Metadata() ops.ToolMetadata {
+	if s.meta != nil {
+		return *s.meta
+	}
+	return ops.ToolMetadata{Name: s.name, Description: s.desc}
 }
 
 func (s *stubTool) Name() string        { return s.name }
@@ -206,5 +220,146 @@ func TestUndeclaredResultBoundIsConfigurable(t *testing.T) {
 	cfg.Tools.MaxResultBytes = 4096
 	if got := New(cfg).undeclaredFallback().MaxResultBytes; got != 4096 {
 		t.Errorf("MaxResultBytes = %d, want the configured 4096", got)
+	}
+}
+
+// The whole point of the admission record, at the level it is wired in.
+//
+// Four tools and three slots, with the padding declared first so that a fresh
+// selection would spend both spare slots on it. Turn one matches the log tool,
+// turn two matches the SQL one; without the standing set, turn two drops the
+// log tool and the prompt prefix changes, taking the cache for the whole
+// history with it.
+//
+// An earlier version of this test used three tools and two slots, where both
+// turns happened to select the same pair — it passed with the admission record
+// removed entirely.
+func TestSecondTurnKeepsTheSameToolSet(t *testing.T) {
+	tools := []adktool.Tool{
+		&stubTool{name: "pad_one"},
+		&stubTool{name: "pad_two"},
+		&stubTool{name: "get_logs", desc: "读取容器日志"},
+		&stubTool{name: "query_mysql", desc: "执行 MySQL 查询"},
+	}
+	sel := &selectingToolset{
+		static: tools,
+		cfg:    selector.Config{MaxTools: 3},
+		admit:  newAdmissions(),
+	}
+
+	ask := func(q string) []string {
+		t.Helper()
+		got, err := sel.Tools(&askingCtx{question: q, session: "s1"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return toolNames(got)
+	}
+
+	first := ask("看下容器日志")
+	if !slices.Contains(first, "get_logs") {
+		t.Fatalf("first turn = %v, want get_logs", first)
+	}
+
+	second := ask("跑一条 mysql 查询")
+	if !slices.Contains(second, "query_mysql") {
+		t.Fatalf("second turn = %v, want the newly matched tool", second)
+	}
+	if !slices.Contains(second, "get_logs") {
+		t.Errorf("second turn = %v, want the first turn's tool kept over padding", second)
+	}
+	if len(second) > 3 {
+		t.Errorf("second turn = %v, over the budget of 3", second)
+	}
+
+	if third := ask("看下容器日志"); !slices.Equal(third, second) {
+		t.Errorf("third turn = %v, want it identical to %v — the set has settled", third, second)
+	}
+}
+
+// Separate conversations must not inherit each other's tools.
+func TestDifferentSessionsDoNotShareTools(t *testing.T) {
+	tools := []adktool.Tool{
+		&stubTool{name: "get_logs", desc: "读取容器日志"},
+		&stubTool{name: "query_mysql", desc: "执行 MySQL 查询"},
+	}
+	sel := &selectingToolset{static: tools, cfg: selector.Config{MaxTools: 1}, admit: newAdmissions()}
+
+	a, err := sel.Tools(&askingCtx{question: "看下容器日志", session: "s1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := sel.Tools(&askingCtx{question: "跑一条 mysql 查询", session: "s2"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if slices.Equal(toolNames(a), toolNames(b)) {
+		t.Errorf("both sessions got %v; each should get its own", toolNames(a))
+	}
+}
+
+// The history budget is derived from what the provider says its model accepts,
+// because it cannot be discovered: OpenAI-compatible endpoints do not report
+// it, and a model-name table inside the binary goes stale.
+func TestHistoryBudgetFollowsTheContextWindow(t *testing.T) {
+	e := New(&config.Config{})
+	if got := e.historyBudgetFor(64000); got != 38400 {
+		t.Errorf("budget for a 64k window = %d, want 38400 (60%%)", got)
+	}
+	// Unknown window falls back rather than guessing.
+	if got := e.historyBudgetFor(0); got != 0 {
+		t.Errorf("budget for an unknown window = %d, want 0 so the package default applies", got)
+	}
+	// An explicit setting always wins — it is the operator's number.
+	n := 12345
+	cfg := &config.Config{}
+	cfg.History.MaxTokens = &n
+	if got := New(cfg).historyBudgetFor(1000000); got != 12345 {
+		t.Errorf("budget = %d, want the configured 12345", got)
+	}
+}
+
+// A slot is earned by matching the question, not by being quick.
+//
+// The score carries a latency tiebreaker, so a fast tool that matched nothing
+// still scores above zero. Treating that as a match pins padding in place and
+// displaces the tool a previous turn actually used — the prefix changes, and
+// the history behind it goes uncached.
+//
+// Two slots. Turn one matches the log tool and pads with the fast one; turn
+// two matches SQL. Correct behaviour keeps the log tool and drops the padding;
+// reading "matched" off the score keeps the padding and drops the log tool.
+func TestAFastToolDoesNotEarnASlot(t *testing.T) {
+	fast := ops.ToolMetadata{Name: "quick_pad", Latency: ops.LatencyFast}
+	logs := ops.ToolMetadata{Name: "get_logs", UseCases: []string{"查看容器日志"}}
+	sql := ops.ToolMetadata{Name: "query_mysql", UseCases: []string{"执行 MySQL 查询"}}
+	sel := &selectingToolset{
+		static: []adktool.Tool{
+			&stubTool{name: fast.Name, meta: &fast},
+			&stubTool{name: logs.Name, meta: &logs},
+			&stubTool{name: sql.Name, meta: &sql},
+		},
+		cfg:   selector.Config{MaxTools: 2},
+		admit: newAdmissions(),
+	}
+	ask := func(q string) []string {
+		t.Helper()
+		got, err := sel.Tools(&askingCtx{question: q, session: "s1"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return toolNames(got)
+	}
+
+	first := ask("查看容器日志")
+	if !slices.Contains(first, "get_logs") {
+		t.Fatalf("first turn = %v, want get_logs", first)
+	}
+	second := ask("执行 MySQL 查询")
+	if !slices.Contains(second, "query_mysql") {
+		t.Fatalf("second turn = %v, want query_mysql", second)
+	}
+	if !slices.Contains(second, "get_logs") {
+		t.Errorf("second turn = %v, want the previous turn's tool kept over the fast padding", second)
 	}
 }

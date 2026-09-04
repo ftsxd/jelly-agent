@@ -109,6 +109,10 @@ type Engine struct {
 	// whichever server happened to bind first and stayed quiet about the rest.
 	undeclaredMu sync.Mutex
 	undeclared   map[string][]string
+
+	// admit keeps each session's tool set stable, to protect the prompt cache.
+	admitOnce sync.Once
+	admit     *admissions
 }
 
 // New wraps a loaded config in an engine.
@@ -388,6 +392,17 @@ func (e *Engine) systemInstruction(core *memory.Core, instruction string, allowS
 		}
 	}
 	return base
+}
+
+// admissions returns the process-wide tool-admission record.
+//
+// It hangs off the engine rather than off a toolset because a toolset is built
+// per request while the prompt cache it protects spans the conversation. One
+// record per engine means a rebuild — a new request, a config reload of the
+// agent tree — does not reset a session's set and cost it a cache miss.
+func (e *Engine) admissions() *admissions {
+	e.admitOnce.Do(func() { e.admit = newAdmissions() })
+	return e.admit
 }
 
 // MaxTools exposes the resolved tool budget, for the console's prompt view.
@@ -803,17 +818,49 @@ func (e *Engine) BuildAgentWith(provider string, mcpNames []string) (agent.Agent
 	return a, prov, core, search, nil
 }
 
+// historyShare is the fraction of a model's context window the conversation
+// may occupy when no explicit budget is configured.
+//
+// The rest goes to the system instruction, the tool schemas and the reply. It
+// is deliberately generous rather than thrifty, because compaction is not
+// free in the way a token count suggests: every time it fires it rewrites the
+// prompt prefix, and a rewritten prefix forfeits the provider's cache on the
+// whole history behind it. A tight budget therefore trades a cheap cache read
+// for expensive fresh input on every turn, which can cost more than the
+// history it trimmed. Anthropic's own server-side compaction triggers at
+// roughly 15% of a 1M window for the same reason.
+const historyShare = 0.6
+
+// historyBudgetFor resolves the conversation budget.
+//
+// An explicit setting always wins: it is the operator's number and they may
+// have a reason this code cannot see. Otherwise it is derived from what the
+// provider says its model accepts. Zero means neither is available, which
+// leaves the history package's own default to apply — a fallback rather than a
+// guess, because a wrong window is worse than an admittedly generic one.
+func (e *Engine) historyBudgetFor(contextWindow int) int {
+	if n := e.cfg.History.MaxTokens; n != nil {
+		return *n
+	}
+	if contextWindow > 0 {
+		return int(float64(contextWindow) * historyShare)
+	}
+	return 0
+}
+
 // withCompaction layers conversation compaction over the raw LLM so a long
 // session (or a few large tool results) can't overrun the context window. An
 // explicit history.max_tokens of 0 opts out and returns the model untouched.
-func (e *Engine) withCompaction(llm adkmodel.LLM, agentName string, canRecall bool) adkmodel.LLM {
+func (e *Engine) withCompaction(llm adkmodel.LLM, agentName string, canRecall bool, contextWindow int) adkmodel.LLM {
 	h := e.cfg.History
 	if h.MaxTokens != nil && *h.MaxTokens <= 0 {
 		return llm
 	}
-	pol := history.Policy{KeepRecent: h.KeepRecent, ToolResultTokens: h.ToolResultTokens, CanRecall: canRecall}
-	if h.MaxTokens != nil {
-		pol.MaxTokens = *h.MaxTokens
+	pol := history.Policy{
+		KeepRecent:       h.KeepRecent,
+		ToolResultTokens: h.ToolResultTokens,
+		CanRecall:        canRecall,
+		MaxTokens:        e.historyBudgetFor(contextWindow),
 	}
 	return history.Wrap(llm, pol, func(ctx context.Context, req *adkmodel.LLMRequest, r history.Result) {
 		// The trace gets every request; the log gets only the ones where
@@ -857,7 +904,7 @@ func (e *Engine) buildNode(name, description, provider, instruction string, tool
 	}
 	// withSearch is exactly "the agent has load_memory", which decides whether
 	// the compaction notice may point the model at it.
-	mdl := e.withCompaction(llm, name, withSearch)
+	mdl := e.withCompaction(llm, name, withSearch, prov.ContextWindow)
 
 	tools, err := e.Tools(core, withSearch)
 	if err != nil {
@@ -914,6 +961,7 @@ func (e *Engine) buildNode(name, description, provider, instruction string, tool
 		sets:   bound,
 		cfg:    selector.Config{MaxTools: e.maxTools()},
 		report: logSelection,
+		admit:  e.admissions(),
 	}
 
 	beforeTool, afterTool := e.toolCallbacks()

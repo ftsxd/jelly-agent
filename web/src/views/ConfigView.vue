@@ -16,7 +16,7 @@ const advOpen = ref(false)
 
 // Tuning inputs are kept as strings so "blank" (= use the endpoint default) is
 // representable; submit() converts them to numbers.
-const BLANK_TUNING = { temperature: '', max_tokens: '', timeout_sec: '', max_retries: '' }
+const BLANK_TUNING = { temperature: '', max_tokens: '', timeout_sec: '', max_retries: '', context_window: '' }
 const DEFAULT_RETRIES = 2
 const form = reactive({ name: '', base_url: '', api_key: '', model: '', make_default: false, ...BLANK_TUNING })
 
@@ -29,6 +29,7 @@ function tuningOf(p) {
     max_tokens: p.max_tokens || '',
     timeout_sec: p.timeout_sec || '',
     max_retries: p.max_retries ?? DEFAULT_RETRIES,
+    context_window: p.context_window || '',
   }
 }
 
@@ -42,6 +43,7 @@ function tuningSummary(p) {
   if (p.max_retries != null && p.max_retries !== DEFAULT_RETRIES) {
     bits.push(p.max_retries === 0 ? '不重试' : `重试 ${p.max_retries}`)
   }
+  if (p.context_window) bits.push(`窗口 ${p.context_window}`)
   return bits.join(' · ')
 }
 
@@ -116,6 +118,7 @@ async function submit() {
       max_tokens: num(form.max_tokens),
       timeout_sec: num(form.timeout_sec),
       max_retries: num(form.max_retries, DEFAULT_RETRIES),
+      context_window: num(form.context_window),
     })
     savedTo.value = res.saved_to
     notice.value = `已保存到 ${res.saved_to}`
@@ -220,6 +223,15 @@ async function remove(p) {
                 <span class="label">重试次数</span>
                 <input v-model="form.max_retries" class="input" type="number" min="0" step="1" placeholder="2" />
                 <span class="tiny muted">仅 429 / 5xx / 网络抖动，退避 0.5s→8s。填 0 关闭；4xx 一律不重试</span>
+              </label>
+              <!-- Stated, not discovered: OpenAI-compatible endpoints do not
+                   report it, and a model-name table in the binary goes stale. -->
+              <label class="field">
+                <span class="label">上下文窗口（token）</span>
+                <input v-model="form.context_window" class="input" type="number" min="0" step="1000" placeholder="留空 = 用保守默认" />
+                <span class="tiny muted">
+                  填了之后历史预算按它的 60% 自动推导，不必手填。留空则用 24000 的通用默认
+                </span>
               </label>
             </div>
           </div>

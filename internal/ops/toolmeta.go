@@ -215,10 +215,16 @@ func (m ToolMetadata) ReadOnly() bool {
 // candidate set at all, and at what score. Candidates are not sent to the
 // model — only the selected tools' schemas are.
 type Candidate struct {
-	Tool       string  `json:"tool"`
-	Score      float64 `json:"score"`
-	Reason     string  `json:"reason,omitempty"`
-	Baseline   bool    `json:"baseline,omitempty"`
-	Fallback   bool    `json:"fallback,omitempty"`
-	Suppressed string  `json:"suppressed,omitempty"` // set when dropped, says why
+	Tool  string  `json:"tool"`
+	Score float64 `json:"score"`
+	// Matched reports that the question actually hit this tool, as opposed to
+	// it merely surviving the cut. Score cannot answer that: it carries a
+	// latency tiebreaker, so a fast tool that matched nothing still scores
+	// above zero. The difference decides whether a slot belongs to this
+	// question or can be given to a tool already in the prompt.
+	Matched    bool   `json:"matched,omitempty"`
+	Reason     string `json:"reason,omitempty"`
+	Baseline   bool   `json:"baseline,omitempty"`
+	Fallback   bool   `json:"fallback,omitempty"`
+	Suppressed string `json:"suppressed,omitempty"` // set when dropped, says why
 }

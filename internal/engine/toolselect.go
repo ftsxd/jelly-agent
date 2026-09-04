@@ -8,7 +8,6 @@ import (
 	"google.golang.org/adk/agent"
 	adktool "google.golang.org/adk/tool"
 
-	"github.com/jelly-agent/jelly-agent/internal/gateway"
 	"github.com/jelly-agent/jelly-agent/internal/ops"
 	"github.com/jelly-agent/jelly-agent/internal/selector"
 )
@@ -38,6 +37,10 @@ type selectingToolset struct {
 	sets   []adktool.Toolset // MCP servers, already bound
 	cfg    selector.Config
 	report func(selector.Result)
+	// admit keeps the set stable across a session's turns. Shared across
+	// builds, because a toolset instance lives for one request while the
+	// prompt cache it protects lives for the conversation. See admit.go.
+	admit *admissions
 }
 
 func (s *selectingToolset) Name() string { return "jelly_selector" }
@@ -53,9 +56,11 @@ func (s *selectingToolset) Tools(ctx agent.ReadonlyContext) ([]adktool.Tool, err
 	}
 
 	byName := make(map[string]adktool.Tool, len(all))
+	order := make(map[string]int, len(all))
 	metas := make([]ops.ToolMetadata, 0, len(all))
-	for _, t := range all {
+	for i, t := range all {
 		byName[t.Name()] = t
+		order[t.Name()] = i
 		metas = append(metas, metadataOf(t))
 	}
 
@@ -64,13 +69,46 @@ func (s *selectingToolset) Tools(ctx agent.ReadonlyContext) ([]adktool.Tool, err
 		s.report(res)
 	}
 
-	out := make([]adktool.Tool, 0, len(res.Selected))
-	for _, name := range res.Selected {
+	// Selected is in catalogue order; the ranking and the matched flag live in
+	// Candidates. Both matter here: matched says which slots this question has
+	// earned, and the ranking orders the rest.
+	var matched, filler []string
+	for _, c := range res.Candidates {
+		if !slices.Contains(res.Selected, c.Tool) {
+			continue
+		}
+		if c.Matched || c.Baseline {
+			matched = append(matched, c.Tool)
+		} else {
+			filler = append(filler, c.Tool)
+		}
+	}
+
+	var final []string
+	if s.admit != nil {
+		final = s.admit.admit(sessionOf(ctx), matched, filler, order, s.cfg.MaxTools)
+	} else {
+		final = sortByCatalogue(append(append([]string(nil), matched...), filler...), order)
+	}
+
+	out := make([]adktool.Tool, 0, len(final))
+	for _, name := range final {
 		if t, ok := byName[name]; ok {
 			out = append(out, t)
 		}
 	}
 	return out, nil
+}
+
+// describedTool is any tool that can state its own metadata.
+//
+// An interface rather than a check for *gateway.Wrapped: what matters is that
+// the tool can describe itself, not which type happens to do so today. It also
+// means this path can be exercised without standing up a gateway, which is
+// what a test needs to cover the difference between "matched the question" and
+// "merely scored above zero".
+type describedTool interface {
+	Metadata() ops.ToolMetadata
 }
 
 // metadataOf recovers what selection ranks against.
@@ -81,10 +119,20 @@ func (s *selectingToolset) Tools(ctx agent.ReadonlyContext) ([]adktool.Tool, err
 // the running: a tool with no metadata must not be silently unrankable and
 // therefore always last.
 func metadataOf(t adktool.Tool) ops.ToolMetadata {
-	if w, ok := t.(*gateway.Wrapped); ok {
-		return w.Metadata()
+	if d, ok := t.(describedTool); ok {
+		return d.Metadata()
 	}
 	return ops.ToolMetadata{Name: t.Name(), Description: t.Description()}
+}
+
+// sessionOf identifies the conversation, so the tool set can stay stable
+// across its turns. Empty when there is none, which disables the stickiness
+// rather than sharing one bucket between unrelated runs.
+func sessionOf(ctx agent.ReadonlyContext) string {
+	if ctx == nil {
+		return ""
+	}
+	return ctx.SessionID()
 }
 
 // queryOf extracts the turn's question.

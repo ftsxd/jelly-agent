@@ -27,6 +27,15 @@ type Provider struct {
 	Temperature *float64 `mapstructure:"temperature" yaml:"temperature,omitempty"`
 	// MaxTokens caps the completion length. Zero ⇒ the endpoint's default.
 	MaxTokens int `mapstructure:"max_tokens" yaml:"max_tokens,omitempty"`
+	// ContextWindow is the model's total input limit, in tokens. Zero ⇒
+	// unknown, and the history budget falls back to a conservative default.
+	//
+	// Stated rather than discovered, because it cannot be discovered
+	// reliably. OpenAI-compatible endpoints do not return it from /v1/models,
+	// and a table of model name → window inside this binary would be wrong
+	// within a release or two — every such table is a promise to keep editing
+	// it. One number in the provider's own config is a promise to nobody.
+	ContextWindow int `mapstructure:"context_window" yaml:"context_window,omitempty"`
 	// TimeoutSec bounds how long to wait for the model's response headers (i.e.
 	// time to first byte), not the whole exchange — a long stream must not be
 	// cut off mid-answer. Zero ⇒ the model layer's default.
