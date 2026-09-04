@@ -386,12 +386,27 @@ func TestEvidenceIDsAreUniqueAndOrdered(t *testing.T) {
 			t.Errorf("ID %q is too long for a prompt", res.Evidence.ID)
 		}
 	}
-	// Gapless: a reader following a citation chain reads a missing e3 as an
+	// Gapless: a reader following a citation chain reads a missing t3 as an
 	// observation that went astray, so the sequence must not skip.
-	want := []string{"e1", "e2", "e3", "e4", "e5"}
+	//
+	// The "t" prefix is load-bearing, not cosmetic. These are transient IDs
+	// from a process-local counter, while a stored handle is numbered per
+	// session — so as long as both used "e" they collided, and a real run
+	// produced eight transient e1–e8 alongside eight stored e1–e8. A citation
+	// of "e2" then had two referents and read_result resolved it to the wrong
+	// one.
+	want := []string{"t1", "t2", "t3", "t4", "t5"}
 	for i, id := range ids {
 		if id != want[i] {
 			t.Fatalf("IDs = %v, want %v — a gap reads as a lost observation", ids, want)
+		}
+	}
+	// A transient ID must not be resolvable as a stored handle. record's
+	// parser accepts "e" plus digits only, so this is what keeps the two
+	// namespaces from ever overlapping again.
+	for _, id := range ids {
+		if strings.HasPrefix(id, "e") {
+			t.Errorf("transient ID %q shares the stored-handle namespace", id)
 		}
 	}
 }
@@ -1096,5 +1111,64 @@ func TestWhatIsKeptIsNotBounded(t *testing.T) {
 	}
 	if got := kept["output"].(string); len(got) != len(long) {
 		t.Errorf("kept %d bytes, want the unshortened %d", len(got), len(long))
+	}
+}
+
+// keeperExempt mimics the real keeper's answer for its own readers: nothing
+// stored, no error, no label. That ("", nil) shape is what made every
+// read_result call report itself as retrievable.
+type keeperExempt struct{ calls int }
+
+func (k *keeperExempt) Keep(context.Context, CallMeta, string, map[string]any) (string, error) {
+	k.calls++
+	return "", nil
+}
+
+func TestRetrievableRequiresAnActualHandle(t *testing.T) {
+	k := &keeperExempt{}
+	g := newGW(t, k8sMeta(), &recorder{result: map[string]any{"summary": "ok"}}, Policy{})
+	g.results = k
+
+	res, err := g.Execute(context.Background(), prodContext(), ops.OriginModel, "k8s_get_pods", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if k.calls != 1 {
+		t.Fatalf("keeper called %d times", k.calls)
+	}
+	// The keeper succeeded but stored nothing, so there is nothing to retrieve.
+	// Reporting retrievable here pointed the model at an ID with no bytes
+	// behind it — eight times in one real run.
+	if res.Call.Retrievable {
+		t.Error("a call whose keeper stored nothing was reported retrievable")
+	}
+	if res.Evidence.Retrievable {
+		t.Error("the evidence claims retrievable with nothing stored")
+	}
+	// And the payload the model reads must agree with it.
+	if got := toolPayload(res.Evidence)["retrievable"]; got != false {
+		t.Errorf("payload retrievable = %v, want false", got)
+	}
+}
+
+// The mirror: a keeper that returns a handle means the bytes are durable, and
+// every layer has to say so or read_result is never attempted.
+func TestRetrievableIsReportedWhenAHandleExists(t *testing.T) {
+	g := newGW(t, k8sMeta(), &recorder{result: map[string]any{"summary": "ok"}}, Policy{})
+	g.results = KeeperFunc(func(context.Context, CallMeta, string, map[string]any) (string, error) {
+		return "e7", nil
+	})
+	res, err := g.Execute(context.Background(), prodContext(), ops.OriginModel, "k8s_get_pods", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Call.Retrievable || !res.Evidence.Retrievable {
+		t.Error("a stored delivery was not reported retrievable")
+	}
+	if res.Evidence.ID != "e7" {
+		t.Errorf("evidence ID = %q, want the store's handle e7", res.Evidence.ID)
+	}
+	if got := toolPayload(res.Evidence)["retrievable"]; got != true {
+		t.Errorf("payload retrievable = %v, want true", got)
 	}
 }

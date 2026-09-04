@@ -457,13 +457,18 @@ func (g *Gateway) ExecuteAs(ctx context.Context, meta CallMeta, ic *ops.Incident
 			slog.Error("工具返回未能落库，本次结果无法事后重读",
 				"tool", m.Name, "call_id", meta.CallID, logging.Err(err))
 			label = ""
-		} else {
-			call.Retrievable = true
 		}
 	}
+	// Only a returned label means the bytes are durable. Setting this on a
+	// nil error was wrong: the keeper returns ("", nil) for its own readers —
+	// their output came out of the store, so there is nothing new to keep —
+	// and every one of those calls was then reported to the model as
+	// retrievable, pointing at an ID with nothing behind it. A real run
+	// showed eight such calls, all claiming retrievable.
+	call.Retrievable = label != ""
 	if label == "" {
 		// Nothing durable behind it, so the label is only good for citations
-		// inside this run. Retrievable stays false, which is what tells a
+		// inside this run. Retrievable is false above, which is what tells a
 		// later reader not to try resolving it.
 		label = g.nextEvidenceID()
 	}
@@ -609,8 +614,21 @@ func (g *Gateway) shape(m ops.ToolMetadata, raw map[string]any, ev *ops.Evidence
 // membership on the string and never parses or sorts the number (see
 // DiagnosisResult.Seal). The gapless-and-ordered reading is for a human
 // following a causal chain, not a correctness requirement.
+// The prefix is deliberately not record.Label's "e".
+//
+// These IDs come from a process-local counter while stored handles are
+// numbered per session, so the two namespaces overlapped: a real run produced
+// eight transient IDs e1–e8 that collided with eight stored handles e1–e8. A
+// citation of "e2" then meant either a 50-byte listing or a 9.8KB read of it,
+// and read_result would resolve it to the former — a label the model had not
+// seen under that name. Seal only checks set membership, so an ambiguous ID
+// passes it.
+//
+// "t" for transient. record.parseLabel accepts "e" plus digits only, so one of
+// these never resolves to a row by accident; it reports not-found, which is
+// exactly true.
 func (g *Gateway) nextEvidenceID() string {
-	return "e" + strconv.FormatUint(g.evSeq.Add(1), 10)
+	return "t" + strconv.FormatUint(g.evSeq.Add(1), 10)
 }
 
 // PrepareArgs builds the final argument map: aliases canonicalized, injected
