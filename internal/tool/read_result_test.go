@@ -394,3 +394,63 @@ func TestSearchDoesNotCrossSessions(t *testing.T) {
 		t.Fatal("a handle resolved from a different session")
 	}
 }
+
+// What the model is told when a handle has aged out.
+//
+// The advice has to differ from not-found. Not-found means look again — maybe
+// the handle was mistyped, maybe it came from another session. Expired means
+// the bytes are gone and the only route to them is re-running the tool. A
+// model given the not-found wording will spend turns trying neighbouring
+// handles, which is exactly the retry loop the store exists to prevent.
+func TestExpiredHandleTellsTheModelToRerunTheTool(t *testing.T) {
+	s, err := record.Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.Close() })
+	ref, err := s.Put(t.Context(), record.Record{
+		Scope: scope(), InvocationID: "inv1", CallID: "c1",
+		Tool: "get_logs", At: time.Now().Add(-30 * 24 * time.Hour),
+		Payload: []byte("logs nobody kept"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n, err := s.Sweep(t.Context(), time.Hour); err != nil || n != 1 {
+		t.Fatalf("sweep = %d, %v", n, err)
+	}
+
+	for _, tc := range []struct {
+		name string
+		call func() error
+	}{{
+		name: "read_result",
+		call: func() error {
+			_, err := readResult(t.Context(), s, scope(), ReadResultArgs{Ref: ref})
+			return err
+		},
+	}, {
+		name: "search_result",
+		call: func() error {
+			_, err := searchResult(t.Context(), s, scope(), SearchResultArgs{Ref: ref, Pattern: "logs"})
+			return err
+		},
+	}} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.call()
+			if err == nil {
+				t.Fatal("an expired handle returned success")
+			}
+			msg := err.Error()
+			if !strings.Contains(msg, "保留期") {
+				t.Errorf("message does not say the result expired: %q", msg)
+			}
+			if !strings.Contains(msg, "重新调用") {
+				t.Errorf("message does not tell the model to re-run the tool: %q", msg)
+			}
+			if strings.Contains(msg, "找不到对应的已保存结果") {
+				t.Error("an expired handle got the not-found wording, which sends the model looking for it")
+			}
+		})
+	}
+}

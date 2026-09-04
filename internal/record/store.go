@@ -164,6 +164,10 @@ CREATE TABLE IF NOT EXISTS tool_results (
 	bytes         INTEGER NOT NULL,
 	sha256        TEXT    NOT NULL,
 	upstream      TEXT    NOT NULL DEFAULT 'unknown',
+	-- Non-empty once retention has dropped the payload. The row stays so the
+	-- handle keeps resolving; see retention.go for why that matters more than
+	-- the hundred bytes it costs.
+	expired_at    TEXT    NOT NULL DEFAULT '',
 	payload       BLOB    NOT NULL,
 	PRIMARY KEY (app_name, user_id, session_id, invocation_id, call_id)
 );
@@ -245,6 +249,7 @@ func Open(dbPath string) (*Store, error) {
 func migrate(db *sql.DB) error {
 	for _, col := range []struct{ name, ddl string }{
 		{"seq", "ALTER TABLE tool_results ADD COLUMN seq INTEGER NOT NULL DEFAULT 0"},
+		{"expired_at", "ALTER TABLE tool_results ADD COLUMN expired_at TEXT NOT NULL DEFAULT ''"},
 	} {
 		var n int
 		if err := db.QueryRow(
@@ -395,22 +400,29 @@ func (s *Store) read(ctx context.Context, sc Scope, cond string, key any, offset
 	}
 
 	var (
-		c   Chunk
-		at  string
-		seq int
-		buf []byte
+		c       Chunk
+		at      string
+		expired string
+		seq     int
+		buf     []byte
 	)
 	err := s.db.QueryRowContext(ctx, `
-		SELECT call_id,tool,server,at,seq,upstream,bytes,sha256,payload
+		SELECT call_id,tool,server,at,seq,upstream,bytes,sha256,expired_at,payload
 		FROM tool_results
 		WHERE app_name=? AND user_id=? AND session_id=? AND `+cond,
 		sc.AppName, sc.UserID, sc.SessionID, key,
-	).Scan(&c.CallID, &c.Tool, &c.Server, &at, &seq, &c.Upstream, &c.Total, &c.SHA256, &buf)
+	).Scan(&c.CallID, &c.Tool, &c.Server, &at, &seq, &c.Upstream, &c.Total, &c.SHA256, &expired, &buf)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Chunk{}, ErrNotFound
 	}
 	if err != nil {
 		return Chunk{}, fmt.Errorf("record: read %s/%v: %w", sc.SessionID, key, err)
+	}
+	if expired != "" {
+		// Reported before anything is decoded: the payload is gone, and
+		// returning an empty window would read as "the tool returned nothing".
+		return Chunk{}, fmt.Errorf("%w: %s 于 %s 过期（原本 %d 字节）",
+			ErrExpired, Label(seq), expired, c.Total)
 	}
 	c.Label = Label(seq)
 	c.Lines = countLines(buf)

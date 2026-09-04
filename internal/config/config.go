@@ -99,6 +99,16 @@ type Tools struct {
 	// Set it when a server can return something genuinely enormous and you
 	// would rather lose the tail than the turn.
 	MaxResultBytes int `mapstructure:"max_result_bytes" yaml:"max_result_bytes,omitempty"`
+
+	// ResultRetentionDays is how long a stored tool result stays readable
+	// through read_result and search_result. Past it the payload is dropped
+	// and the reference reports that it expired — a different answer from
+	// "not found", because it means re-run the tool rather than look again.
+	//
+	// Zero uses the built-in default of a week. Negative keeps everything,
+	// which is a supported choice for a deployment that wants an archive and
+	// should not have to pick a number large enough to never fire.
+	ResultRetentionDays int `mapstructure:"result_retention_days" yaml:"result_retention_days,omitempty"`
 }
 
 // Logging configures the process-wide structured logger. JSON is the default

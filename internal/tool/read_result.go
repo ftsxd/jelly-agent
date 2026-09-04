@@ -112,6 +112,13 @@ func readResult(ctx context.Context, store *record.Store, sc record.Scope, args 
 		return ReadResultOut{}, fmt.Errorf("ref 不能为空，请传工具结果里的 evidence_id")
 	}
 	chunk, err := store.ReadLabel(ctx, sc, args.Ref, args.Offset, args.Limit)
+	if errors.Is(err, record.ErrExpired) {
+		// Deliberately different advice from not-found. The handle was real,
+		// so looking for it again or trying a neighbouring one is wasted; the
+		// only route to these bytes is running the tool again.
+		return ReadResultOut{}, fmt.Errorf(
+			"引用 %q 对应的结果已超过保留期，内容已清理——需要这些数据的话请重新调用产生它的工具，不要再尝试其他引用（%v）", args.Ref, err)
+	}
 	if errors.Is(err, record.ErrNotFound) {
 		// Said plainly, because the alternative is a model that reads an empty
 		// answer as "the tool found nothing" and reasons from it.
@@ -184,6 +191,10 @@ func searchResult(ctx context.Context, store *record.Store, sc record.Scope, arg
 	}
 	res, err := store.Search(ctx, sc, args.Ref, args.Pattern,
 		record.SearchOpts{Limit: args.Limit, Context: args.Context})
+	if errors.Is(err, record.ErrExpired) {
+		return record.SearchResult{}, fmt.Errorf(
+			"引用 %q 对应的结果已超过保留期，内容已清理——需要这些数据的话请重新调用产生它的工具（%v）", args.Ref, err)
+	}
 	if errors.Is(err, record.ErrNotFound) {
 		return record.SearchResult{}, fmt.Errorf(
 			"引用 %q 在本次会话中找不到对应的已保存结果——它可能来自其他会话，或该次调用的返回未能落库（结果里 retrievable 为假时即是如此）", args.Ref)

@@ -74,6 +74,7 @@ func main() {
 	go srv.Watch(ctx)  // hot-reload on external config file edits
 	srv.StartBots(ctx) // launch enabled messaging-platform bots (DingTalk, …)
 	srv.StartSchedules(ctx)
+	srv.StartResultSweeper(ctx) // expire stored tool results past their retention
 
 	go func() {
 		embedded := "已嵌入前端"

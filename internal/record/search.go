@@ -112,16 +112,24 @@ func (s *Store) Search(ctx context.Context, sc Scope, label, pattern string, opt
 		res SearchResult
 		buf []byte
 	)
+	var expired string
 	err = s.db.QueryRowContext(ctx, `
-		SELECT tool, bytes, payload FROM tool_results
+		SELECT tool, bytes, expired_at, payload FROM tool_results
 		WHERE app_name=? AND user_id=? AND session_id=? AND seq=?`,
 		sc.AppName, sc.UserID, sc.SessionID, seq,
-	).Scan(&res.Tool, &res.Bytes, &buf)
+	).Scan(&res.Tool, &res.Bytes, &expired, &buf)
 	if errors.Is(err, sql.ErrNoRows) {
 		return SearchResult{}, ErrNotFound
 	}
 	if err != nil {
 		return SearchResult{}, fmt.Errorf("record: search %s/%s: %w", sc.SessionID, label, err)
+	}
+	if expired != "" {
+		// Same distinction the read path draws: a search over a dropped
+		// payload would report zero matches, which the model would take as
+		// evidence rather than as an absence of it.
+		return SearchResult{}, fmt.Errorf("%w: %s 于 %s 过期（原本 %d 字节）",
+			ErrExpired, Label(seq), expired, res.Bytes)
 	}
 	res.Ref = Label(seq)
 	if len(buf) > MaxSearchBytes {
