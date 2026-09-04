@@ -97,6 +97,33 @@ func BuiltinMetadata() toolreg.Source {
 				MaxResultBytes: 6000,
 			},
 			{
+				Name:        "read_result",
+				Description: "按 evidence_id 分段读取某次工具调用的完整返回。工具结果里 truncated 为真时，被省略的部分只能从这里取回。",
+				UseCases: []string{
+					"结果被截断，需要看完整内容",
+					"需要返回里被省略的细节",
+					"继续读取上一段之后的内容",
+				},
+				AntiExamples: []string{
+					"结果没有被截断时（完整内容已经在上下文里）",
+					"想重新执行一次工具时（这里只读已保存的结果，不会重新调用）",
+				},
+				Produces:     ops.KindText,
+				Latency:      ops.LatencyFast,
+				SideEffect:   ops.SideEffectReadOnly,
+				Idempotent:   true, // 读的是已冻结的结果，不随时间变化
+				ParallelSafe: true,
+				// Cheap and generally useful, so it stays in the candidate set
+				// even when it scores below the cut: a shortlist that drops it
+				// leaves the model unable to recover anything it was shown only
+				// part of.
+				Fallback: true,
+				// No ceiling here — the tool pages its own output, bounded by
+				// record.MaxWindow, so a second ceiling would cut a window that
+				// was already sized to fit.
+				MaxResultBytes: 0,
+			},
+			{
 				Name:        "use_skill",
 				Description: "读取某个技能的完整说明。技能目录里的条目需要展开时使用。",
 				UseCases:    []string{"展开技能说明"},

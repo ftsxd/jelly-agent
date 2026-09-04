@@ -457,14 +457,14 @@ func (e *Engine) sideEffectCeiling() ops.SideEffectLevel {
 //
 // Returning an error is the point: the gateway publishes a retrievable
 // reference only when this succeeds. Nothing here is best-effort.
-func (e *Engine) keepToolResult(ctx context.Context, meta gateway.CallMeta, tool string, delivered map[string]any) error {
+func (e *Engine) keepToolResult(ctx context.Context, meta gateway.CallMeta, tool string, delivered map[string]any) (string, error) {
 	store, err := e.records()
 	if err != nil {
-		return err
+		return "", err
 	}
 	payload, err := json.Marshal(delivered)
 	if err != nil {
-		return fmt.Errorf("encode delivery: %w", err)
+		return "", fmt.Errorf("encode delivery: %w", err)
 	}
 	return store.Put(ctx, record.Record{
 		Scope: record.Scope{
@@ -725,7 +725,27 @@ func (e *Engine) modelCallbacks(modelName string) ([]llmagent.BeforeModelCallbac
 // Tools builds the built-in tool set: web_search always, the L1 core tools when
 // core is non-nil, and load_memory when withSearch is true.
 func (e *Engine) Tools(core *memory.Core, withSearch bool) ([]adktool.Tool, error) {
-	return jellytool.Builtins(core, withSearch)
+	tools, err := jellytool.Builtins(core, withSearch)
+	if err != nil {
+		return nil, err
+	}
+	// read_result closes the loop the delivery store opened: a large result is
+	// bounded before it reaches the prompt, and this is how the rest of it
+	// comes back. Offered only when there is somewhere to read from — a tool
+	// that always fails is worse than an absent one, because the model spends
+	// a turn discovering that.
+	if store, serr := e.records(); serr == nil {
+		rr, rerr := jellytool.NewReadResultTool(store, func(tc adktool.Context) record.Scope {
+			return record.Scope{AppName: AppName, UserID: UserID, SessionID: tc.SessionID()}
+		})
+		if rerr != nil {
+			return nil, fmt.Errorf("build read_result: %w", rerr)
+		}
+		tools = append(tools, rr)
+	} else {
+		slog.Warn("结果存储不可用，read_result 未启用（被裁剪的工具返回将无法找回）", logging.Err(serr))
+	}
+	return tools, nil
 }
 
 // Skills opens the Agent Skills store from config (or its default dir).

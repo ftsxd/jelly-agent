@@ -997,8 +997,8 @@ func TestStorageFailureLeavesNoDanglingReference(t *testing.T) {
 				return map[string]any{"pods": []any{"a"}}, nil
 			})},
 		Policy: Policy{MaxSideEffect: ops.SideEffectMutating},
-		Results: KeeperFunc(func(context.Context, CallMeta, string, map[string]any) error {
-			return errors.New("disk full")
+		Results: KeeperFunc(func(context.Context, CallMeta, string, map[string]any) (string, error) {
+			return "", errors.New("disk full")
 		}),
 	})
 
@@ -1032,9 +1032,9 @@ func TestStoredDeliveryIsMarkedRetrievable(t *testing.T) {
 				return map[string]any{"pods": []any{"a"}}, nil
 			})},
 		Policy: Policy{MaxSideEffect: ops.SideEffectMutating},
-		Results: KeeperFunc(func(_ context.Context, _ CallMeta, tool string, delivered map[string]any) error {
+		Results: KeeperFunc(func(_ context.Context, _ CallMeta, tool string, delivered map[string]any) (string, error) {
 			keptTool, keptPayload = tool, delivered
-			return nil
+			return "e1", nil
 		}),
 	})
 
@@ -1073,9 +1073,9 @@ func TestWhatIsKeptIsNotBounded(t *testing.T) {
 				return map[string]any{"output": long}, nil
 			})},
 		Policy: Policy{MaxSideEffect: ops.SideEffectMutating},
-		Results: KeeperFunc(func(_ context.Context, _ CallMeta, _ string, d map[string]any) error {
+		Results: KeeperFunc(func(_ context.Context, _ CallMeta, _ string, d map[string]any) (string, error) {
 			kept = d
-			return nil
+			return "e1", nil
 		}),
 	})
 

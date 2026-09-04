@@ -32,6 +32,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"time"
 
 	// The same driver, registered under the same "sqlite" name, that the
@@ -70,21 +72,52 @@ type Record struct {
 	Scope
 	InvocationID string
 	CallID       string
-	// Label is the in-run evidence name (e1, e2, …). Stored so a report that
-	// cites it can be resolved back to this row, and explicitly not used as
-	// the key.
-	Label  string
-	Tool   string
-	Server string
-	At     time.Time
+	Tool         string
+	Server       string
+	At           time.Time
 	// Payload is what the tool returned to the gateway, before shaping and
 	// before the gateway's own ceiling was applied.
 	Payload  []byte
 	Upstream Upstream
 }
 
+// Label is the model-visible handle for a delivery: e1, e2, … numbered within
+// a session.
+//
+// Short because it travels in prompts and in citations, where a thirty-
+// character call id would cost tokens on every tool result and make a report
+// unreadable. Unique within a session and stable across restarts because the
+// number comes from the store rather than from a counter in memory — a
+// reference the model can still resolve tomorrow is the whole point.
+func Label(seq int) string { return "e" + strconv.Itoa(seq) }
+
+// parseLabel is Label's inverse. A malformed label resolves to nothing rather
+// than to row zero.
+//
+// Digits only, checked before Atoi rather than left to it: Atoi accepts a
+// leading sign, so "e+1" would otherwise be a second name for e1. Two handles
+// for one delivery is the mirror of one handle for two — a citation stops
+// being an identity.
+func parseLabel(label string) (int, bool) {
+	rest, ok := strings.CutPrefix(label, "e")
+	if !ok || rest == "" {
+		return 0, false
+	}
+	for _, r := range rest {
+		if r < '0' || r > '9' {
+			return 0, false
+		}
+	}
+	n, err := strconv.Atoi(rest)
+	if err != nil || n <= 0 {
+		return 0, false
+	}
+	return n, true
+}
+
 // Chunk is a slice of a stored payload.
 type Chunk struct {
+	CallID   string
 	Tool     string
 	Server   string
 	At       time.Time
@@ -114,7 +147,11 @@ CREATE TABLE IF NOT EXISTS tool_results (
 	session_id    TEXT    NOT NULL,
 	invocation_id TEXT    NOT NULL,
 	call_id       TEXT    NOT NULL,
-	label         TEXT    NOT NULL DEFAULT '',
+	-- seq numbers deliveries within a session, assigned here rather than by
+	-- the caller. An in-process counter would reset on restart and hand the
+	-- next turn a label that already refers to something else, which is the
+	-- one thing a durable reference cannot do.
+	seq           INTEGER NOT NULL DEFAULT 0,
 	tool          TEXT    NOT NULL,
 	server        TEXT    NOT NULL DEFAULT '',
 	at            TEXT    NOT NULL,
@@ -127,6 +164,12 @@ CREATE TABLE IF NOT EXISTS tool_results (
 CREATE INDEX IF NOT EXISTS idx_tool_results_session ON tool_results(session_id);
 CREATE INDEX IF NOT EXISTS idx_tool_results_at      ON tool_results(at);
 `
+
+// The unique index is created after migrate, not in schema: on a database
+// that predates the seq column, CREATE TABLE IF NOT EXISTS does nothing and
+// the index would reference a column that is not there yet.
+const seqIndex = `CREATE UNIQUE INDEX IF NOT EXISTS idx_tool_results_seq
+	ON tool_results(app_name, user_id, session_id, seq)`
 
 // Store keeps tool deliveries in SQLite.
 //
@@ -171,9 +214,65 @@ func Open(dbPath string) (*Store, error) {
 	}
 	if _, err := db.Exec(schema); err != nil {
 		db.Close()
+		return nil, fmt.Errorf("record: create: %w", err)
+	}
+	if err := migrate(db); err != nil {
+		db.Close()
 		return nil, fmt.Errorf("record: migrate: %w", err)
 	}
 	return &Store{db: db}, nil
+}
+
+// migrate brings an existing table up to the current shape.
+//
+// CREATE TABLE IF NOT EXISTS does nothing to a table that already exists, so a
+// column added in a later version has to be added explicitly — and everything
+// depending on it, the unique index here, has to come after. This is the
+// lesson internal/metrics learned the same way: the create statement looks
+// like it covers migration, and the failure lands at runtime on a machine that
+// had been working.
+//
+// An earlier version of this table had a `label` column that nothing ever
+// wrote. It is left in place rather than dropped: a vestigial column costs
+// nothing, while a DROP COLUMN on a table holding real payloads is a rewrite
+// with no upside.
+func migrate(db *sql.DB) error {
+	for _, col := range []struct{ name, ddl string }{
+		{"seq", "ALTER TABLE tool_results ADD COLUMN seq INTEGER NOT NULL DEFAULT 0"},
+	} {
+		var n int
+		if err := db.QueryRow(
+			`SELECT count(*) FROM pragma_table_info('tool_results') WHERE name = ?`, col.name,
+		).Scan(&n); err != nil {
+			return fmt.Errorf("inspect %s: %w", col.name, err)
+		}
+		if n > 0 {
+			continue
+		}
+		if _, err := db.Exec(col.ddl); err != nil {
+			return fmt.Errorf("add %s: %w", col.name, err)
+		}
+	}
+
+	// Rows written before seq existed all default to zero, which the unique
+	// index would reject the moment one session has two of them. Number them
+	// by arrival, which is the order they would have been given.
+	if _, err := db.Exec(`
+		UPDATE tool_results SET seq = (
+			SELECT COUNT(*) FROM tool_results AS earlier
+			WHERE earlier.app_name = tool_results.app_name
+			  AND earlier.user_id  = tool_results.user_id
+			  AND earlier.session_id = tool_results.session_id
+			  AND (earlier.at < tool_results.at
+			       OR (earlier.at = tool_results.at AND earlier.call_id <= tool_results.call_id))
+		) WHERE seq = 0`); err != nil {
+		return fmt.Errorf("backfill seq: %w", err)
+	}
+
+	if _, err := db.Exec(seqIndex); err != nil {
+		return fmt.Errorf("create seq index: %w", err)
+	}
+	return nil
 }
 
 func (s *Store) Close() error {
@@ -183,51 +282,99 @@ func (s *Store) Close() error {
 	return s.db.Close()
 }
 
-// Put commits one delivery.
+// Put commits one delivery and returns the handle the model may cite.
 //
-// The error is the whole point of this method: the caller must not publish a
-// reference to a payload that was not written. It is also why the write is a
-// single statement rather than a best-effort goroutine — the caller needs the
+// The store assigns the handle, and that is deliberate: it means a label
+// cannot exist without the payload behind it. The caller publishes a reference
+// only if this returns one, so an unresolvable citation is not merely
+// unlikely — it is unrepresentable.
+//
+// The error is the other half of that contract. It is also why the write is a
+// single statement rather than a best-effort goroutine: the caller needs the
 // answer before it decides what to tell the model.
 //
-// Re-storing the same call replaces the row. That happens when an approved
-// tool is re-executed under the same call id, and the second delivery is the
-// real one.
-func (s *Store) Put(ctx context.Context, r Record) error {
+// Re-storing the same call replaces the payload and keeps the handle. That
+// happens when an approved tool is re-executed under the same call id: the
+// second delivery is the real one, but anything already citing the first
+// label must still resolve.
+func (s *Store) Put(ctx context.Context, r Record) (string, error) {
 	if s == nil || s.db == nil {
-		return errors.New("record: store not open")
+		return "", errors.New("record: store not open")
 	}
 	if r.SessionID == "" || r.CallID == "" {
-		return fmt.Errorf("record: need a session and a call id, got %q/%q", r.SessionID, r.CallID)
+		return "", fmt.Errorf("record: need a session and a call id, got %q/%q", r.SessionID, r.CallID)
 	}
 	if r.Upstream == "" {
 		r.Upstream = UpstreamUnknown
 	}
 	sum := sha256.Sum256(r.Payload)
+
+	// One statement, so allocating the number and writing the row cannot come
+	// apart. COALESCE(MAX(seq),0)+1 is evaluated against the session's rows;
+	// the unique index on (scope, seq) turns any race into a failed write
+	// rather than two deliveries sharing a handle.
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO tool_results
-			(app_name,user_id,session_id,invocation_id,call_id,label,tool,server,at,bytes,sha256,upstream,payload)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+			(app_name,user_id,session_id,invocation_id,call_id,seq,tool,server,at,bytes,sha256,upstream,payload)
+		VALUES (?,?,?,?,?,
+			(SELECT COALESCE(MAX(seq),0)+1 FROM tool_results
+			 WHERE app_name=? AND user_id=? AND session_id=?),
+			?,?,?,?,?,?,?)
 		ON CONFLICT(app_name,user_id,session_id,invocation_id,call_id) DO UPDATE SET
-			label=excluded.label, tool=excluded.tool, server=excluded.server,
+			tool=excluded.tool, server=excluded.server,
 			at=excluded.at, bytes=excluded.bytes, sha256=excluded.sha256,
 			upstream=excluded.upstream, payload=excluded.payload`,
-		r.AppName, r.UserID, r.SessionID, r.InvocationID, r.CallID, r.Label,
+		r.AppName, r.UserID, r.SessionID, r.InvocationID, r.CallID,
+		r.AppName, r.UserID, r.SessionID,
 		r.Tool, r.Server, r.At.UTC().Format(time.RFC3339Nano),
 		len(r.Payload), hex.EncodeToString(sum[:]), string(r.Upstream), r.Payload)
 	if err != nil {
-		return fmt.Errorf("record: put %s/%s: %w", r.SessionID, r.CallID, err)
+		return "", fmt.Errorf("record: put %s/%s: %w", r.SessionID, r.CallID, err)
 	}
-	return nil
+
+	var seq int
+	if err := s.db.QueryRowContext(ctx, `
+		SELECT seq FROM tool_results
+		WHERE app_name=? AND user_id=? AND session_id=? AND invocation_id=? AND call_id=?`,
+		r.AppName, r.UserID, r.SessionID, r.InvocationID, r.CallID,
+	).Scan(&seq); err != nil {
+		return "", fmt.Errorf("record: read back handle for %s/%s: %w", r.SessionID, r.CallID, err)
+	}
+	return Label(seq), nil
 }
 
-// Read returns a window of one delivery.
+// ReadLabel returns a window of the delivery a model-visible handle names.
+//
+// This is the path that closes the loop: the model was shown e7, the payload
+// behind e7 was shortened before it reached the prompt, and this is how the
+// rest of it comes back. It works across turns and across restarts because
+// the handle was assigned by the store, not by a counter that a restart
+// resets.
+//
+// A malformed handle is a miss, not row zero.
+func (s *Store) ReadLabel(ctx context.Context, sc Scope, label string, offset, limit int) (Chunk, error) {
+	seq, ok := parseLabel(label)
+	if !ok {
+		return Chunk{}, ErrNotFound
+	}
+	return s.read(ctx, sc, `seq=?`, seq, offset, limit)
+}
+
+// Read returns a window of one delivery, addressed by the tool call it
+// answered. Used by the console, which knows call ids from the timeline.
+func (s *Store) Read(ctx context.Context, sc Scope, callID string, offset, limit int) (Chunk, error) {
+	return s.read(ctx, sc, `call_id=?`, callID, offset, limit)
+}
+
+// read is the shared body. The scope is part of the WHERE clause rather than
+// checked afterwards: a query that cannot return another session's row is a
+// stronger guarantee than one that returns it and then compares.
 //
 // Windowed rather than whole because storing everything is not a licence to
 // hand everything back: the payload that was too large for a prompt is still
 // too large for a prompt, and a caller that wants it must say how much it
 // wants. A limit of zero or less takes the default window.
-func (s *Store) Read(ctx context.Context, sc Scope, callID string, offset, limit int) (Chunk, error) {
+func (s *Store) read(ctx context.Context, sc Scope, cond string, key any, offset, limit int) (Chunk, error) {
 	if s == nil || s.db == nil {
 		return Chunk{}, errors.New("record: store not open")
 	}
@@ -244,23 +391,22 @@ func (s *Store) Read(ctx context.Context, sc Scope, callID string, offset, limit
 	var (
 		c   Chunk
 		at  string
+		seq int
 		buf []byte
 	)
-	// Scope is part of the WHERE clause, not checked afterwards: a query that
-	// cannot return another session's row is a stronger guarantee than one
-	// that returns it and then compares.
 	err := s.db.QueryRowContext(ctx, `
-		SELECT tool,server,at,label,upstream,bytes,sha256,payload
+		SELECT call_id,tool,server,at,seq,upstream,bytes,sha256,payload
 		FROM tool_results
-		WHERE app_name=? AND user_id=? AND session_id=? AND call_id=?`,
-		sc.AppName, sc.UserID, sc.SessionID, callID,
-	).Scan(&c.Tool, &c.Server, &at, &c.Label, &c.Upstream, &c.Total, &c.SHA256, &buf)
+		WHERE app_name=? AND user_id=? AND session_id=? AND `+cond,
+		sc.AppName, sc.UserID, sc.SessionID, key,
+	).Scan(&c.CallID, &c.Tool, &c.Server, &at, &seq, &c.Upstream, &c.Total, &c.SHA256, &buf)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Chunk{}, ErrNotFound
 	}
 	if err != nil {
-		return Chunk{}, fmt.Errorf("record: read %s/%s: %w", sc.SessionID, callID, err)
+		return Chunk{}, fmt.Errorf("record: read %s/%v: %w", sc.SessionID, key, err)
 	}
+	c.Label = Label(seq)
 	c.At, _ = time.Parse(time.RFC3339Nano, at)
 
 	if offset >= len(buf) {

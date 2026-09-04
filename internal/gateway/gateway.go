@@ -193,14 +193,19 @@ func (p Policy) permits(m ops.ToolMetadata) (ops.SideEffectLevel, error) {
 // restarts — without the gateway learning anything about schemas. Returning an
 // error is the contract that matters: it means no reference exists, and the
 // caller must not pretend otherwise.
+// The keeper also assigns the handle the model will see, and that is the
+// point: a label it returns is one whose payload is already committed, so an
+// unresolvable citation is not merely unlikely but unrepresentable. A handle
+// minted here instead — from a counter in this process — would reset on
+// restart and hand the next turn a name that already meant something else.
 type ResultKeeper interface {
-	Keep(ctx context.Context, meta CallMeta, tool string, delivered map[string]any) error
+	Keep(ctx context.Context, meta CallMeta, tool string, delivered map[string]any) (label string, err error)
 }
 
 // KeeperFunc adapts a function to ResultKeeper.
-type KeeperFunc func(context.Context, CallMeta, string, map[string]any) error
+type KeeperFunc func(context.Context, CallMeta, string, map[string]any) (string, error)
 
-func (f KeeperFunc) Keep(ctx context.Context, meta CallMeta, tool string, delivered map[string]any) error {
+func (f KeeperFunc) Keep(ctx context.Context, meta CallMeta, tool string, delivered map[string]any) (string, error) {
 	return f(ctx, meta, tool, delivered)
 }
 
@@ -445,17 +450,26 @@ func (g *Gateway) ExecuteAs(ctx context.Context, meta CallMeta, ic *ops.Incident
 	// mutating tool, reporting failure would invite a retry that repeats the
 	// side effect. So the call succeeds and simply carries no reference, which
 	// is the honest outcome: the result is unrecoverable and says so.
+	label := ""
 	if g.results != nil {
-		if err := g.results.Keep(ctx, meta, m.Name, raw); err != nil {
+		var err error
+		if label, err = g.results.Keep(ctx, meta, m.Name, raw); err != nil {
 			slog.Error("工具返回未能落库，本次结果无法事后重读",
 				"tool", m.Name, "call_id", meta.CallID, logging.Err(err))
+			label = ""
 		} else {
 			call.Retrievable = true
 		}
 	}
+	if label == "" {
+		// Nothing durable behind it, so the label is only good for citations
+		// inside this run. Retrievable stays false, which is what tells a
+		// later reader not to try resolving it.
+		label = g.nextEvidenceID()
+	}
 
 	ev := &ops.Evidence{
-		ID:         g.nextEvidenceID(),
+		ID:         label,
 		Source:     ops.Source{Backend: m.Backend, Tool: m.Name, Server: m.Server},
 		Args:       final,
 		Window:     windowOf(ic),
@@ -576,12 +590,18 @@ func (g *Gateway) shape(m ops.ToolMetadata, raw map[string]any, ev *ops.Evidence
 	return nil
 }
 
-// nextEvidenceID mints a short, gapless, ordered identifier.
+// nextEvidenceID mints an identifier for a delivery that has no durable home.
+//
+// The fallback, not the normal path: when a keeper is configured it assigns
+// the label, because only the store can hand out a name that survives a
+// restart. This counter is per-process, so the same name recurs after one —
+// which is exactly why a call labelled here is also marked not retrievable.
 //
 // Short because these appear in prompts and reports, where every token counts.
-// Gapless and ordered because a reader following a causal chain reads e3 as
-// having been observed before e7 — and reads a missing e5 as an observation
-// that went astray.
+// Ordered within a process, and Seal needs no more than that: it checks set
+// membership on the string and never parses or sorts the number (see
+// DiagnosisResult.Seal). The gapless-and-ordered reading is for a human
+// following a causal chain, not a correctness requirement.
 func (g *Gateway) nextEvidenceID() string {
 	return "e" + strconv.FormatUint(g.evSeq.Add(1), 10)
 }
