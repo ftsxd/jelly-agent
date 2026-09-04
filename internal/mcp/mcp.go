@@ -40,12 +40,11 @@ func Transport(ctx context.Context, srv config.MCPServer) (mcp.Transport, error)
 		if strings.TrimSpace(srv.Command) == "" {
 			return nil, fmt.Errorf("stdio MCP 服务器 %q 缺少 command", srv.Name)
 		}
-		cmd := exec.CommandContext(ctx, srv.Command, srv.Args...)
-		cmd.Env = os.Environ()
+		env := os.Environ()
 		for k, v := range srv.Env {
-			cmd.Env = append(cmd.Env, k+"="+v)
+			env = append(env, k+"="+v)
 		}
-		return &mcp.CommandTransport{Command: cmd}, nil
+		return &stdioTransport{ctx: ctx, path: srv.Command, args: srv.Args, env: env}, nil
 	case "http", "streamable", "streamable-http":
 		if strings.TrimSpace(srv.URL) == "" {
 			return nil, fmt.Errorf("http MCP 服务器 %q 缺少 url", srv.Name)
@@ -152,4 +151,31 @@ func (h *headerRoundTripper) RoundTrip(req *http.Request) (*http.Response, error
 		req.Header.Set(k, v)
 	}
 	return h.base.RoundTrip(req)
+}
+
+// stdioTransport launches a fresh subprocess for every connection.
+//
+// An exec.Cmd is single-use: Connect takes its stdout and stdin pipes, so
+// reconnecting with the same Cmd fails with "exec: Stdout already set" and the
+// server is dead for the rest of the process's life. Handing one Cmd to
+// mcp.CommandTransport therefore works exactly once — and one connection is
+// not what happens, because the toolset lists tools on one session and calls
+// tools on another.
+//
+// It went unnoticed because the deployed MCP server speaks HTTP; the first
+// stdio server pointed at this failed on its first tool call, reporting an
+// infrastructure error the model then diagnosed at length for the user.
+type stdioTransport struct {
+	// ctx bounds the subprocess's life rather than the connection's, which is
+	// what makes cancelling the engine's MCP context terminate the children.
+	ctx  context.Context
+	path string
+	args []string
+	env  []string
+}
+
+func (t *stdioTransport) Connect(ctx context.Context) (mcp.Connection, error) {
+	cmd := exec.CommandContext(t.ctx, t.path, t.args...)
+	cmd.Env = t.env
+	return (&mcp.CommandTransport{Command: cmd}).Connect(ctx)
 }
