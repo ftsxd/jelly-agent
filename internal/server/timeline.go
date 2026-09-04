@@ -81,22 +81,41 @@ func (c *collector) frame(typ string, payload map[string]any) {
 // between events — which call this result answers, how long it took, which
 // agent handed off to which — and an event on its own knows none of them.
 type turnState struct {
-	seq int // LLM round, incremented per model response
+	// invocation is the id of the invocation being projected, and turn counts
+	// model responses within it.
+	//
+	// The round identity has to be ADK's invocation id rather than a counter
+	// of our own, because the same projector runs over two different scopes: a
+	// live request sees one invocation, a replay walks every invocation in the
+	// session. A counter therefore numbered the same answer 1 live and 3 on
+	// replay — so continuing a stored session collided with itself, and a
+	// refresh renumbered everything. The invocation id is the same value in
+	// both paths, and every event of one response carries it, partial and
+	// final alike.
+	invocation string
+	turn       int
 
-	// callAt remembers when each tool call was emitted so its result can
-	// report an elapsed time. Keyed by call ID.
-	callAt map[string]int64
-
-	// totalPrompt and friends accumulate across the whole turn. The existing
-	// "usage" frame is emitted per event, and the frontend assigns rather than
-	// adds — so a turn with three tool rounds displays only the last round's
-	// tokens, while the sessions page adds them up. Same session, two pages,
-	// two numbers.
+	// totalPrompt and friends accumulate token counts. What they total depends
+	// on scope, and both meanings are the right one for their caller: live,
+	// this is the turn the user just took; on replay, it is the whole session,
+	// which is what the sessions page has always shown.
+	//
+	// They exist because the per-event "usage" frame is assigned rather than
+	// added by the browser, so a turn with three tool rounds displayed only
+	// the last round's tokens while the sessions page displayed the sum — the
+	// same session, two pages, two numbers.
 	totalPrompt, totalCompletion, totalTokens int32
 }
 
-func newTurnState() *turnState {
-	return &turnState{callAt: map[string]int64{}}
+func newTurnState() *turnState { return &turnState{} }
+
+// enter moves the state onto an event's invocation, resetting the per-response
+// counter when the invocation changes.
+func (s *turnState) enter(invocation string) {
+	if invocation != s.invocation {
+		s.invocation = invocation
+		s.turn = 0
+	}
 }
 
 // usage returns the turn's accumulated token counts.
@@ -121,6 +140,7 @@ func project(ev *adksession.Event, out sink, st *turnState) {
 		return
 	}
 	ts := ev.Timestamp.UnixMilli()
+	st.enter(ev.InvocationID)
 
 	// A transfer is carried by Actions, not by Content, so it has to be read
 	// before the Content check below.
@@ -134,7 +154,7 @@ func project(ev *adksession.Event, out sink, st *turnState) {
 	}
 
 	if ev.Partial {
-		projectPartial(ev, out)
+		projectPartial(ev, out, st)
 		return
 	}
 	projectFinal(ev, out, st, ts)
@@ -142,17 +162,22 @@ func project(ev *adksession.Event, out sink, st *turnState) {
 
 // projectPartial forwards streaming text.
 //
-// Deliberately the leanest frame in the vocabulary: one arrives per token, and
-// the browser yields to the event loop between frames, so a field added here
-// is paid thousands of times per answer. Timestamps and branch live on the
-// round-boundary frames instead, which the reducer can look up by seq.
-func projectPartial(ev *adksession.Event, out sink) {
+// One frame arrives per token and the browser yields to the event loop between
+// frames, so every field here is paid thousands of times per answer. It
+// carries the round identity and nothing else derived: timestamps and branch
+// live on the round-boundary frames, which the reducer finds by round.
+//
+// The round is what makes the deltas foldable into the same step as the final
+// text. An earlier version put a constant here and a counter on the final
+// text, so the two never matched and the folding the comment described could
+// not work.
+func projectPartial(ev *adksession.Event, out sink, st *turnState) {
 	for _, p := range ev.Content.Parts {
 		if p == nil || p.Thought || p.Text == "" {
 			continue
 		}
 		out.frame(frameTextDelta, map[string]any{
-			"text": p.Text, "agent": ev.Author, "seq": 0,
+			"text": p.Text, "agent": ev.Author, "round": st.invocation,
 		})
 	}
 }
@@ -163,10 +188,10 @@ func projectFinal(ev *adksession.Event, out sink, st *turnState, ts int64) {
 		role = strings.ToLower(ev.Content.Role)
 	}
 
-	// A model response opens a new round. Function responses come back with
-	// role "user", so they do not.
+	// A model response opens a new turn within the invocation. Function
+	// responses come back with role "user", so they do not.
 	if role == "model" {
-		st.seq++
+		st.turn++
 	}
 
 	for _, p := range ev.Content.Parts {
@@ -182,7 +207,7 @@ func projectFinal(ev *adksession.Event, out sink, st *turnState, ts int64) {
 			out.frame(frameUserMessage, map[string]any{"text": p.Text, "ts": ts})
 		case p.Text != "" && p.Thought:
 			out.frame(frameThought, map[string]any{
-				"text": p.Text, "agent": ev.Author, "seq": st.seq, "ts": ts,
+				"text": p.Text, "agent": ev.Author, "round": st.invocation, "turn": st.turn, "ts": ts,
 			})
 		case p.Text != "":
 			// Replay only in practice: the live path already streamed this as
@@ -190,7 +215,7 @@ func projectFinal(ev *adksession.Event, out sink, st *turnState, ts int64) {
 			// appends, text sets — so the two paths converge.
 			out.frame(frameText, map[string]any{
 				"text": p.Text, "agent": ev.Author, "branch": ev.Branch,
-				"seq": st.seq, "ts": ts,
+				"round": st.invocation, "turn": st.turn, "ts": ts,
 			})
 		}
 	}
@@ -201,7 +226,8 @@ func projectFinal(ev *adksession.Event, out sink, st *turnState, ts int64) {
 		st.totalCompletion += u.CandidatesTokenCount
 		st.totalTokens += u.TotalTokenCount
 		out.frame(frameLLMTurn, map[string]any{
-			"seq": st.seq, "agent": ev.Author, "branch": ev.Branch, "ts": ts,
+			"round": st.invocation, "turn": st.turn,
+			"agent": ev.Author, "branch": ev.Branch, "ts": ts,
 			"prompt": u.PromptTokenCount, "completion": u.CandidatesTokenCount,
 			"total": u.TotalTokenCount, "finish_reason": string(ev.FinishReason),
 		})
@@ -229,10 +255,9 @@ func projectCall(ev *adksession.Event, fc *genai.FunctionCall, out sink, st *tur
 		return
 	}
 
-	st.callAt[fc.ID] = ts
 	out.frame(frameToolCall, map[string]any{
 		"name": fc.Name, "args": fc.Args, "agent": ev.Author,
-		"call_id": fc.ID, "branch": ev.Branch, "seq": st.seq, "ts": ts,
+		"call_id": fc.ID, "branch": ev.Branch, "round": st.invocation, "turn": st.turn, "ts": ts,
 	})
 }
 
@@ -241,24 +266,27 @@ func projectResponse(ev *adksession.Event, fr *genai.FunctionResponse, out sink,
 		return
 	}
 
-	payload := map[string]any{
+	// No duration. ADK waits for every parallel tool and then emits one merged
+	// response event that reuses the first tool's event, timestamp included
+	// (base_flow.go:1346, "reuse events[0]"). So a difference between the call
+	// and result timestamps is neither how long the tool took nor when the
+	// frame was delivered: with a tool that returns at once and one that takes
+	// 100ms, both results report the same 1ms.
+	//
+	// A number that looks like a duration and is not one is worse than no
+	// number, because nobody re-checks a number that renders. Real per-call
+	// timing already exists in tool_calls (duration_ms, keyed by call id) and
+	// gets wired into both paths together, so live and replay will never show
+	// two different figures for the same call.
+	out.frame(frameToolResult, map[string]any{
 		"name": fr.Name, "response": fr.Response, "agent": ev.Author,
 		"call_id": fr.ID, "branch": ev.Branch, "ts": ts,
+		"round": st.invocation, "turn": st.turn,
 		// Success is the server's judgement, from the same helper the metrics
 		// recorder uses. The browser must not re-derive it: a tool that
 		// legitimately answers null is not still running.
 		"ok": !toolFailed(fr.Response), "error": toolError(fr.Response),
-	}
-	// elapsed_ms is the gap between the two frames on the stream, not the
-	// tool's execution time — it includes flow overhead. The name says so on
-	// purpose. Real durations live in tool_calls and arrive later, for both
-	// paths at once, so that replay and live never show two different numbers
-	// for the same call.
-	if at, ok := st.callAt[fr.ID]; ok {
-		payload["elapsed_ms"] = ts - at
-		delete(st.callAt, fr.ID)
-	}
-	out.frame(frameToolResult, payload)
+	})
 }
 
 // transferToAgentTool is the name ADK gives its built-in handoff tool.

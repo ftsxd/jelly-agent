@@ -114,23 +114,38 @@ func TestConcurrentSameNameCallsPairByID(t *testing.T) {
 		event(at(50), "user", []*genai.Part{respPart("c1", "get_pods", map[string]any{"n": 1})}),
 	)
 
+	// The projector's part of pairing is to put the right id on both sides.
+	// The fold itself is the reducer's, and it is only possible because these
+	// ids are here and distinct.
+	argsByID := map[any]any{}
+	for _, c := range only(frames, frameToolCall) {
+		argsByID[c["call_id"]] = c["args"]
+	}
+	if len(argsByID) != 2 {
+		t.Fatalf("calls carried %d distinct ids, want 2", len(argsByID))
+	}
 	results := only(frames, frameToolResult)
 	if len(results) != 2 {
 		t.Fatalf("got %d results, want 2: %v", len(results), typesOf(frames))
 	}
+	seen := map[any]bool{}
 	for _, r := range results {
-		switch r["call_id"] {
-		case "c1":
-			if got := r["elapsed_ms"]; got != int64(50) {
-				t.Errorf("c1 elapsed = %v, want 50", got)
-			}
-		case "c2":
-			if got := r["elapsed_ms"]; got != int64(30) {
-				t.Errorf("c2 elapsed = %v, want 30", got)
-			}
-		default:
-			t.Errorf("unexpected call_id %v", r["call_id"])
+		id := r["call_id"]
+		if _, ok := argsByID[id]; !ok {
+			t.Errorf("result carries id %v, which no call used", id)
 		}
+		if seen[id] {
+			t.Errorf("two results claimed id %v", id)
+		}
+		seen[id] = true
+	}
+	// The arguments stayed with their own call. Pairing by name would have
+	// swapped these, which is the bug this replaces.
+	if got := argsByID["c1"]; got == nil || got.(map[string]any)["ns"] != "prod" {
+		t.Errorf("c1 args = %v, want ns=prod", got)
+	}
+	if got := argsByID["c2"]; got == nil || got.(map[string]any)["ns"] != "staging" {
+		t.Errorf("c2 args = %v, want ns=staging", got)
 	}
 }
 
@@ -218,12 +233,12 @@ func TestRoundCounterFollowsModelResponsesOnly(t *testing.T) {
 	if len(turns) != 2 {
 		t.Fatalf("llm_turn frames = %d, want 2", len(turns))
 	}
-	if turns[0]["seq"] != 1 || turns[1]["seq"] != 2 {
-		t.Errorf("seqs = %v, %v; want 1, 2", turns[0]["seq"], turns[1]["seq"])
+	if turns[0]["turn"] != 1 || turns[1]["turn"] != 2 {
+		t.Errorf("turns = %v, %v; want 1, 2", turns[0]["turn"], turns[1]["turn"])
 	}
-	// The tool result belongs to round 1, not to a round of its own.
-	if got := only(frames, frameToolCall)[0]["seq"]; got != 1 {
-		t.Errorf("tool call seq = %v, want 1", got)
+	// The tool result belongs to turn 1, not to a turn of its own.
+	if got := only(frames, frameToolCall)[0]["turn"]; got != 1 {
+		t.Errorf("tool call turn = %v, want 1", got)
 	}
 }
 
@@ -416,14 +431,11 @@ func TestStreamTurnWritesRealSSEFrames(t *testing.T) {
 		t.Fatalf("frames = %v\nwant     %v", got, want)
 	}
 
-	// The two facts the old stream could not carry.
+	// The fact the old stream could not carry.
 	call := only(frames, frameToolCall)[0]
 	res := only(frames, frameToolResult)[0]
 	if call["call_id"] != "c1" || res["call_id"] != "c1" {
 		t.Errorf("call_id missing: call=%v result=%v", call["call_id"], res["call_id"])
-	}
-	if res["elapsed_ms"] != float64(50) { // JSON numbers decode as float64
-		t.Errorf("elapsed_ms = %v, want 50", res["elapsed_ms"])
 	}
 
 	if u := st.usage(); u["total"] != int32(230) {
@@ -564,10 +576,15 @@ func TestTimelineEndpointSurvivesPersistence(t *testing.T) {
 		t.Errorf("agent_transfer frames = %d, want 1 — Actions did not survive: %v", n, typesOf(got.Events))
 	}
 
-	// And pairing works on the way back out, which is the point of keeping the ids.
+	// And the ids still match up on the way back out, which is the point of
+	// keeping them.
+	ids := map[any]bool{}
+	for _, c := range calls {
+		ids[c["call_id"]] = true
+	}
 	for _, r := range only(got.Events, frameToolResult) {
-		if _, ok := r["elapsed_ms"]; !ok {
-			t.Errorf("result %v could not be paired with its call", r["call_id"])
+		if !ids[r["call_id"]] {
+			t.Errorf("result id %v matches no call after a round trip", r["call_id"])
 		}
 	}
 	if got.Usage["total"] != float64(230) {
@@ -584,4 +601,49 @@ func sessionOf(t *testing.T, svc adksession.Service, ctx context.Context, id str
 		t.Fatalf("get session: %v", err)
 	}
 	return resp.Session
+}
+
+// No frame may carry an elapsed time. The one that existed was derived from a
+// timestamp ADK reuses across merged parallel responses, so it described
+// neither the tool's duration nor the delivery gap — see
+// TestParallelToolsGetNoInventedDuration. This guards against it creeping back
+// before real per-call timing is wired in.
+func TestNoFrameInventsADuration(t *testing.T) {
+	frames, _ := run(
+		event(at(0), "model", []*genai.Part{callPart("c1", "get_logs", nil)}, usage(1, 1, 2)),
+		event(at(100), "user", []*genai.Part{respPart("c1", "get_logs", map[string]any{"n": 1})}),
+		event(at(120), "model", []*genai.Part{textPart("ok")}, usage(1, 1, 2)),
+	)
+	for _, f := range frames {
+		for _, k := range []string{"elapsed_ms", "duration_ms", "elapsed", "duration"} {
+			if v, present := f[k]; present {
+				t.Errorf("%v frame carries %s=%v", f["type"], k, v)
+			}
+		}
+	}
+}
+
+// The turn counter is scoped to the invocation, so the same answer gets the
+// same number whether it was projected live (one invocation) or on replay
+// (every invocation in the session).
+func TestTurnCounterResetsPerInvocation(t *testing.T) {
+	inv := func(id string) evOpt {
+		return func(e *adksession.Event) { e.InvocationID = id }
+	}
+	frames, _ := run(
+		event(at(0), "model", []*genai.Part{textPart("答一")}, inv("i1"), usage(1, 1, 2)),
+		event(at(10), "model", []*genai.Part{textPart("答二")}, inv("i2"), usage(1, 1, 2)),
+	)
+	texts := only(frames, frameText)
+	if len(texts) != 2 {
+		t.Fatalf("frames = %v, want two text frames", typesOf(frames))
+	}
+	for i, tx := range texts {
+		if tx["turn"] != 1 {
+			t.Errorf("text %d turn = %v, want 1 — the counter must reset per invocation", i, tx["turn"])
+		}
+	}
+	if texts[0]["round"] == texts[1]["round"] {
+		t.Errorf("both answers share round %v; they are different invocations", texts[0]["round"])
+	}
 }
