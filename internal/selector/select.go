@@ -71,7 +71,17 @@ type Config struct {
 
 // Result is one selection.
 type Result struct {
-	// Selected names the tools whose schemas go to the model, in rank order.
+	// Selected names the tools whose schemas go to the model, in the
+	// catalogue's declared order — not in rank order.
+	//
+	// Ranking decides *which* tools go; it has no business deciding how they
+	// are laid out. Emitting them ranked meant the same catalogue produced a
+	// different tool block for every question, so a provider's prefix cache
+	// missed on a prompt that was otherwise identical, and a deployment below
+	// its budget — where selection is supposed to change nothing — still had
+	// its prompt reshuffled on every turn.
+	//
+	// The ranking is not lost: Candidates carries it, in rank order.
 	Selected []string
 	// Candidates covers everything that was considered, ranked, including the
 	// ones that were cut and why. This is the record that answers "was X even
@@ -100,9 +110,9 @@ func Select(query string, tools []ops.ToolMetadata, cfg Config) Result {
 	cands := make([]ops.Candidate, 0, len(tools))
 	tiers := make(map[string]int, len(tools))
 	for i, m := range tools {
-		sc, matched, reason := score(q, m)
+		sc, relevance, reason := score(q, m)
 		order[m.Name] = i
-		tiers[m.Name] = tierOf(m, matched)
+		tiers[m.Name] = tierOf(m, relevance)
 		cands = append(cands, ops.Candidate{
 			Tool: m.Name, Score: sc, Reason: reason,
 			Baseline: m.Baseline, Fallback: m.Fallback,
@@ -124,24 +134,27 @@ func Select(query string, tools []ops.ToolMetadata, cfg Config) Result {
 	if budget <= 0 {
 		budget = len(cands)
 	}
-	selected := make([]string, 0, len(cands))
+	picked := make([]string, 0, len(cands))
 	for i := range cands {
 		// Baseline does not spend budget. Letting it do so would mean a
 		// deployment that declares one loses a slot for a tool that actually
 		// answers the question — the budget would be enforced by removing the
 		// relevant tool, which is the one outcome selection must not produce.
 		if cands[i].Baseline {
-			selected = append(selected, cands[i].Tool)
+			picked = append(picked, cands[i].Tool)
 			continue
 		}
 		if budget > 0 {
-			selected = append(selected, cands[i].Tool)
+			picked = append(picked, cands[i].Tool)
 			budget--
 			continue
 		}
 		cands[i].Suppressed = "超出本次工具预算"
 	}
-	return Result{Selected: selected, Candidates: cands, Capped: len(selected) < len(cands)}
+
+	// Back to the declared order for the prompt. See Result.Selected.
+	sort.SliceStable(picked, func(i, j int) bool { return order[picked[i]] < order[picked[j]] })
+	return Result{Selected: picked, Candidates: cands, Capped: len(picked) < len(cands)}
 }
 
 // tier orders the four kinds of candidate.
@@ -156,14 +169,24 @@ func Select(query string, tools []ops.ToolMetadata, cfg Config) Result {
 // opposite of what Fallback is for. Its job is to survive against tools that
 // matched nothing, so that a narrow shortlist cannot strand the model with no
 // general-purpose option — not to outrank a hit.
-// matched is passed in rather than inferred from the score, because the score
-// also carries the latency tiebreaker — and a tool is not relevant for being
-// fast.
-func tierOf(m ops.ToolMetadata, matched bool) int {
+// relevance is the net lexical score — positive matches minus anti-example
+// penalties, with the latency tiebreaker excluded. Both exclusions matter and
+// both were bugs:
+//
+// Latency, because a tool is not relevant for being fast. A quick tool that
+// matched nothing used to score +0.4, count as a match, and outrank the
+// fallback tools that exist for exactly that case.
+//
+// Anti-examples, because a tool whose anti-example fires harder than its
+// positive match is the metadata author saying "this looks relevant and is
+// not" — the whole reason the field exists. Tiering on "matched anything at
+// all" kept such a tool in the matched tier at −18 points, where it still beat
+// an unmatched fallback at 0 and took the last budget slot.
+func tierOf(m ops.ToolMetadata, relevance float64) int {
 	switch {
 	case m.Baseline:
 		return 0
-	case matched:
+	case relevance > 0:
 		return 1
 	case m.Fallback:
 		return 2
@@ -174,9 +197,14 @@ func tierOf(m ops.ToolMetadata, matched bool) int {
 
 // score rates one tool against the question and says why, in words an operator
 // reading a run record can act on.
-func score(q map[string]bool, m ops.ToolMetadata) (total float64, matched bool, reason string) {
+//
+// It returns two numbers because they answer different questions. total ranks
+// within a tier and includes the latency tiebreaker; relevance decides which
+// tier the tool is in and is purely lexical — see tierOf for why conflating
+// them was wrong twice over.
+func score(q map[string]bool, m ops.ToolMetadata) (total, relevance float64, reason string) {
 	if len(q) == 0 {
-		return 0, false, ""
+		return 0, 0, ""
 	}
 	var hits []string
 
@@ -188,8 +216,7 @@ func score(q map[string]bool, m ops.ToolMetadata) (total float64, matched bool, 
 		if n == 0 {
 			return
 		}
-		total += weight * float64(n)
-		matched = true
+		relevance += weight * float64(n)
 		hits = append(hits, label)
 	}
 
@@ -200,10 +227,11 @@ func score(q map[string]bool, m ops.ToolMetadata) (total float64, matched bool, 
 	add(wDescription, "描述", m.Description)
 
 	if n := countOverlap(q, m.AntiExamples); n > 0 {
-		total += wAntiExample * float64(n)
+		relevance += wAntiExample * float64(n)
 		hits = append(hits, "反例命中")
 	}
 
+	total = relevance
 	switch m.Latency {
 	case ops.LatencyFast:
 		total += bonusFast
@@ -212,9 +240,9 @@ func score(q map[string]bool, m ops.ToolMetadata) (total float64, matched bool, 
 	}
 
 	if len(hits) == 0 {
-		return total, matched, ""
+		return total, relevance, ""
 	}
-	return total, matched, "匹配 " + strings.Join(hits, "、")
+	return total, relevance, "匹配 " + strings.Join(hits, "、")
 }
 
 func countOverlap(q map[string]bool, texts []string) int {

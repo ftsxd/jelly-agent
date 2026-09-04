@@ -34,6 +34,15 @@ func rankOf(r Result, tool string) int {
 	return slices.Index(r.Selected, tool)
 }
 
+// topRanked is the tool ranking put first. Selected is deliberately in the
+// catalogue's declared order, so a test about ranking has to read Candidates.
+func topRanked(r Result) string {
+	if len(r.Candidates) == 0 {
+		return ""
+	}
+	return r.Candidates[0].Tool
+}
+
 // The signal has to survive a Chinese sentence, because that is what the
 // questions are written in. A whitespace tokenizer sees "看下这个服务的日志"
 // as one token and matches nothing at all.
@@ -44,7 +53,7 @@ func TestChineseQuestionRanksTheMatchingTool(t *testing.T) {
 		meta("remember", use("记录用户偏好")),
 	}
 	r := Select("帮我看下这个服务的日志", tools, Config{})
-	if got := r.Selected[0]; got != "get_logs" {
+	if got := topRanked(r); got != "get_logs" {
 		t.Errorf("top = %q, want get_logs; 候选 %v", got, r.Candidates)
 	}
 }
@@ -56,7 +65,7 @@ func TestLatinTermInsideChineseMatches(t *testing.T) {
 		meta("query_mysql", use("查询 MySQL")),
 	}
 	r := Select("看下 mysql 的连接数", tools, Config{})
-	if got := r.Selected[0]; got != "query_mysql" {
+	if got := topRanked(r); got != "query_mysql" {
 		t.Errorf("top = %q, want query_mysql", got)
 	}
 }
@@ -75,7 +84,7 @@ func TestAntiExampleDemotesALookalike(t *testing.T) {
 		meta("fetch_url", use("抓取网页内容")),
 	}
 	r := Select("抓取网页内容", tools, Config{})
-	if got := r.Selected[0]; got != "fetch_url" {
+	if got := topRanked(r); got != "fetch_url" {
 		t.Errorf("top = %q, want fetch_url — 反例应压制看起来相关的那个；候选 %+v", got, r.Candidates)
 	}
 }
@@ -92,7 +101,7 @@ func TestNameOutranksAnIncidentalMentionInProse(t *testing.T) {
 		meta("logs", desc("与本次问题无关的说明文字")),
 	}
 	r := Select("logs", tools, Config{})
-	if got := r.Selected[0]; got != "logs" {
+	if got := topRanked(r); got != "logs" {
 		t.Errorf("top = %q, want logs — 名称命中应重于描述里的顺带提及；候选 %+v", got, r.Candidates)
 	}
 }
@@ -245,7 +254,120 @@ func TestLatencyBreaksTiesAmongEqualMatches(t *testing.T) {
 		meta("fast_logs", use("查看日志"), func(m *ops.ToolMetadata) { m.Latency = ops.LatencyFast }),
 	}
 	r := Select("查看日志", tools, Config{})
-	if r.Selected[0] != "fast_logs" {
-		t.Errorf("top = %q, want fast_logs — equal matches should prefer the cheaper one", r.Selected[0])
+	if topRanked(r) != "fast_logs" {
+		t.Errorf("top = %q, want fast_logs — equal matches should prefer the cheaper one", topRanked(r))
 	}
+}
+
+// An anti-example that fires harder than the positive match is the metadata
+// author saying "this looks relevant and is not" — which is the entire reason
+// the field exists. Tiering on "matched anything at all" left such a tool in
+// the matched tier at −18 points, where it still beat an unmatched fallback at
+// 0 and took the last budget slot.
+func TestAntiExamplePushesAToolOutOfTheMatchedTier(t *testing.T) {
+	tools := []ops.ToolMetadata{
+		meta("dev_logs", desc("查询日志"), anti("查询生产日志")),
+		meta("load_memory", fallback),
+	}
+	r := Select("查询生产日志", tools, Config{MaxTools: 1})
+	if len(r.Selected) != 1 || r.Selected[0] != "load_memory" {
+		t.Errorf("selected %v, want the fallback; 候选 %+v", r.Selected, r.Candidates)
+	}
+	if s := scoreOf(r, "dev_logs"); s >= 0 {
+		t.Errorf("dev_logs scored %v, want the anti-example to take it negative", s)
+	}
+}
+
+// A positive match must still survive an anti-example that only grazes it.
+func TestAWeakAntiExampleDoesNotUnseatAStrongMatch(t *testing.T) {
+	tools := []ops.ToolMetadata{
+		meta("get_logs", use("查询日志", "查看容器日志"), anti("查询配置")),
+		meta("load_memory", fallback),
+	}
+	r := Select("查询日志", tools, Config{MaxTools: 1})
+	if len(r.Selected) != 1 || r.Selected[0] != "get_logs" {
+		t.Errorf("selected %v, want get_logs; 候选 %+v", r.Selected, r.Candidates)
+	}
+}
+
+// Below the budget, selection must not touch the prompt at all — including the
+// order of it. Ranking decides which tools go, never how they are laid out: a
+// reordered tool block misses a provider's prefix cache on a prompt that is
+// otherwise identical, and a deployment under its budget is supposed to see no
+// change whatsoever.
+func TestOrderIsStableAcrossQuestions(t *testing.T) {
+	tools := []ops.ToolMetadata{
+		meta("web_search", desc("搜索互联网获取实时信息")),
+		meta("fetch_url", desc("抓取指定网址的正文")),
+		meta("remember", desc("把值得跨会话记住的事实写入长期记忆")),
+	}
+	want := []string{"web_search", "fetch_url", "remember"}
+	for _, q := range []string{"抓取网址", "记住这件事", "搜一下", ""} {
+		r := Select(q, tools, Config{})
+		if r.Capped {
+			t.Fatalf("%q: 前提不成立，本应未裁剪", q)
+		}
+		if !slices.Equal(r.Selected, want) {
+			t.Errorf("%q: selected %v, want the declared order %v", q, r.Selected, want)
+		}
+	}
+}
+
+// The same holds once the budget bites: two questions that keep the same tools
+// must produce the same prompt.
+func TestSurvivorsKeepDeclaredOrderWhenCapped(t *testing.T) {
+	tools := []ops.ToolMetadata{
+		meta("a_logs", use("查看日志")),
+		meta("b_noise"),
+		meta("c_metrics", use("查看指标")),
+	}
+	r := Select("查看日志和指标", tools, Config{MaxTools: 2})
+	if !slices.Equal(r.Selected, []string{"a_logs", "c_metrics"}) {
+		t.Errorf("selected %v, want the two survivors in declared order", r.Selected)
+	}
+	// Ranking is still available, and still ranked.
+	if topRanked(r) == "b_noise" {
+		t.Errorf("ranking lost: %+v", r.Candidates)
+	}
+}
+
+// Every candidate must carry what it takes to answer "why did A win over B" —
+// both sides' scores and the fields each matched on, not only the losers'.
+func TestCandidatesExplainBothSides(t *testing.T) {
+	tools := []ops.ToolMetadata{
+		meta("winner", use("查看日志")),
+		meta("loser", desc("顺带提到日志")),
+	}
+	r := Select("查看日志", tools, Config{MaxTools: 1})
+	for _, name := range []string{"winner", "loser"} {
+		c := candidateFor(r, name)
+		if c == nil {
+			t.Fatalf("%s missing from the candidate record", name)
+		}
+		if c.Reason == "" {
+			t.Errorf("%s carries no reason; 'why did A beat B' is unanswerable", name)
+		}
+		if c.Score == 0 {
+			t.Errorf("%s carries no score", name)
+		}
+	}
+	if a, b := scoreOf(r, "winner"), scoreOf(r, "loser"); a <= b {
+		t.Errorf("winner scored %v, loser %v", a, b)
+	}
+}
+
+func candidateFor(r Result, tool string) *ops.Candidate {
+	for i := range r.Candidates {
+		if r.Candidates[i].Tool == tool {
+			return &r.Candidates[i]
+		}
+	}
+	return nil
+}
+
+func scoreOf(r Result, tool string) float64 {
+	if c := candidateFor(r, tool); c != nil {
+		return c.Score
+	}
+	return 0
 }

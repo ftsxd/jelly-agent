@@ -112,30 +112,55 @@ func queryOf(ctx agent.ReadonlyContext) string {
 
 // logSelection records what reached the model and what did not.
 //
-// Logged even when nothing was cut, at debug, because the useful question is
-// asked after the fact — "why did it not use X?" — and the answer needs the
-// score X got, not just the fact that it was missing. The cut list is the
-// difference between an answerable question and a dead end.
+// Every candidate, with its score, the fields it matched on, and whether it is
+// baseline or fallback — not just the survivors' names and the cut list's
+// scores. The question this exists to answer is not "what was dropped" but
+// "why did A win over B", and that needs both sides' numbers and the reason
+// behind them. An earlier version logged the selected tools as bare names and
+// flattened every cut tool's reason to "over budget", which discarded exactly
+// the fields that make the comparison possible.
+//
+// At info when the budget actually removed something, at debug otherwise: a
+// selection that changed nothing is not news, but it still has to be
+// recoverable when someone asks about a turn after the fact.
 func logSelection(res selector.Result) {
-	// The total comes from the candidate list, which is the number of tools
-	// actually considered. Deriving it at wiring time counted MCP servers
-	// rather than the tools they offer, so the log said "3 of 5" about a
-	// catalogue of thirty.
 	total := len(res.Candidates)
-	if !res.Capped {
-		slog.Debug("工具选择：未裁剪", "selected", len(res.Selected), "total", total)
-		return
+	selected := make(map[string]bool, len(res.Selected))
+	for _, n := range res.Selected {
+		selected[n] = true
 	}
-	cut := make([]any, 0, 8)
+
+	// Candidates arrive in rank order, so the log reads top-down as the
+	// ranking saw it — which is the order the "why did A beat B" question is
+	// asked in.
+	rows := make([]any, 0, len(res.Candidates))
 	for _, c := range res.Candidates {
-		if c.Suppressed != "" {
-			cut = append(cut, slog.Group(c.Tool, "score", c.Score, "reason", c.Suppressed))
+		attrs := []any{"score", c.Score, "selected", selected[c.Tool]}
+		if c.Reason != "" {
+			attrs = append(attrs, "matched", c.Reason)
 		}
+		if c.Baseline {
+			attrs = append(attrs, "baseline", true)
+		}
+		if c.Fallback {
+			attrs = append(attrs, "fallback", true)
+		}
+		if c.Suppressed != "" {
+			attrs = append(attrs, "suppressed", c.Suppressed)
+		}
+		rows = append(rows, slog.Group(c.Tool, attrs...))
+	}
+	group := slog.Group("candidates", rows...)
+
+	if !res.Capped {
+		slog.Debug("工具选择：未裁剪",
+			"selected_count", len(res.Selected), "total", total, group)
+		return
 	}
 	slog.Info("工具选择：已按预算裁剪",
 		"selected", res.Selected,
 		"selected_count", len(res.Selected),
 		"total", total,
-		"cut_count", len(cut),
-		slog.Group("cut", cut...))
+		"cut_count", total-len(res.Selected),
+		group)
 }
