@@ -279,6 +279,11 @@ type Wrapped struct {
 
 // Name is our name, not the server's. Two servers exposing get_pods are
 // distinguishable precisely because this differs from what Run sends onward.
+// Metadata is what the gateway knows about this tool, for a caller that has to
+// decide something about it without calling it — selection ranks against these
+// fields, and the declaration alone does not carry them.
+func (w *Wrapped) Metadata() ops.ToolMetadata { return w.meta }
+
 func (w *Wrapped) Name() string { return w.meta.Name }
 
 // Description is ours too. A third-party server rewords its own description

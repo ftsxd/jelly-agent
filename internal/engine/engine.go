@@ -28,6 +28,7 @@ import (
 	jellymetrics "github.com/jelly-agent/jelly-agent/internal/metrics"
 	jellymodel "github.com/jelly-agent/jelly-agent/internal/model"
 	"github.com/jelly-agent/jelly-agent/internal/ops"
+	"github.com/jelly-agent/jelly-agent/internal/selector"
 	"github.com/jelly-agent/jelly-agent/internal/sandbox"
 	jellysession "github.com/jelly-agent/jelly-agent/internal/session"
 	"github.com/jelly-agent/jelly-agent/internal/skill"
@@ -300,6 +301,23 @@ var undeclaredFallback = gateway.Fallback{
 	Govern:         true,
 	Timeout:        30 * time.Second,
 	MaxResultBytes: 8000,
+}
+
+// maxTools resolves the configured tool budget.
+//
+// Zero means "not configured" and takes the default; a negative number is the
+// explicit way to turn selection off. The two are kept distinct because an
+// unset int and a deliberate "send everything" are different intentions and a
+// single zero cannot express both.
+func (e *Engine) maxTools() int {
+	switch n := e.cfg.Tools.MaxTools; {
+	case n < 0:
+		return 0 // selector.Config: no cap
+	case n == 0:
+		return defaultMaxTools
+	default:
+		return n
+	}
 }
 
 // sideEffectCeiling is the strongest side effect this deployment permits.
@@ -798,6 +816,15 @@ func (e *Engine) buildNode(name, description, provider, instruction string, tool
 	for _, ts := range toolsets {
 		bound = append(bound, binder.Toolset(ts.Name, ts.Set))
 	}
+	// One selecting toolset rather than a static tool list plus N toolsets:
+	// the budget is global, and ADK only re-consults toolsets. See
+	// selectingToolset.
+	sel := &selectingToolset{
+		static: tools,
+		sets:   bound,
+		cfg:    selector.Config{MaxTools: e.maxTools()},
+		report: logSelection,
+	}
 
 	beforeTool, afterTool := e.toolCallbacks()
 	beforeModel, afterModel := e.modelCallbacks(mdl.Name())
@@ -821,8 +848,9 @@ func (e *Engine) buildNode(name, description, provider, instruction string, tool
 			}
 			return base, nil
 		},
-		Tools:     tools,
-		Toolsets:  bound,     // external MCP servers, each bound to the gateway
+		// Tools is left empty on purpose: a static list is expanded once and
+		// never revisited, so anything in it would escape selection.
+		Toolsets:  []adktool.Toolset{sel},
 		SubAgents: subAgents, // delegation targets (transfer_to_agent), nil for a leaf
 
 		// Telemetry only — see toolCallbacks for why these must not return a

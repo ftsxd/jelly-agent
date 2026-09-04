@@ -8,11 +8,19 @@ import json, os, sys
 
 LABEL = os.environ.get("FAKE_MCP_LABEL", "srv")
 
+def _tool(name, description, prop="ns"):
+    return {"name": name, "description": description,
+            "inputSchema": {"type": "object", "properties": {prop: {"type": "string"}}}}
+
+
+# Enough tools, with distinct subjects, that a budget can meaningfully cut.
 TOOLS = [
-    {"name": "get_pods", "description": f"list pods on {LABEL}",
-     "inputSchema": {"type": "object", "properties": {"ns": {"type": "string"}}}},
-    {"name": "delete_pod", "description": f"delete a pod on {LABEL}",
-     "inputSchema": {"type": "object", "properties": {"name": {"type": "string"}}}},
+    _tool("get_pods", f"list pods on {LABEL}"),
+    _tool("delete_pod", f"delete a pod on {LABEL}", "name"),
+    _tool("get_logs", f"read container logs on {LABEL}"),
+    _tool("describe_node", f"describe a node on {LABEL}", "node"),
+    _tool("query_mysql", f"run a read-only MySQL query on {LABEL}", "sql"),
+    _tool("list_deployments", f"list deployments on {LABEL}"),
 ]
 
 def send(msg):

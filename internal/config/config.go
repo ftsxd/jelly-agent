@@ -58,6 +58,16 @@ type Tools struct {
 	// which arguments the host injects, how a result is reduced. One file per
 	// backend keeps diffs reviewable. Empty means built-in defaults only.
 	MetadataDir string `mapstructure:"metadata_dir" yaml:"metadata_dir,omitempty"`
+
+	// MaxTools caps how many tool schemas reach the model on a turn. Every
+	// registered tool costs prompt tokens whether or not it is relevant, and
+	// past a few dozen the model also gets worse at choosing from the list.
+	//
+	// Zero uses the built-in default, which is generous enough to change
+	// nothing for a deployment that has not gone looking for this. Set it
+	// negative to turn selection off and send every tool, which is what
+	// happened before this existed.
+	MaxTools int `mapstructure:"max_tools" yaml:"max_tools,omitempty"`
 }
 
 // Logging configures the process-wide structured logger. JSON is the default
