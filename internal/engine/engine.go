@@ -458,6 +458,14 @@ func (e *Engine) sideEffectCeiling() ops.SideEffectLevel {
 // Returning an error is the point: the gateway publishes a retrievable
 // reference only when this succeeds. Nothing here is best-effort.
 func (e *Engine) keepToolResult(ctx context.Context, meta gateway.CallMeta, tool string, delivered map[string]any) (string, error) {
+	// The store's own readers are exempt. Their output already came out of the
+	// store, so keeping a copy buys nothing and costs space — and it would
+	// hand out handles to reads of reads, which is a chain nobody wants to
+	// follow. Returning an empty label leaves the call marked not
+	// retrievable, which is accurate: there is nothing new to retrieve.
+	if tool == jellytool.ReadResultName || tool == jellytool.SearchResultName {
+		return "", nil
+	}
 	store, err := e.records()
 	if err != nil {
 		return "", err
@@ -735,15 +743,23 @@ func (e *Engine) Tools(core *memory.Core, withSearch bool) ([]adktool.Tool, erro
 	// that always fails is worse than an absent one, because the model spends
 	// a turn discovering that.
 	if store, serr := e.records(); serr == nil {
-		rr, rerr := jellytool.NewReadResultTool(store, func(tc adktool.Context) record.Scope {
+		scope := func(tc adktool.Context) record.Scope {
+			// The scope comes from the invocation, never from an argument: a
+			// handle must not be able to name another conversation's data.
 			return record.Scope{AppName: AppName, UserID: UserID, SessionID: tc.SessionID()}
-		})
+		}
+		rr, rerr := jellytool.NewReadResultTool(store, scope)
 		if rerr != nil {
 			return nil, fmt.Errorf("build read_result: %w", rerr)
 		}
-		tools = append(tools, rr)
+		sr, rerr := jellytool.NewSearchResultTool(store, scope)
+		if rerr != nil {
+			return nil, fmt.Errorf("build search_result: %w", rerr)
+		}
+		tools = append(tools, rr, sr)
 	} else {
-		slog.Warn("结果存储不可用，read_result 未启用（被裁剪的工具返回将无法找回）", logging.Err(serr))
+		slog.Warn("结果存储不可用，read_result / search_result 未启用（被裁剪的工具返回将无法找回）",
+			logging.Err(serr))
 	}
 	return tools, nil
 }

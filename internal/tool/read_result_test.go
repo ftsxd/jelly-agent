@@ -6,6 +6,8 @@ import (
 	"testing"
 	"time"
 
+	adktool "google.golang.org/adk/tool"
+
 	"github.com/jelly-agent/jelly-agent/internal/record"
 )
 
@@ -191,5 +193,204 @@ func TestUpstreamTruncationIsReported(t *testing.T) {
 	}
 	if !strings.Contains(out.Note, "已自行截断") {
 		t.Errorf("note = %q, want it to warn that this is not the upstream original", out.Note)
+	}
+}
+
+// The store's own readers must not be stored. Their output already came out of
+// the store, so a copy buys nothing and would hand out handles to reads of
+// reads. Asserted here on the names, because the exemption in the engine keys
+// off them and a rename would silently reopen the loop.
+func TestReaderNamesMatchTheirTools(t *testing.T) {
+	store, err := record.Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { store.Close() })
+	sc := func(adktool.Context) record.Scope { return scope() }
+
+	rr, err := NewReadResultTool(store, sc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rr.Name() != ReadResultName {
+		t.Errorf("read tool is named %q but the exemption uses %q", rr.Name(), ReadResultName)
+	}
+	sr, err := NewSearchResultTool(store, sc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sr.Name() != SearchResultName {
+		t.Errorf("search tool is named %q but the exemption uses %q", sr.Name(), SearchResultName)
+	}
+}
+
+// A first cheap read must report the whole payload's scale, so locating
+// something does not require a separate tool or a full pass.
+func TestASmallReadStillReportsTheScale(t *testing.T) {
+	s, err := record.Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.Close() })
+	ref, err := s.Put(t.Context(), record.Record{
+		Scope: scope(), InvocationID: "inv1", CallID: "c1",
+		Tool: "get_logs", At: time.Now(),
+		Payload: []byte(strings.Repeat("line\n", 1000)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := readResult(t.Context(), s, scope(), ReadResultArgs{Ref: ref, Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Total != 5000 {
+		t.Errorf("total_bytes = %d, want 5000", out.Total)
+	}
+	if out.Lines != 1000 {
+		t.Errorf("total_lines = %d, want 1000 — the scale of the whole payload", out.Lines)
+	}
+	if len(out.Data) != 10 {
+		t.Errorf("returned %d bytes, want the requested 10", len(out.Data))
+	}
+}
+
+// The loop step 3 exists for: locate, then read only the neighbourhood.
+//
+// Reading a large result page by page works and costs a page of tokens per
+// page. This asserts the cheaper path end to end — search reports where the
+// interesting line is and how many matched, and one targeted read lands on it
+// — because "the model could search" is only true if the offsets search hands
+// back are usable by read.
+func TestSearchThenReadFindsTheLineWithoutReadingEverything(t *testing.T) {
+	s, err := record.Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.Close() })
+
+	// One needle late in a haystack, plus a recurring line to count.
+	var b strings.Builder
+	for i := 0; i < 5000; i++ {
+		if i == 4200 {
+			b.WriteString("FATAL disk quota exceeded on node-7\n")
+		} else if i%100 == 0 {
+			b.WriteString("WARN retry\n")
+		} else {
+			b.WriteString("INFO ok\n")
+		}
+	}
+	payload := b.String()
+
+	ref, err := s.Put(t.Context(), record.Record{
+		Scope: scope(), InvocationID: "inv1", CallID: "c1",
+		Tool: "get_logs", At: time.Now(), Payload: []byte(payload),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	hit, err := searchResult(t.Context(), s, scope(), SearchResultArgs{
+		Ref: ref, Pattern: "FATAL", Context: 2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hit.Total != 1 || !hit.Exact {
+		t.Fatalf("FATAL matches: total=%d exact=%v, want 1/true", hit.Total, hit.Exact)
+	}
+	if len(hit.Hits) != 1 || hit.Hits[0].Line != 4201 {
+		t.Fatalf("hits=%+v, want one at line 4201", hit.Hits)
+	}
+	if len(hit.Hits[0].Before) != 2 || len(hit.Hits[0].After) != 2 {
+		t.Errorf("context = %d before / %d after, want 2/2",
+			len(hit.Hits[0].Before), len(hit.Hits[0].After))
+	}
+	if hit.Lines != 5000 {
+		t.Errorf("lines = %d, want 5000", hit.Lines)
+	}
+
+	// A count large enough to matter is reported exactly, so the model can
+	// decide to narrow rather than guess whether it saw everything.
+	warn, err := searchResult(t.Context(), s, scope(), SearchResultArgs{
+		Ref: ref, Pattern: "^WARN", Limit: 5,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 49, not 50: line 4200 is a multiple of 100 and the FATAL line took it.
+	if warn.Total != 49 || !warn.Exact {
+		t.Errorf("WARN matches: total=%d exact=%v, want 49/true", warn.Total, warn.Exact)
+	}
+	if len(warn.Hits) != 5 || !warn.Truncated {
+		t.Errorf("returned %d hits truncated=%v, want 5/true", len(warn.Hits), warn.Truncated)
+	}
+
+	// Now read only around the hit, and assert that is far less than the whole
+	// payload — the entire point of searching first.
+	offset := strings.Index(payload, "FATAL") - 200
+	out, err := readResult(t.Context(), s, scope(), ReadResultArgs{
+		Ref: ref, Offset: offset, Limit: 400,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.Data, "FATAL disk quota exceeded on node-7") {
+		t.Error("the targeted read did not contain the located line")
+	}
+	if len(out.Data) >= len(payload)/10 {
+		t.Errorf("read %d of %d bytes — searching first bought nothing",
+			len(out.Data), len(payload))
+	}
+	if out.Total != len(payload) || out.Lines != 5000 {
+		t.Errorf("read reports %d bytes / %d lines, want %d/5000",
+			out.Total, out.Lines, len(payload))
+	}
+}
+
+// A pattern the model got wrong has to come back as a fixable complaint.
+// Silently treating it as a literal would make the search quietly return
+// nothing, and "no matches" is a conclusion the model will act on.
+func TestBadPatternIsReportedNotSwallowed(t *testing.T) {
+	s, err := record.Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.Close() })
+	ref, err := s.Put(t.Context(), record.Record{
+		Scope: scope(), InvocationID: "inv1", CallID: "c1",
+		Tool: "get_logs", At: time.Now(), Payload: []byte("a(b\n"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := searchResult(t.Context(), s, scope(), SearchResultArgs{
+		Ref: ref, Pattern: "a(b",
+	}); err == nil {
+		t.Fatal("an unparseable pattern was accepted")
+	}
+}
+
+// A handle from another conversation must not resolve through search either.
+// The read path is already covered; the same boundary has to hold on every
+// entry point or the weakest one defines it.
+func TestSearchDoesNotCrossSessions(t *testing.T) {
+	s, err := record.Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.Close() })
+	ref, err := s.Put(t.Context(), record.Record{
+		Scope: scope(), InvocationID: "inv1", CallID: "c1",
+		Tool: "get_logs", At: time.Now(), Payload: []byte("secret\n"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	other := record.Scope{AppName: "jelly", UserID: "u", SessionID: "s2"}
+	if _, err := searchResult(t.Context(), s, other, SearchResultArgs{
+		Ref: ref, Pattern: "secret",
+	}); err == nil {
+		t.Fatal("a handle resolved from a different session")
 	}
 }

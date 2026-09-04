@@ -122,6 +122,41 @@ func BuiltinMetadata() toolreg.Source {
 				// record.MaxWindow, so a second ceiling would cut a window that
 				// was already sized to fit.
 				MaxResultBytes: 0,
+				// A local read of a bounded window, so this is generous rather
+				// than tight. It is declared at all because zero means "no
+				// deadline" (gateway.runWithTimeout), and a read-only tool with
+				// no deadline can only be ended by the caller going away.
+				Timeout: 10 * time.Second,
+			},
+			{
+				Name:        "search_result",
+				Description: "在某次工具调用的完整返回里按正则按行搜索，可带上下文。结果很大时先搜索定位，再读命中附近的内容。",
+				UseCases: []string{
+					"在很长的返回里定位关键行",
+					"统计某类内容出现了多少次",
+					"从大结果里只取相关片段",
+				},
+				AntiExamples: []string{
+					"结果本来就不长时（直接读即可）",
+					"想重新执行一次工具时（这里只搜已保存的结果）",
+				},
+				Produces:     ops.KindText,
+				Latency:      ops.LatencyFast,
+				SideEffect:   ops.SideEffectReadOnly,
+				Idempotent:   true,
+				ParallelSafe: true,
+				// Paired with read_result: searching to locate and then reading
+				// the neighbourhood is the whole point, so a shortlist that
+				// keeps one without the other leaves the model reading a large
+				// result page by page.
+				Fallback:       true,
+				MaxResultBytes: 0, // 命中条数由工具自己限制，见 record.MaxHits
+				// Longer than read_result, because this one scans: the payload
+				// ceiling is sixty-four megabytes and a broad pattern over that
+				// much text is real work. Without a declared timeout there is
+				// no deadline at all, and the scan's own cancellation check
+				// would be the only thing bounding it.
+				Timeout: 30 * time.Second,
 			},
 			{
 				Name:        "use_skill",

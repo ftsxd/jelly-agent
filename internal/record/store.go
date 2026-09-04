@@ -24,6 +24,7 @@
 package record
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"database/sql"
@@ -117,8 +118,13 @@ func parseLabel(label string) (int, bool) {
 
 // Chunk is a slice of a stored payload.
 type Chunk struct {
-	CallID   string
-	Tool     string
+	CallID string
+	Tool   string
+	// Lines is the payload's line count. Carried on every read so "how big is
+	// this" is answered by the first cheap read rather than by a separate
+	// tool — one less schema in a prompt that pays for every one of them.
+	Lines int
+
 	Server   string
 	At       time.Time
 	Label    string
@@ -407,6 +413,7 @@ func (s *Store) read(ctx context.Context, sc Scope, cond string, key any, offset
 		return Chunk{}, fmt.Errorf("record: read %s/%v: %w", sc.SessionID, key, err)
 	}
 	c.Label = Label(seq)
+	c.Lines = countLines(buf)
 	c.At, _ = time.Parse(time.RFC3339Nano, at)
 
 	if offset >= len(buf) {
@@ -435,4 +442,21 @@ func (s *Store) Delete(ctx context.Context, sc Scope) error {
 		`DELETE FROM tool_results WHERE app_name=? AND user_id=? AND session_id=?`,
 		sc.AppName, sc.UserID, sc.SessionID)
 	return err
+}
+
+// countLines counts lines the way a line scanner does: a trailing newline ends
+// the last line rather than starting an empty one.
+//
+// It has to agree with Search, which uses bufio.Scanner. The same payload
+// reporting 1000 lines from one tool and 1001 from another is worse than
+// either number being slightly off — the reader cannot tell which to believe.
+func countLines(buf []byte) int {
+	if len(buf) == 0 {
+		return 0
+	}
+	n := bytes.Count(buf, []byte{'\n'})
+	if buf[len(buf)-1] != '\n' {
+		n++
+	}
+	return n
 }
