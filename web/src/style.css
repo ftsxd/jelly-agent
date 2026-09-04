@@ -57,8 +57,10 @@
   --accent-border: rgba(15, 157, 110, 0.26);
   --cyan: #0e8ba8;
   --cyan-tint: rgba(14, 139, 168, 0.09);
+  --cyan-border: rgba(14, 139, 168, 0.26);
   --pink: #c2408a;
   --pink-tint: rgba(194, 64, 138, 0.09);
+  --pink-border: rgba(194, 64, 138, 0.26);
   --danger: #d92d20;
   --danger-tint: rgba(217, 45, 32, 0.08);
   --danger-border: rgba(217, 45, 32, 0.26);
@@ -317,32 +319,32 @@ button:active {
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
 }
 .badge-accent {
-  background: rgba(70, 214, 168, 0.16);
+  background: var(--accent-tint);
   color: var(--accent);
-  border-color: rgba(70, 214, 168, 0.3);
+  border-color: var(--accent-border);
 }
 .badge-primary {
-  background: rgba(110, 139, 255, 0.18);
+  background: var(--primary-tint);
   color: var(--primary-hover);
-  border-color: rgba(110, 139, 255, 0.32);
+  border-color: var(--primary-border);
 }
 .badge-violet {
-  background: rgba(167, 139, 250, 0.17);
+  background: var(--primary-2-tint);
   color: var(--primary-2);
-  border-color: rgba(167, 139, 250, 0.32);
+  border-color: var(--primary-2-border);
 }
 .badge-cyan {
-  background: rgba(34, 211, 238, 0.15);
+  background: var(--cyan-tint);
   color: var(--cyan);
-  border-color: rgba(34, 211, 238, 0.3);
+  border-color: var(--cyan-border);
 }
 .badge-amber {
-  background: rgba(240, 180, 84, 0.15);
+  background: var(--warning-tint);
   color: var(--warning);
   border-color: var(--warning-border);
 }
 .badge-danger {
-  background: rgba(255, 107, 107, 0.15);
+  background: var(--danger-tint);
   color: var(--danger);
   border-color: var(--danger-border);
 }

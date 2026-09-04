@@ -56,6 +56,9 @@ export const api = {
   session: (id) => jget(`/api/sessions/${encodeURIComponent(id)}`),
   // The run as a frame list, folded by timeline.js — the same vocabulary the
   // live stream sends, so replay and live share one reducer.
+  // The fixed part of every prompt and what it costs. Answers "what do we
+  // inject?", which the per-turn token figure cannot.
+  prompt: (provider = '') => jget(`/api/prompt${provider ? `?provider=${encodeURIComponent(provider)}` : ''}`),
   sessionTimeline: (id) => jget(`/api/sessions/${encodeURIComponent(id)}/timeline`),
   deleteSession: (id) => jdelete(`/api/sessions/${encodeURIComponent(id)}`),
   deleteSessions: (ids) => jpost('/api/sessions/delete', { ids }),

@@ -138,6 +138,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/memory/search", s.handleMemorySearch)
 	mux.HandleFunc("PUT /api/memory/search", s.handleSetMemorySearch)
 	mux.HandleFunc("GET /api/stats", s.handleStats)
+	mux.HandleFunc("GET /api/prompt", s.handlePrompt)
 	mux.HandleFunc("GET /api/platforms", s.handleListPlatforms)
 	mux.HandleFunc("POST /api/platforms", s.handleSavePlatform)
 	mux.HandleFunc("DELETE /api/platforms/{name}", s.handleDeletePlatform)

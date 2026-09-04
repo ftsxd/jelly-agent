@@ -28,8 +28,8 @@ import (
 	jellymetrics "github.com/jelly-agent/jelly-agent/internal/metrics"
 	jellymodel "github.com/jelly-agent/jelly-agent/internal/model"
 	"github.com/jelly-agent/jelly-agent/internal/ops"
-	"github.com/jelly-agent/jelly-agent/internal/selector"
 	"github.com/jelly-agent/jelly-agent/internal/sandbox"
+	"github.com/jelly-agent/jelly-agent/internal/selector"
 	jellysession "github.com/jelly-agent/jelly-agent/internal/session"
 	"github.com/jelly-agent/jelly-agent/internal/skill"
 	jellytelemetry "github.com/jelly-agent/jelly-agent/internal/telemetry"
@@ -302,6 +302,68 @@ var undeclaredFallback = gateway.Fallback{
 	Timeout:        30 * time.Second,
 	MaxResultBytes: 8000,
 }
+
+// SystemPrompt is the instruction the given agent sends on every turn, for a
+// caller that wants to inspect what is being injected rather than run it.
+//
+// It exists so the console can show the prompt without a second assembly of
+// it. Rebuilding it in the handler would mean two functions that have to agree
+// about what the model sees, and the one that answers "what do we inject?"
+// would be the one nobody notices drifting.
+func (e *Engine) SystemPrompt(provider string) (parts []PromptPart, err error) {
+	core, err := e.Core()
+	if err != nil {
+		return nil, err
+	}
+	mem, user := core.Snapshot()
+	allow := e.cfg.Skills.AllowScripts
+
+	parts = append(parts, PromptPart{Name: "指令", Text: RootInstruction})
+	if mem != "" {
+		parts = append(parts, PromptPart{Name: "MEMORY.md", Text: mem})
+	}
+	if user != "" {
+		parts = append(parts, PromptPart{Name: "USER.md", Text: user})
+	}
+	if skills, err := e.Skills(); err == nil {
+		if cat, cerr := skills.Catalog(); cerr == nil && cat != "" {
+			parts = append(parts, PromptPart{Name: "技能目录", Text: cat})
+		}
+	}
+	full := e.systemInstruction(core, RootInstruction, allow)
+	parts = append(parts, PromptPart{Name: "完整拼装", Text: full, Assembled: true})
+	return parts, nil
+}
+
+// PromptPart is one contribution to the system instruction.
+type PromptPart struct {
+	Name string `json:"name"`
+	Text string `json:"text"`
+	// Assembled marks the fully rendered result rather than an ingredient, so
+	// a reader does not add its tokens to the ingredients' and double count.
+	Assembled bool `json:"assembled,omitempty"`
+}
+
+// systemInstruction renders the per-turn system prompt.
+//
+// One implementation, used by the agent and by the console's prompt view. The
+// alternative — the view rebuilding it — is how a page ends up confidently
+// describing a prompt the model never received.
+func (e *Engine) systemInstruction(core *memory.Core, instruction string, allowScripts bool) string {
+	base := core.Render(instruction)
+	if skills, err := e.Skills(); err == nil {
+		if cat, err := skills.Catalog(); err == nil && cat != "" {
+			base += "\n\n" + cat
+			if allowScripts {
+				base += "目录型技能可能附带脚本；需要时用 run_script 运行（凭据已由系统注入环境变量，按 use_skill 给出的 var_keys 在脚本里引用，切勿向用户索要密钥）。\n"
+			}
+		}
+	}
+	return base
+}
+
+// MaxTools exposes the resolved tool budget, for the console's prompt view.
+func (e *Engine) MaxTools() int { return e.maxTools() }
 
 // maxTools resolves the configured tool budget.
 //
@@ -837,16 +899,7 @@ func (e *Engine) buildNode(name, description, provider, instruction string, tool
 		// skill catalog) are read fresh each turn. Note: ADK then skips {}
 		// session-state substitution.
 		InstructionProvider: func(agent.ReadonlyContext) (string, error) {
-			base := core.Render(instruction)
-			if skills, err := e.Skills(); err == nil {
-				if cat, err := skills.Catalog(); err == nil && cat != "" {
-					base += "\n\n" + cat
-					if allowScripts {
-						base += "目录型技能可能附带脚本；需要时用 run_script 运行（凭据已由系统注入环境变量，按 use_skill 给出的 var_keys 在脚本里引用，切勿向用户索要密钥）。\n"
-					}
-				}
-			}
-			return base, nil
+			return e.systemInstruction(core, instruction, allowScripts), nil
 		},
 		// Tools is left empty on purpose: a static list is expanded once and
 		// never revisited, so anything in it would escape selection.

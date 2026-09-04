@@ -35,6 +35,19 @@ const expandedAll = ref(false)
 const steps = computed(() => timelineSteps(props.timeline))
 const stats = computed(() => summarize(props.timeline))
 
+// Reasoning is folded by default and expands as a group.
+//
+// A model that keeps retrying writes paragraphs of it — the run that prompted
+// this had six thought blocks, several hundred characters each, and they
+// pushed the tool calls off the screen. Per-step toggles alone are not enough
+// when there are six of them.
+const thoughtsOpen = ref(false)
+const thoughtCount = computed(() => steps.value.filter((s) => s.kind === 'thought').length)
+
+function isThoughtOpen(step) {
+  return thoughtsOpen.value || open.value.has(step.id)
+}
+
 const shown = computed(() => {
   const all = steps.value
   if (expandedAll.value || all.length <= FOLD_OVER) return all
@@ -62,11 +75,16 @@ function statusIcon(step) {
         {{ stats.steps }} 步
         <template v-if="stats.tools"> · {{ stats.tools }} 次工具</template>
         <template v-if="stats.agents > 1"> · {{ stats.agents }} 个 Agent</template>
-        <template v-if="stats.rounds"> · {{ stats.rounds }} 轮</template>
+        <template v-if="stats.llmCalls"> · {{ stats.llmCalls }} 次模型调用</template>
         <span v-if="stats.failed" class="bad"> · {{ stats.failed }} 失败</span>
         <span v-if="stats.pending" class="wait"> · {{ stats.pending }} 执行中</span>
       </span>
-      <span v-if="stats.usage.total" class="tl-tok mono">{{ fmtTokens(stats.usage.total) }} tok</span>
+      <span class="tl-actions">
+        <button v-if="thoughtCount" class="tl-btn" @click="thoughtsOpen = !thoughtsOpen">
+          {{ thoughtsOpen ? '收起' : '展开' }}思考（{{ thoughtCount }}）
+        </button>
+        <span v-if="stats.usage.total" class="tl-tok mono">{{ fmtTokens(stats.usage.total) }} tok</span>
+      </span>
     </div>
 
     <ol class="tl-list">
@@ -105,31 +123,35 @@ function statusIcon(step) {
               >推测配对</span>
             </button>
 
-            <div v-if="s.kind === 'tool'" class="tl-res" :class="s.status">{{ resultSummary(s) }}</div>
+            <div v-if="s.kind === 'tool'" class="tl-res" :class="s.status">
+              {{ resultSummary(s) }}
+              <span
+                v-if="isTruncated(s)"
+                class="tl-flag"
+                title="网关按 max_result_bytes 截断了返回，模型没有拿到完整结果"
+              >已截断</span>
+            </div>
             <div v-else-if="s.kind === 'error'" class="tl-res failed">{{ s.text }}</div>
             <div v-else-if="s.kind === 'text'" class="tl-res">{{ s.text }}</div>
-            <div v-else-if="s.kind === 'thought' && !open.has(s.id)" class="tl-res muted">
-              {{ s.text }}
-            </div>
+            <div
+              v-else-if="s.kind === 'thought'"
+              class="tl-res muted"
+              :class="{ clamp: !isThoughtOpen(s) }"
+            >{{ s.text }}</div>
 
-            <div v-if="open.has(s.id)" class="tl-detail">
-              <template v-if="s.kind === 'thought'">
-                <pre class="mono">{{ s.text }}</pre>
-              </template>
-              <template v-else>
-                <div v-if="evidenceId(s)" class="tl-ev mono">
-                  证据 {{ evidenceId(s) }}
-                  <span v-if="isTruncated(s)" class="tl-flag">已截断</span>
-                </div>
-                <div class="tl-kv">
-                  <span class="tl-kv-k">参数</span>
-                  <pre class="mono">{{ prettyJSON(s.args) || '（无）' }}</pre>
-                </div>
-                <div class="tl-kv">
-                  <span class="tl-kv-k">返回</span>
-                  <pre class="mono">{{ prettyJSON(s.response) || (s.error || '（无）') }}</pre>
-                </div>
-              </template>
+            <div v-if="s.kind === 'tool' && open.has(s.id)" class="tl-detail">
+              <div v-if="evidenceId(s)" class="tl-ev mono">
+                证据 {{ evidenceId(s) }}
+                <span v-if="isTruncated(s)" class="tl-flag" title="网关按 max_result_bytes 截断了返回，模型没有拿到完整结果">已截断</span>
+              </div>
+              <div class="tl-kv">
+                <span class="tl-kv-k">参数</span>
+                <pre class="mono">{{ prettyJSON(s.args) || '（无）' }}</pre>
+              </div>
+              <div class="tl-kv">
+                <span class="tl-kv-k">返回</span>
+                <pre class="mono">{{ prettyJSON(s.response) || (s.error || '（无）') }}</pre>
+              </div>
             </div>
           </div>
         </template>
@@ -165,6 +187,36 @@ function statusIcon(step) {
   flex-shrink: 0;
   font-size: 11px;
   color: var(--text-muted);
+}
+.tl-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-shrink: 0;
+}
+.tl-btn {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text-dim);
+  font: inherit;
+  font-size: 11px;
+  padding: 1px 6px;
+  cursor: pointer;
+}
+.tl-btn:hover {
+  background: var(--surface-3);
+  color: var(--text);
+}
+
+/* Folded reasoning shows its first two lines, which is enough to tell whether
+   it is worth opening. */
+.tl-res.clamp {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
 }
 
 .tl-list {

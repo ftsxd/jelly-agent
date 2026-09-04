@@ -7,19 +7,35 @@ const stats = ref(null)
 const loading = ref(true)
 const error = ref('')
 
+// The fixed prompt: what goes out on every model call regardless of what the
+// user asked. It is the part a growing bill usually comes from, and the one
+// the provider's single input-token figure cannot separate out.
+const prompt = ref(null)
+const promptOpen = ref(false)
+const openPart = ref('')
+
 onMounted(load)
 
 async function load() {
   loading.value = true
   error.value = ''
   try {
-    stats.value = await api.stats()
+    const [s, p] = await Promise.all([api.stats(), api.prompt().catch(() => null)])
+    stats.value = s
+    prompt.value = p
   } catch (e) {
     error.value = e.message
   } finally {
     loading.value = false
   }
 }
+
+const promptParts = computed(() => (prompt.value?.parts || []).filter((p) => !p.assembled))
+const assembled = computed(() => (prompt.value?.parts || []).find((p) => p.assembled) || null)
+// Truncating a JSON result mid-structure leaves the model unable to use it,
+// and a model that cannot use a result asks again — which is why this bound is
+// worth seeing next to the tool list rather than buried in a YAML file.
+const boundedTools = computed(() => (prompt.value?.tools || []).filter((t) => t.max_result_bytes))
 
 // Human-readable counts: 12.3k / 4.5M, plain ints below 1000.
 function fmt(n) {
@@ -238,6 +254,61 @@ function errKinds(t) {
             </div>
           </div>
           <div v-else class="empty sm">暂无数据</div>
+        </section>
+
+        <section v-if="prompt" class="card">
+          <h2 class="section-title">
+            提示词构成
+            <button class="btn btn-sm" @click="promptOpen = !promptOpen">
+              {{ promptOpen ? '收起' : '展开' }}
+            </button>
+          </h2>
+          <p class="muted note">
+            每次模型调用都会重发这部分，与用户问什么无关。它不出现在 Provider 报的单个
+            输入 token 数里，所以一次运行贵得莫名时，通常先看这里。
+          </p>
+          <div class="pm-totals">
+            <span>系统指令 <b class="mono">{{ fmt(prompt.totals.system_tokens) }}</b></span>
+            <span>工具描述 <b class="mono">{{ fmt(prompt.totals.tools_tokens) }}</b></span>
+            <span>固定合计 <b class="mono">{{ fmt(prompt.totals.fixed_tokens) }}</b></span>
+            <span>工具数 <b class="mono">{{ prompt.totals.tools }}</b><template v-if="prompt.totals.max_tools"> / 上限 {{ prompt.totals.max_tools }}</template></span>
+          </div>
+
+          <template v-if="promptOpen">
+            <div class="pm-list">
+              <div v-for="p in promptParts" :key="p.name" class="pm-part">
+                <button class="pm-head" @click="openPart = openPart === p.name ? '' : p.name">
+                  <span class="pm-name">{{ p.name }}</span>
+                  <span class="mono dim">{{ fmt(p.tokens) }} tok</span>
+                </button>
+                <pre v-if="openPart === p.name" class="mono pm-text">{{ p.text }}</pre>
+              </div>
+              <div v-if="assembled" class="pm-part">
+                <button class="pm-head" @click="openPart = openPart === '__all' ? '' : '__all'">
+                  <span class="pm-name">完整拼装（发给模型的原文）</span>
+                  <span class="mono dim">{{ fmt(assembled.tokens) }} tok</span>
+                </button>
+                <pre v-if="openPart === '__all'" class="mono pm-text">{{ assembled.text }}</pre>
+              </div>
+            </div>
+
+            <h3 class="pm-sub">工具（每轮都随请求发出）</h3>
+            <div class="pm-tools">
+              <div v-for="t in prompt.tools" :key="t.name" class="pm-tool">
+                <span class="mono pm-tool-name">{{ t.name }}</span>
+                <span v-if="t.server" class="badge">{{ t.server }}</span>
+                <span class="badge" :class="t.side_effect">{{ t.side_effect }}</span>
+                <span v-if="t.max_result_bytes" class="mono dim pm-bound">
+                  返回上限 {{ t.max_result_bytes }}B
+                </span>
+                <span class="mono dim">{{ fmt(t.tokens) }} tok</span>
+              </div>
+            </div>
+            <p v-if="boundedTools.length" class="muted note">
+              返回上限会在超出时截断结果。JSON 被从中间切断时模型无法使用，往往会换个参数
+              重试——每次重试都要把整段历史重发一遍，代价远超省下的字节。
+            </p>
+          </template>
         </section>
       </template>
     </div>
@@ -622,5 +693,114 @@ function errKinds(t) {
   .grid {
     grid-template-columns: 1fr;
   }
+}
+/* Prompt composition */
+.section-title .btn-sm {
+  margin-left: auto;
+  font-size: 11px;
+  padding: 1px 8px;
+}
+.note {
+  margin: 0 0 var(--sp-3);
+  font-size: 12px;
+  line-height: 1.6;
+}
+.pm-totals {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2) var(--sp-4);
+  padding: var(--sp-3);
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.pm-totals b {
+  color: var(--text);
+}
+.pm-list {
+  margin-top: var(--sp-3);
+  display: grid;
+  gap: var(--sp-1);
+}
+.pm-part {
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+.pm-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
+  width: 100%;
+  padding: var(--sp-2) var(--sp-3);
+  border: 0;
+  background: var(--surface);
+  font: inherit;
+  font-size: 12px;
+  color: var(--text);
+  cursor: pointer;
+  text-align: left;
+}
+.pm-head:hover {
+  background: var(--surface-3);
+}
+.pm-name {
+  font-weight: 500;
+}
+.pm-text {
+  margin: 0;
+  padding: var(--sp-3);
+  border-top: 1px solid var(--hairline);
+  background: var(--surface-2);
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--text-dim);
+  max-height: 320px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.pm-sub {
+  margin: var(--sp-4) 0 var(--sp-2);
+  font-size: 12px;
+  color: var(--text-dim);
+  font-weight: 500;
+}
+.pm-tools {
+  display: grid;
+  gap: 2px;
+}
+.pm-tool {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  font-size: 11px;
+  color: var(--text-muted);
+}
+.pm-tool-name {
+  font-size: 12px;
+  color: var(--text);
+  font-weight: 500;
+}
+.pm-bound {
+  margin-left: auto;
+}
+.pm-tool .badge.read_only {
+  background: var(--accent-tint);
+  color: var(--accent);
+}
+.pm-tool .badge.mutating {
+  background: var(--warning-tint);
+  color: var(--warning);
+}
+.pm-tool .badge.risky {
+  background: var(--danger-tint);
+  color: var(--danger);
 }
 </style>

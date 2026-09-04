@@ -305,6 +305,26 @@ describe('presentation split', () => {
     expect(s.tools).toBe(2)
     expect(s.failed).toBe(1)
     expect(s.pending).toBe(1)
-    expect(s.rounds).toBe(1)
+    expect(s.llmCalls).toBe(1)
+  })
+})
+
+// The count worth showing is how often the model was asked, not how many
+// invocations there were: a chat turn is one invocation, so a "rounds" figure
+// was always 1 and told the reader nothing. A run that goes in circles is
+// visible only in the number of model calls.
+describe('llm call count', () => {
+  it('counts model calls, not invocations', () => {
+    const st = reduceFrames([
+      f.llmTurn('i1', 100, 10, 110, 1),
+      f.call('c1', 'get_pods'),
+      f.result('c1', 'get_pods'),
+      f.llmTurn('i1', 200, 10, 210, 2),
+      f.call('c2', 'get_pods'),
+      f.result('c2', 'get_pods'),
+      f.llmTurn('i1', 300, 10, 310, 3),
+    ])
+    expect(summarize(st).llmCalls).toBe(3)
+    expect(st.rounds.size).toBe(1)
   })
 })

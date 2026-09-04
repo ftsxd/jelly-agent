@@ -23,6 +23,15 @@ export function emptyTimeline() {
     byCallId: new Map(),
     /** round id → { turn, prompt, completion, total } */
     rounds: new Map(),
+    /**
+     * How many times the model was called.
+     *
+     * This is the number worth showing, not the number of distinct rounds: a
+     * round is an invocation, so a single chat turn always has exactly one and
+     * the count carries no information. What tells you a run went in circles
+     * is how often the model had to be asked again.
+     */
+    llmCalls: 0,
     usage: { prompt: 0, completion: 0, total: 0 },
     /** Set once the run reports it finished. */
     done: false,
@@ -120,6 +129,7 @@ export function applyFrame(state, frame) {
       // The authority for per-round tokens. The legacy "usage" frame carries
       // the same numbers from the same source, so exactly one of the two may
       // be counted — adding both doubles every total.
+      state.llmCalls += 1
       const r = frame.round || ''
       state.rounds.set(r, {
         turn: frame.turn || 0,
@@ -273,7 +283,7 @@ export function summarize(state) {
     failed: tools.filter((s) => s.status === 'failed').length,
     pending: tools.filter((s) => s.status === 'pending').length,
     agents: new Set(steps.map((s) => s.agent).filter(Boolean)).size,
-    rounds: state.rounds.size,
+    llmCalls: state.llmCalls,
     usage: state.usage,
   }
 }
