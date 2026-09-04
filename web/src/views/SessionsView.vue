@@ -3,6 +3,7 @@ import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import Icon from '../components/Icon.vue'
 import { api } from '../api'
+import { absTime, relTime } from '../time'
 
 const PAGE = 50 // sessions per page
 
@@ -17,16 +18,31 @@ const selected = ref(null) // session id of the open detail
 const detail = ref(null)
 const detailLoading = ref(false)
 
+const q = ref('') // filter over the loaded rows
 const checked = ref([]) // session ids ticked for batch delete
 const deleting = ref(false)
 const router = useRouter()
 
-// allLoadedChecked: every currently-loaded row is ticked (drives 全选 state and
-// the "select all N across pages" affordance).
-const allLoadedChecked = computed(() => sessions.value.length > 0 && sessions.value.every((s) => checked.value.includes(s.id)))
+const filtering = computed(() => q.value.trim() !== '')
+
+// Filtering is client-side over the pages already fetched, so a search can only
+// see what has been loaded. The bar under the box says so rather than letting
+// an empty result imply the session does not exist.
+const visible = computed(() => {
+  const needle = q.value.trim().toLowerCase()
+  if (!needle) return sessions.value
+  return sessions.value.filter(
+    (s) => (s.preview || '').toLowerCase().includes(needle) || s.id.toLowerCase().includes(needle),
+  )
+})
+
+// Select-all acts on what is visible: ticking it under a filter and silently
+// selecting hidden rows would make the delete button understate its reach.
+const allLoadedChecked = computed(() => visible.value.length > 0 && visible.value.every((s) => checked.value.includes(s.id)))
 const someChecked = computed(() => checked.value.length > 0 && !allLoadedChecked.value)
 // More matching rows exist than are loaded/ticked — offer to select them all.
-const canSelectAll = computed(() => allLoadedChecked.value && checked.value.length < total.value)
+// Not offered under a filter, where "全部" would mean something else.
+const canSelectAll = computed(() => !filtering.value && allLoadedChecked.value && checked.value.length < total.value)
 
 onMounted(load)
 
@@ -67,8 +83,8 @@ async function loadMore() {
 }
 
 function toggleAll() {
-  // Toggle the loaded rows; clears any prior "select all matching" superset too.
-  checked.value = allLoadedChecked.value ? [] : sessions.value.map((s) => s.id)
+  // Toggle the visible rows; clears any prior "select all matching" superset too.
+  checked.value = allLoadedChecked.value ? [] : visible.value.map((s) => s.id)
 }
 
 async function selectAllMatching() {
@@ -128,11 +144,6 @@ async function remove(s) {
   }
 }
 
-function fmtTime(unix) {
-  if (!unix) return ''
-  return new Date(unix * 1000).toLocaleString('zh-CN', { hour12: false })
-}
-
 function fmtArgs(args) {
   if (!args) return ''
   return Object.entries(args)
@@ -160,6 +171,15 @@ function continueChat(id) { router.push({ path: '/chat', query: { session: id } 
 
     <div class="body">
       <aside class="list">
+        <div v-if="sessions.length" class="list-search">
+          <Icon name="search" :size="14" />
+          <input v-model="q" placeholder="搜索标题或会话 ID" @keydown.esc="q = ''" />
+          <button v-if="filtering" class="clear" title="清除" @click="q = ''">×</button>
+        </div>
+        <div v-if="filtering && hasMore" class="hint-bar">
+          仅在已加载的 {{ sessions.length }} 个会话中搜索，共 {{ total }} 个。
+          <button class="link" :disabled="loadingMore" @click="loadMore">加载更多</button>
+        </div>
         <div v-if="sessions.length" class="list-bar">
           <label class="selall" title="全选本页 / 取消">
             <input
@@ -189,8 +209,12 @@ function continueChat(id) { router.push({ path: '/chat', query: { session: id } 
           <Icon name="sessions" :size="28" />
           <span class="muted">暂无持久化会话</span>
         </div>
+        <div v-if="filtering && !visible.length" class="empty">
+          <Icon name="search" :size="28" />
+          <span class="muted">没有匹配的会话</span>
+        </div>
         <div
-          v-for="s in sessions"
+          v-for="s in visible"
           :key="s.id"
           class="sess"
           :class="{ active: s.id === selected, picked: checked.includes(s.id) }"
@@ -208,12 +232,13 @@ function continueChat(id) { router.push({ path: '/chat', query: { session: id } 
               title="选择以批量删除"
               @click.stop
             />
-            <span class="mono sess-id">{{ s.id }}</span>
+            <span class="sess-title">{{ s.preview || '（空会话）' }}</span>
             <button class="del" title="删除会话" @click.stop="remove(s)"><Icon name="trash" :size="14" /></button>
           </div>
+          <span class="mono sess-id">{{ s.id }}</span>
           <span class="sess-meta">
             <span class="badge">{{ s.events }} 事件</span>
-            <span class="muted time">{{ fmtTime(s.last_update) }}</span>
+            <span class="muted time" :title="absTime(s.last_update)">{{ relTime(s.last_update) }}</span>
           </span>
         </div>
         <button v-if="hasMore" class="loadmore" :disabled="loadingMore" @click="loadMore">
@@ -286,6 +311,56 @@ function continueChat(id) { router.push({ path: '/chat', query: { session: id } 
   flex-direction: column;
   gap: var(--sp-2);
 }
+.list-search {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  margin-bottom: var(--sp-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  color: var(--text-muted);
+}
+.list-search:focus-within {
+  border-color: var(--primary-border);
+  background: var(--surface);
+}
+.list-search input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  background: none;
+  outline: none;
+  font: inherit;
+  font-size: 13px;
+  color: var(--text);
+}
+.list-search input::placeholder {
+  color: var(--text-muted);
+}
+.list-search .clear {
+  flex-shrink: 0;
+  border: 0;
+  background: none;
+  cursor: pointer;
+  color: var(--text-muted);
+  font-size: 16px;
+  line-height: 1;
+  padding: 0 2px;
+}
+.list-search .clear:hover {
+  color: var(--text);
+}
+.hint-bar {
+  padding: var(--sp-2) var(--sp-3);
+  margin-bottom: var(--sp-2);
+  background: var(--surface-3);
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
 .list-bar {
   display: flex;
   align-items: center;
@@ -383,24 +458,40 @@ function continueChat(id) { router.push({ path: '/chat', query: { session: id } 
 }
 .sess.active {
   border-color: var(--primary-border);
-  background: linear-gradient(90deg, rgba(110, 139, 255, 0.22), rgba(167, 139, 250, 0.15));
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+  background: var(--primary-tint);
 }
 .sess.picked {
   border-color: var(--accent);
-  background: linear-gradient(90deg, rgba(70, 214, 168, 0.2), rgba(70, 214, 168, 0.07)), var(--surface);
+  background: var(--accent-tint);
 }
 .sess-top {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: var(--sp-2);
 }
+/* What the session was about carries the row. It is the only field anyone
+   scans for, so it gets the weight and two lines to land in. */
+.sess-title {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.4;
+  color: var(--text);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+/* The id is how you address a session in a log or a URL, not how you find it —
+   so it stays available but stops competing with the title. */
 .sess-id {
-  font-size: 12px;
+  font-size: 11px;
+  color: var(--text-muted);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  flex: 1;
   min-width: 0;
 }
 .del {
@@ -460,12 +551,12 @@ function continueChat(id) { router.push({ path: '/chat', query: { session: id } 
 }
 .ev.user {
   border-left: 3px solid transparent;
-  border-image: linear-gradient(180deg, var(--primary), var(--primary-2)) 1;
-  background: linear-gradient(90deg, rgba(110, 139, 255, 0.2), rgba(167, 139, 250, 0.07) 60%, transparent 85%);
+  border-color: var(--primary);
+  background: var(--primary-tint);
 }
 .ev.agent {
   border-left-color: var(--accent);
-  background: linear-gradient(90deg, rgba(70, 214, 168, 0.17), transparent 78%);
+  background: var(--accent-tint);
 }
 .ev-head {
   display: flex;

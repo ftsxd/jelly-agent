@@ -386,7 +386,7 @@ async function remove(a) {
   bottom: 12px;
   width: 3px;
   border-radius: 0 999px 999px 0;
-  background: linear-gradient(180deg, var(--primary), var(--primary-2));
+  background: var(--primary);
   opacity: 0;
   transition: opacity 0.18s ease;
   pointer-events: none;
@@ -394,10 +394,7 @@ async function remove(a) {
 .srv:hover {
   transform: translateY(-1px);
   border-color: var(--border-strong);
-  background:
-    linear-gradient(90deg, rgba(110, 139, 255, 0.05), transparent 45%),
-    linear-gradient(180deg, rgba(255, 255, 255, 0.024), transparent 30%),
-    var(--surface-2);
+  background: var(--surface-2);
 }
 .srv:hover::after {
   opacity: 1;

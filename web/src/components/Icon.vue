@@ -15,6 +15,7 @@ const paths = {
     '<path d="M12 3a9 9 0 0 0-9 9v3a4 4 0 0 0 4 4h1"/><path d="M12 3a9 9 0 0 1 9 9v3a4 4 0 0 1-4 4h-1"/><circle cx="12" cy="12" r="2.5"/>',
   send: '<path d="M22 2 11 13"/><path d="M22 2 15 22l-4-9-9-4 20-7z"/>',
   search: '<circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/>',
+  chevron: '<path d="m6 9 6 6 6-6"/>',
   refresh: '<path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><path d="M21 3v5h-5"/>',
   spark:
     '<path d="M12 3v4M12 17v4M3 12h4M17 12h4"/><path d="M12 8a4 4 0 0 0 0 8 4 4 0 0 0 0-8z"/>',

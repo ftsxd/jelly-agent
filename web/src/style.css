@@ -1,43 +1,70 @@
-/* jelly-agent design system — dark-mode-first, developer/terminal aesthetic.
-   Semantic tokens only; components never reference raw hex. */
+/* jelly-agent design system — light, calm, developer-facing.
+   Semantic tokens only; components never reference raw hex.
+
+   The approach follows deepseek-harness: white cards on a faintly blue-grey
+   page, separation carried by hairline strokes rather than heavy borders, and
+   shadows kept so low they read as depth rather than as decoration. Two
+   conventions come from there and are worth naming.
+
+   Neutrals carry a slight blue bias. A pure grey next to a blue accent reads
+   as dirty; biasing the greys toward the accent makes the whole surface look
+   chosen rather than defaulted.
+
+   Borders are translucent black, not solid greys. One value then reads
+   correctly over white, over the sunken layer, and over a tinted badge —
+   which a solid grey cannot do. */
 
 :root {
-  /* Surfaces — navy slate ladder: each step visibly blue, not near-black. */
-  --bg: #0b101d;
-  --surface: #131a2c;
-  --surface-2: #1a2338;
-  --surface-3: #223052;
-  --border: #28345a;
-  --border-strong: #3a4a78;
+  /* Surfaces. The page carries the tint and the cards are white, so a card
+     reads as lifted without needing a shadow to say so. */
+  --bg: #f4f6f8;
+  --surface: #ffffff;
+  --surface-2: #f8fafb; /* sunken: inputs, code, table headers */
+  --surface-3: #eef1f4; /* solid hover */
 
-  /* Text — meets >=4.5:1 on --surface for primary/secondary. */
-  --text: #e8ebf0;
-  --text-dim: #9aa6b6;
-  --text-muted: #677387;
+  /* Separation. Four levels, as translucency over whatever is beneath. */
+  --hairline: rgba(15, 23, 42, 0.06);
+  --border: rgba(15, 23, 42, 0.11);
+  --border-strong: rgba(15, 23, 42, 0.17);
 
-  /* Brand + semantics. Primary = periwinkle "jelly" blue. */
-  --primary: #6e8bff;
-  --primary-hover: #889fff;
-  --primary-tint: rgba(110, 139, 255, 0.14);
-  --primary-border: rgba(110, 139, 255, 0.4);
-  /* Second brand hue — violet gradient partner (jellyfish bioluminescence). */
-  --primary-2: #a78bfa;
-  --primary-2-tint: rgba(167, 139, 250, 0.14);
-  --primary-2-border: rgba(167, 139, 250, 0.4);
-  --primary-grad: linear-gradient(135deg, var(--primary), var(--primary-2));
-  --accent: #46d6a8; /* agent / success */
-  --accent-tint: rgba(70, 214, 168, 0.12);
-  --accent-border: rgba(70, 214, 168, 0.32);
-  --cyan: #22d3ee; /* aurora + chart accents */
-  --cyan-tint: rgba(34, 211, 238, 0.12);
-  --pink: #f472b6; /* aurora corner accent */
-  --pink-tint: rgba(244, 114, 182, 0.12);
-  --danger: #ff6b6b;
-  --danger-tint: rgba(255, 107, 107, 0.12);
-  --danger-border: rgba(255, 107, 107, 0.35);
-  --warning: #f0b454;
-  --warning-tint: rgba(240, 180, 84, 0.12);
-  --warning-border: rgba(240, 180, 84, 0.35);
+  /* Text. Near-black rather than black: pure #000 on white vibrates. */
+  --text: #101828;
+  --text-dim: #596273;
+  --text-muted: #858d9b;
+
+  /* Brand. Periwinkle darkened until it is legible as text on white — the
+     dark-theme value was chosen against a navy ground and fails here at
+     around 2.7:1. */
+  --primary: #4257d4;
+  --primary-hover: #3546bc;
+  --primary-tint: rgba(66, 87, 212, 0.08);
+  --primary-border: rgba(66, 87, 212, 0.28);
+  --primary-2: #7c5cf0;
+  --primary-2-tint: rgba(124, 92, 240, 0.08);
+  --primary-2-border: rgba(124, 92, 240, 0.28);
+
+  /* Primary actions are near-black, not brand-coloured. On a light ground a
+     saturated fill shouts; the dark fill is the strongest thing on the page
+     without competing with the accent, which is then free to mark state. */
+  --action: #1c2333;
+  --action-hover: #2b3447;
+  --action-text: #ffffff;
+
+  /* Semantics, darkened for a white ground: the dark-theme greens and ambers
+     were tuned for contrast against navy and wash out here. */
+  --accent: #0f9d6e;
+  --accent-tint: rgba(15, 157, 110, 0.09);
+  --accent-border: rgba(15, 157, 110, 0.26);
+  --cyan: #0e8ba8;
+  --cyan-tint: rgba(14, 139, 168, 0.09);
+  --pink: #c2408a;
+  --pink-tint: rgba(194, 64, 138, 0.09);
+  --danger: #d92d20;
+  --danger-tint: rgba(217, 45, 32, 0.08);
+  --danger-border: rgba(217, 45, 32, 0.26);
+  --warning: #b54708;
+  --warning-tint: rgba(181, 71, 8, 0.09);
+  --warning-border: rgba(181, 71, 8, 0.26);
 
   /* Type. CJK-aware system stack; mono for code/tokens. */
   --font-sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI",
@@ -45,30 +72,31 @@
   --font-mono: "JetBrains Mono", "SF Mono", ui-monospace, "Cascadia Code",
     "Menlo", "Consolas", monospace;
 
-  /* Radius + elevation. Layered, soft umbra/penumbra for depth. */
-  --radius-sm: 6px;
-  --radius: 10px;
-  --radius-lg: 14px;
-  --shadow: 0 1px 2px rgba(0, 0, 0, 0.32), 0 4px 12px rgba(0, 0, 0, 0.22),
-    0 16px 40px rgba(0, 0, 0, 0.18);
-  --shadow-pop: 0 2px 4px rgba(0, 0, 0, 0.35), 0 12px 32px rgba(0, 0, 0, 0.4),
-    0 24px 64px rgba(0, 0, 0, 0.28);
+  /* Radius. Larger than the dark theme used: without glow to separate
+     surfaces, the silhouette does more of that work. */
+  --radius-sm: 8px;
+  --radius: 12px;
+  --radius-lg: 16px;
 
-  /* Ambient + glass — aurora night sky: blue → violet → teal + a magenta
-     corner, strong enough to read as a colored sky behind the panels. */
-  --glow-primary: radial-gradient(ellipse 78% 62% at 10% -6%, rgba(110, 139, 255, 0.24), transparent 62%);
-  --glow-violet: radial-gradient(ellipse 62% 52% at 96% 0%, rgba(167, 139, 250, 0.2), transparent 62%);
-  --glow-accent: radial-gradient(ellipse 88% 66% at 50% 120%, rgba(70, 214, 168, 0.16), transparent 68%);
-  --glow-magenta: radial-gradient(ellipse 42% 36% at 92% 82%, rgba(244, 114, 182, 0.1), transparent 66%);
-  --aurora-drift: radial-gradient(ellipse 46% 38% at 22% 12%, rgba(110, 139, 255, 0.14), transparent 62%),
-    radial-gradient(ellipse 40% 36% at 84% 88%, rgba(34, 211, 238, 0.12), transparent 65%);
-  /* Glass: near-opaque so the aurora behind never bleeds through as milky
-     patches; backdrop blur still applies to content scrolling underneath. */
-  --bg-glass: color-mix(in srgb, var(--bg) 90%, transparent);
-  --surface-glass: color-mix(in srgb, var(--surface) 85%, transparent);
-  --sidebar-grad: linear-gradient(180deg, #151f3d 0%, #101830 52%, #0b1122 100%);
-  --primary-glow: rgba(110, 139, 255, 0.22);
-  --selection: rgba(110, 139, 255, 0.28);
+  /* Elevation. The hairline is drawn inside box-shadow rather than as a
+     border, so it costs no layout and a component can restate it without
+     shifting by a pixel. Both glows are near-invisible on purpose: on white,
+     anything stronger reads as a smudge. */
+  --stroke: 0 0 0 1px var(--hairline);
+  --shadow: var(--stroke), 0 1px 2px rgba(15, 23, 42, 0.04),
+    0 4px 12px rgba(15, 23, 42, 0.03);
+  --shadow-pop: 0 0 0 1px var(--border), 0 2px 6px rgba(15, 23, 42, 0.06),
+    0 12px 32px rgba(15, 23, 42, 0.08);
+
+  /* Interaction. Blue-tinted translucency rather than grey, so a hover over
+     white and a hover over a tinted row settle to the same hue. */
+  --hover-wash: rgba(15, 23, 42, 0.04);
+  --active-wash: rgba(15, 23, 42, 0.07);
+
+  --bg-glass: rgba(244, 246, 248, 0.82);
+  --surface-glass: rgba(255, 255, 255, 0.78);
+  --sidebar-grad: #ffffff;
+  --selection: rgba(66, 87, 212, 0.16);
 
   /* Spacing rhythm (4/8). */
   --sp-1: 4px;
@@ -79,9 +107,8 @@
   --sp-6: 32px;
 
   --nav-w: 224px;
-  color-scheme: dark;
+  color-scheme: light;
 }
-
 * {
   box-sizing: border-box;
 }
@@ -94,51 +121,17 @@ body,
 }
 
 body {
-  /* Aurora night sky: static blue → violet → teal + magenta corner over --bg… */
-  background:
-    var(--glow-primary),
-    var(--glow-violet),
-    var(--glow-accent),
-    var(--glow-magenta),
-    var(--bg);
-  background-attachment: fixed;
+  /* Flat. The dark theme layered four radial glows and a drifting aurora
+     here; on a light ground the same device turns into visible smudges, and
+     the separation it was providing is carried by the hairline strokes
+     instead. */
+  background: var(--bg);
   color: var(--text);
   font-family: var(--font-sans);
   font-size: 14px;
   line-height: 1.55;
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
-}
-
-/* …plus one ultra-slow drifting layer for a living "bioluminescent" feel.
-   Sits above the base background but below all content (negative z-index). */
-body::before {
-  content: '';
-  position: fixed;
-  inset: -6%;
-  z-index: -1;
-  pointer-events: none;
-  background: var(--aurora-drift);
-  animation: aurora-drift 52s ease-in-out infinite alternate;
-}
-@keyframes aurora-drift {
-  0% {
-    transform: translate3d(0, 0, 0) scale(1);
-    opacity: 0.75;
-  }
-  50% {
-    transform: translate3d(1.8%, -1.4%, 0) scale(1.05);
-    opacity: 1;
-  }
-  100% {
-    transform: translate3d(-1.4%, 1.8%, 0) scale(1.02);
-    opacity: 0.8;
-  }
-}
-@media (prefers-reduced-motion: reduce) {
-  body::before {
-    animation: none;
-  }
 }
 
 a {
@@ -205,13 +198,13 @@ button:active {
   height: 36px;
   padding: 0 var(--sp-4);
   border-radius: var(--radius-sm);
-  border: 1px solid var(--border-strong);
-  background: var(--surface-2);
+  border: 1px solid var(--border);
+  background: var(--surface);
   color: var(--text);
   font: inherit;
   font-weight: 500;
   cursor: pointer;
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
   transition:
     background 0.15s ease,
     border-color 0.15s ease,
@@ -219,9 +212,8 @@ button:active {
     transform 0.26s cubic-bezier(0.34, 1.56, 0.64, 1);
 }
 .btn:hover {
-  background: var(--surface-3);
+  background: var(--surface-2);
   border-color: var(--border-strong);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
 }
 /* Squash on press; release springs back via the base overshoot curve. */
 .btn:active {
@@ -232,47 +224,27 @@ button:active {
   cursor: not-allowed;
 }
 .btn-primary {
-  position: relative;
-  /* Clip the sheen ::after to the button box — otherwise its resting
-     translateX(-130%) paints a gray streak outside the button. outline and
-     box-shadow are painted outside the border box and are not affected. */
-  overflow: hidden;
-  background: var(--primary-grad);
-  border-color: var(--primary);
-  color: #0a0c10;
-  font-weight: 600;
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.18),
-    0 4px 16px var(--primary-glow);
+  /* Near-black rather than brand-coloured. A saturated fill shouts on a light
+     ground; the dark fill is the strongest thing on the page while leaving
+     the accent free to mark state. The dark theme's gradient, sheen sweep and
+     white inset all depended on a dark surround and are gone. */
+  background: var(--action);
+  border-color: var(--action);
+  color: var(--action-text);
+  font-weight: 500;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.12);
   transition:
+    background 0.15s ease,
     border-color 0.15s ease,
     box-shadow 0.15s ease,
-    filter 0.15s ease,
     transform 0.26s cubic-bezier(0.34, 1.56, 0.64, 1);
 }
-/* Sheen sweep on hover — clipped by .btn-primary's overflow: hidden;
-   travels from -130% to +130% so it fully enters and exits the button. */
-.btn-primary::after {
-  content: '';
-  position: absolute;
-  inset: 0;
-  border-radius: inherit;
-  background: linear-gradient(105deg, transparent 42%, rgba(255, 255, 255, 0.22) 50%, transparent 58%);
-  transform: translateX(-130%);
-  pointer-events: none;
-}
 .btn-primary:hover {
-  border-color: var(--primary-hover);
-  filter: brightness(1.08);
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.22),
-    0 4px 22px rgba(110, 139, 255, 0.34),
-    0 2px 12px rgba(167, 139, 250, 0.22);
+  background: var(--action-hover);
+  border-color: var(--action-hover);
+  box-shadow: 0 2px 6px rgba(15, 23, 42, 0.16);
 }
-.btn-primary:hover::after {
-  transform: translateX(130%);
-  transition: transform 0.3s ease;
-}
+
 .btn-icon {
   width: 36px;
   padding: 0;
@@ -282,13 +254,14 @@ button:active {
 .input,
 .textarea {
   width: 100%;
-  background: color-mix(in srgb, var(--surface-2) 78%, var(--bg));
+  /* Sunken by being slightly darker than the card, not by an inset shadow:
+     the dark theme's inset at 0.22 alpha reads as a dirty smear on white. */
+  background: var(--surface-2);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   color: var(--text);
   font: inherit;
   padding: var(--sp-2) var(--sp-3);
-  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.22);
   transition: border-color 0.15s ease, box-shadow 0.15s ease, background 0.15s ease;
 }
 .input::placeholder,
@@ -303,11 +276,10 @@ button:active {
 .textarea:focus {
   outline: none;
   border-color: var(--primary);
-  background: var(--surface-2);
-  box-shadow:
-    inset 0 1px 2px rgba(0, 0, 0, 0.18),
-    0 0 0 4px var(--primary-tint),
-    0 0 22px rgba(167, 139, 250, 0.14);
+  /* Focus rises to white and takes a tinted ring. The violet outer glow the
+     dark theme added is dropped: on white it is either invisible or muddy. */
+  background: var(--surface);
+  box-shadow: 0 0 0 3px var(--primary-tint);
 }
 .textarea {
   resize: vertical;
@@ -316,27 +288,13 @@ button:active {
 }
 
 .card {
-  position: relative;
-  background:
-    linear-gradient(180deg, rgba(110, 139, 255, 0.05), transparent 36%),
-    var(--surface);
-  border: 1px solid var(--border);
+  /* White on the tinted page, separated by a hairline. The dark theme needed
+     a blue top-wash and a white inset to lift a card off a navy ground; here
+     the ground does that, and both devices only added grime. */
+  background: var(--surface);
+  border: 1px solid var(--hairline);
   border-radius: var(--radius);
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.04),
-    var(--shadow);
-}
-/* Top gradient hairline — keeps card stacks from reading as uniform slabs. */
-.card::before {
-  content: '';
-  position: absolute;
-  top: 0;
-  left: var(--sp-3);
-  right: var(--sp-3);
-  height: 1px;
-  background: linear-gradient(90deg, transparent, var(--primary-border) 35%, var(--primary-2-border) 65%, transparent);
-  opacity: 0.55;
-  pointer-events: none;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04), 0 4px 12px rgba(15, 23, 42, 0.03);
 }
 
 .mono {
@@ -406,10 +364,19 @@ button:active {
   -webkit-backdrop-filter: blur(14px) saturate(1.3);
   backdrop-filter: blur(14px) saturate(1.3);
 }
-/* Brand tick under each page title — a short blue → violet gradient dash. */
+/* Brand tick under each page title — a short accent dash. */
 .topbar h1 {
+  position: relative;
   padding-bottom: 4px;
-  background: linear-gradient(90deg, var(--primary), var(--primary-2)) left bottom / 1.7em 2px no-repeat;
+}
+.topbar h1::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  width: 1.7em;
+  height: 2px;
+  background: var(--primary);
 }
 
 /* Empty / loading states */

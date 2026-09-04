@@ -2,7 +2,9 @@
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import Icon from '../components/Icon.vue'
+import SessionPicker from '../components/SessionPicker.vue'
 import { api, streamChat } from '../api'
+import { renderMarkdown } from '../markdown'
 
 const PROVIDER_KEY = 'jelly.provider' // remembers the last-used provider
 const AGENT_KEY = 'jelly.agent' // remembers the last-used agent (multi-agent)
@@ -206,10 +208,12 @@ function resultSummary(t) {
         <span v-if="sessionId" class="badge mono">{{ sessionId }}</span>
       </div>
       <div class="topbar-r">
-        <select v-model="sessionId" class="input select history-select" :disabled="busy" @change="openHistorySession(sessionId)">
-          <option value="">历史会话…</option>
-          <option v-for="s in historySessions" :key="s.id" :value="s.id">{{ s.preview || '（空会话）' }} · {{ s.id }}</option>
-        </select>
+        <SessionPicker
+          v-model="sessionId"
+          :sessions="historySessions"
+          :disabled="busy"
+          @pick="openHistorySession"
+        />
         <select v-if="agents.length" v-model="agentName" class="input select" :disabled="busy" aria-label="选择 Agent">
           <option value="">单 Agent（默认）</option>
           <option v-for="a in agents" :key="a.name" :value="a.name">
@@ -267,7 +271,12 @@ function resultSummary(t) {
             </div>
           </div>
 
-          <div v-if="m.text" class="bubble" :class="m.role">{{ m.text }}</div>
+          <!-- Agent replies are markdown; a user's own message is not. Sending
+               user input through the renderer would let someone paste markup
+               into their own transcript, and there is nothing to gain from
+               formatting what they just typed. -->
+          <div v-if="m.text && m.role === 'agent'" class="bubble agent md" v-html="renderMarkdown(m.text)"></div>
+          <div v-else-if="m.text" class="bubble" :class="m.role">{{ m.text }}</div>
           <div v-else-if="m.role === 'agent' && busy" class="bubble agent typing">
             <span class="spinner" />
             <span class="muted">思考中…</span>
@@ -334,7 +343,6 @@ function resultSummary(t) {
   width: auto;
   height: 36px;
 }
-.history-select { max-width: 260px; }
 
 .stream {
   flex: 1;
@@ -360,15 +368,11 @@ function resultSummary(t) {
   display: grid;
   place-items: center;
   border: 1px solid var(--border);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
 }
 .avatar.user {
-  background: var(--primary-grad);
+  background: var(--primary);
   border-color: transparent;
   color: #fff;
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.22),
-    0 0 10px rgba(110, 139, 255, 0.3);
 }
 .avatar.agent {
   background: var(--accent-tint);
@@ -387,17 +391,115 @@ function resultSummary(t) {
   white-space: pre-wrap;
   word-break: break-word;
   border: 1px solid var(--border);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
 }
 .bubble.user {
-  border-color: transparent;
-  background:
-    linear-gradient(135deg, rgba(110, 139, 255, 0.3), rgba(167, 139, 250, 0.2)) padding-box,
-    linear-gradient(135deg, var(--primary-border), var(--primary-2-border)) border-box;
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.08),
-    0 4px 14px rgba(110, 139, 255, 0.14);
+  /* A flat tint with the accent as its edge. The gradient fill plus gradient
+     border needed a dark surround to read as one shape; on white the two
+     gradients fought each other and the text sat on a moving ground. */
+  background: var(--primary-tint);
+  border-color: var(--primary-border);
 }
+
+/* Rendered markdown. Deep selectors because the HTML is injected by v-html and
+   never sees scoped-style attributes. */
+.bubble.md :deep(p) {
+  margin: 0 0 0.6em;
+}
+.bubble.md :deep(p:last-child) {
+  margin-bottom: 0;
+}
+/* Lists keep their marker inside the bubble: the default padding-left of 40px
+   pushes markers past the bubble's own padding and they hang in the gutter. */
+.bubble.md :deep(ul),
+.bubble.md :deep(ol) {
+  margin: 0.4em 0 0.6em;
+  padding-left: 1.4em;
+}
+.bubble.md :deep(li) {
+  margin: 0.2em 0;
+}
+.bubble.md :deep(li)::marker {
+  color: var(--text-muted);
+}
+.bubble.md :deep(strong) {
+  font-weight: 600;
+  color: var(--text);
+}
+.bubble.md :deep(code) {
+  font-family: var(--font-mono);
+  font-size: 0.88em;
+  padding: 0.12em 0.36em;
+  border-radius: 4px;
+  background: var(--surface-3);
+  border: 1px solid var(--hairline);
+}
+.bubble.md :deep(pre) {
+  margin: 0.5em 0;
+  padding: var(--sp-3);
+  border-radius: var(--radius-sm);
+  background: var(--surface-3);
+  border: 1px solid var(--hairline);
+  /* A wide code block scrolls inside itself rather than widening the bubble
+     and, through it, the whole conversation column. */
+  overflow-x: auto;
+}
+.bubble.md :deep(pre code) {
+  padding: 0;
+  border: 0;
+  background: none;
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+.bubble.md :deep(h1),
+.bubble.md :deep(h2),
+.bubble.md :deep(h3),
+.bubble.md :deep(h4) {
+  /* A reply is already inside a bubble under a heading of its own, so the
+     model's "#" levels are rendered as emphasis rather than as page headings —
+     browser defaults would put 2em type in a chat line. */
+  margin: 0.7em 0 0.35em;
+  font-size: 1em;
+  font-weight: 600;
+}
+.bubble.md :deep(h1:first-child),
+.bubble.md :deep(h2:first-child),
+.bubble.md :deep(h3:first-child) {
+  margin-top: 0;
+}
+.bubble.md :deep(blockquote) {
+  margin: 0.5em 0;
+  padding: 0.1em 0 0.1em var(--sp-3);
+  border-left: 2px solid var(--border);
+  color: var(--text-dim);
+}
+.bubble.md :deep(a) {
+  color: var(--primary);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.bubble.md :deep(hr) {
+  margin: 0.8em 0;
+  border: 0;
+  border-top: 1px solid var(--border);
+}
+.bubble.md :deep(table) {
+  margin: 0.5em 0;
+  border-collapse: collapse;
+  font-size: 13px;
+  display: block;
+  overflow-x: auto;
+}
+.bubble.md :deep(th),
+.bubble.md :deep(td) {
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  text-align: left;
+}
+.bubble.md :deep(th) {
+  background: var(--surface-3);
+  font-weight: 600;
+}
+
 .bubble.agent {
   background: var(--surface-2);
   border-left: 3px solid var(--accent);

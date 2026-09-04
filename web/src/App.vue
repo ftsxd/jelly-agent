@@ -197,16 +197,11 @@ async function logout() {
   align-items: center;
   gap: var(--sp-3);
   padding: var(--sp-2) var(--sp-2) var(--sp-5);
-  border-bottom: 1px solid transparent;
-  border-image: linear-gradient(90deg, var(--primary-border), var(--primary-2-border) 55%, transparent) 1;
+  border-bottom: 1px solid var(--hairline);
   margin-bottom: var(--sp-3);
-  background: radial-gradient(ellipse 90% 120% at 20% 0%, rgba(110, 139, 255, 0.12), transparent 65%);
-  border-radius: var(--radius-sm);
 }
 .brand-mark {
   flex-shrink: 0;
-  filter: drop-shadow(0 0 6px rgba(110, 139, 255, 0.4))
-    drop-shadow(0 2px 16px rgba(167, 139, 250, 0.25));
 }
 .brand-text {
   display: flex;
@@ -216,10 +211,7 @@ async function logout() {
 .brand-text strong {
   font-size: 15px;
   letter-spacing: -0.01em;
-  background: var(--primary-grad);
-  -webkit-background-clip: text;
-  background-clip: text;
-  color: transparent;
+  color: var(--text);
 }
 .brand-sub {
   font-size: 11px;
@@ -254,8 +246,7 @@ async function logout() {
   width: 3px;
   height: 0;
   border-radius: 999px;
-  background: linear-gradient(180deg, var(--primary), var(--primary-2));
-  box-shadow: 0 0 10px rgba(110, 139, 255, 0.55);
+  background: var(--primary);
   transform: translateY(-50%);
   transition: height 0.18s ease;
 }
@@ -264,11 +255,12 @@ async function logout() {
   color: var(--text);
 }
 .nav-item.active {
-  background: linear-gradient(90deg, rgba(110, 139, 255, 0.22), rgba(167, 139, 250, 0.16));
-  color: var(--primary-hover);
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.06),
-    0 2px 10px rgba(110, 139, 255, 0.14);
+  /* A flat tint and the accent colour. The dark theme's glow and white inset
+     needed a dark surround; the raw rgba values here also predated the
+     accent being darkened for a white ground, so they no longer matched it. */
+  background: var(--primary-tint);
+  color: var(--primary);
+  font-weight: 500;
 }
 .nav-item.active::before {
   height: 18px;
@@ -295,8 +287,7 @@ async function logout() {
   transition: border-color 0.3s ease;
 }
 .status:has(.dot.ok) {
-  border-color: rgba(70, 214, 168, 0.32);
-  box-shadow: 0 0 12px rgba(70, 214, 168, 0.12);
+  border-color: color-mix(in srgb, var(--accent) 32%, transparent);
 }
 .dot {
   width: 8px;
@@ -312,10 +303,8 @@ async function logout() {
 @keyframes dot-breathe {
   0%,
   100% {
-    box-shadow: 0 0 4px rgba(70, 214, 168, 0.35);
   }
   50% {
-    box-shadow: 0 0 10px rgba(70, 214, 168, 0.75);
   }
 }
 .ver {
@@ -335,16 +324,6 @@ async function logout() {
   place-items: center;
   padding: var(--sp-5);
 }
-.auth-page::before {
-  content: '';
-  position: absolute;
-  inset: 0;
-  background:
-    radial-gradient(ellipse 46% 34% at 50% 32%, rgba(110, 139, 255, 0.15), transparent 70%),
-    radial-gradient(ellipse 32% 26% at 64% 58%, rgba(167, 139, 250, 0.09), transparent 70%),
-    radial-gradient(ellipse 28% 22% at 38% 62%, rgba(70, 214, 168, 0.06), transparent 70%);
-  pointer-events: none;
-}
 .auth-card {
   position: relative;
   z-index: 1;
@@ -352,11 +331,9 @@ async function logout() {
   width: min(100%, 360px);
   gap: var(--sp-3);
   padding: var(--sp-6);
-  border: 1px solid transparent;
+  border: 1px solid var(--border);
   border-radius: var(--radius);
-  background:
-    linear-gradient(var(--surface), var(--surface)) padding-box,
-    linear-gradient(135deg, var(--primary-border), var(--primary-2-border) 50%, rgba(70, 214, 168, 0.24)) border-box;
+  background: var(--surface);
   box-shadow: var(--shadow-pop);
 }
 .auth-brand {
@@ -367,14 +344,9 @@ async function logout() {
 .auth-brand .brand-mark {
   width: 34px;
   height: 34px;
-  filter: drop-shadow(0 0 8px rgba(110, 139, 255, 0.5))
-    drop-shadow(0 4px 18px rgba(167, 139, 250, 0.3));
 }
 .auth-brand h1 {
-  background: var(--primary-grad);
-  -webkit-background-clip: text;
-  background-clip: text;
-  color: transparent;
+  color: var(--text);
 }
 .auth-card h1 { margin: 0; font-size: 20px; }
 .auth-card p { margin: 0; line-height: 1.6; }

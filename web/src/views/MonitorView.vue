@@ -292,9 +292,7 @@ function errKinds(t) {
 .kpi:hover {
   transform: translateY(-1px);
   border-color: var(--border-strong);
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.04),
-    0 6px 20px rgba(0, 0, 0, 0.28);
+  box-shadow: 0 2px 8px rgba(15, 23, 42, 0.06);
 }
 .kpi-icon {
   box-sizing: content-box;
@@ -305,63 +303,49 @@ function errKinds(t) {
   background: var(--primary-tint);
   color: var(--primary);
 }
-/* Per-KPI hue coding: blue / violet / teal / amber — full-card tint, not
-   just the icon chip: gradient wash + tinted border + matching hairline. */
+/* Per-KPI hue coding: blue / violet / teal / amber, carried by the border and
+   the icon chip only. The dark theme washed the whole card in its hue; four
+   tinted cards in a row on a light ground read as a warning panel rather than
+   as a set of numbers. */
 .kpi:nth-child(1) {
-  background: linear-gradient(160deg, rgba(110, 139, 255, 0.14), rgba(110, 139, 255, 0.03) 60%), var(--surface);
-  border-color: rgba(110, 139, 255, 0.26);
+  border-color: color-mix(in srgb, var(--primary) 26%, transparent);
 }
 .kpi:nth-child(1):hover {
-  border-color: rgba(110, 139, 255, 0.5);
+  border-color: color-mix(in srgb, var(--primary) 50%, transparent);
 }
 .kpi:nth-child(2) {
-  background: linear-gradient(160deg, rgba(167, 139, 250, 0.14), rgba(167, 139, 250, 0.03) 60%), var(--surface);
-  border-color: rgba(167, 139, 250, 0.26);
+  border-color: color-mix(in srgb, var(--primary-2) 26%, transparent);
 }
 .kpi:nth-child(2):hover {
-  border-color: rgba(167, 139, 250, 0.5);
+  border-color: color-mix(in srgb, var(--primary-2) 50%, transparent);
 }
 .kpi:nth-child(3) {
-  background: linear-gradient(160deg, rgba(70, 214, 168, 0.12), rgba(70, 214, 168, 0.03) 60%), var(--surface);
-  border-color: rgba(70, 214, 168, 0.26);
+  border-color: color-mix(in srgb, var(--accent) 26%, transparent);
 }
 .kpi:nth-child(3):hover {
-  border-color: rgba(70, 214, 168, 0.5);
+  border-color: color-mix(in srgb, var(--accent) 50%, transparent);
 }
 .kpi:nth-child(4) {
-  background: linear-gradient(160deg, rgba(240, 180, 84, 0.13), rgba(240, 180, 84, 0.03) 60%), var(--surface);
   border-color: rgba(240, 180, 84, 0.26);
 }
 .kpi:nth-child(4):hover {
   border-color: rgba(240, 180, 84, 0.5);
 }
 .kpi:nth-child(1) .kpi-icon {
-  background: rgba(110, 139, 255, 0.2);
+  background: color-mix(in srgb, var(--primary) 20%, transparent);
   color: var(--primary-hover);
 }
 .kpi:nth-child(2) .kpi-icon {
-  background: rgba(167, 139, 250, 0.2);
+  background: color-mix(in srgb, var(--primary-2) 20%, transparent);
   color: var(--primary-2);
 }
 .kpi:nth-child(3) .kpi-icon {
-  background: rgba(70, 214, 168, 0.18);
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
   color: var(--accent);
 }
 .kpi:nth-child(4) .kpi-icon {
   background: rgba(240, 180, 84, 0.18);
   color: var(--warning);
-}
-.kpi:nth-child(1)::before {
-  background: linear-gradient(90deg, transparent, var(--primary-border), transparent);
-}
-.kpi:nth-child(2)::before {
-  background: linear-gradient(90deg, transparent, var(--primary-2-border), transparent);
-}
-.kpi:nth-child(3)::before {
-  background: linear-gradient(90deg, transparent, var(--accent-border), transparent);
-}
-.kpi:nth-child(4)::before {
-  background: linear-gradient(90deg, transparent, var(--warning-border), transparent);
 }
 .kpi-num {
   font-size: 28px;
@@ -466,35 +450,31 @@ function errKinds(t) {
 }
 .bar-fill {
   height: 100%;
-  background: linear-gradient(90deg, var(--primary), var(--primary-2));
+  /* The nth-child rules below give each bar its own hue; this is the base for
+     any beyond the fifth. */
+  background: var(--primary);
   border-radius: 999px;
   min-width: 2px;
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.18),
-    0 0 10px rgba(110, 139, 255, 0.3);
   transition: width 0.3s ease;
 }
 /* Tool ranking: categorical palette cycling blue/violet/teal/amber/cyan.
-   Each bar runs dark-to-saturated within its own hue, all derived from tokens. */
+   Flat fills rather than the dark theme's gradient-plus-glow — a glow on a
+   white ground reads as a printing error, and the bar's own length is what
+   carries the value. */
 .bar-row:nth-child(5n + 1) .bar-fill {
-  background: linear-gradient(90deg, color-mix(in srgb, var(--primary) 76%, var(--bg)), var(--primary));
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.18), 0 0 10px rgba(110, 139, 255, 0.34);
+  background: var(--primary);
 }
 .bar-row:nth-child(5n + 2) .bar-fill {
-  background: linear-gradient(90deg, color-mix(in srgb, var(--primary-2) 76%, var(--bg)), var(--primary-2));
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.18), 0 0 10px rgba(167, 139, 250, 0.34);
+  background: var(--primary-2);
 }
 .bar-row:nth-child(5n + 3) .bar-fill {
-  background: linear-gradient(90deg, color-mix(in srgb, var(--accent) 76%, var(--bg)), var(--accent));
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.18), 0 0 10px rgba(70, 214, 168, 0.3);
+  background: var(--accent);
 }
 .bar-row:nth-child(5n + 4) .bar-fill {
-  background: linear-gradient(90deg, color-mix(in srgb, var(--warning) 76%, var(--bg)), var(--warning));
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.18), 0 0 10px rgba(240, 180, 84, 0.3);
+  background: var(--warning);
 }
 .bar-row:nth-child(5n + 5) .bar-fill {
-  background: linear-gradient(90deg, color-mix(in srgb, var(--cyan) 76%, var(--bg)), var(--cyan));
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.18), 0 0 10px rgba(34, 211, 238, 0.3);
+  background: var(--cyan);
 }
 .panel-head {
   display: flex;
@@ -604,14 +584,15 @@ function errKinds(t) {
   width: 60%;
   max-width: 32px;
   min-height: 2px;
-  background: linear-gradient(180deg, var(--primary-2), var(--primary) 55%, rgba(110, 139, 255, 0.35));
+  /* Flat. A vertical gradient on a bar makes the top read as a different
+     value from the bottom — the bar's height already carries the number, and
+     on a light ground the fade at the base looked like the bar was cut off. */
+  background: var(--primary);
   border-radius: var(--radius-sm) var(--radius-sm) 0 0;
-  box-shadow: 0 0 12px rgba(110, 139, 255, 0.28);
   transition: height 0.3s ease, filter 0.15s ease, box-shadow 0.15s ease;
 }
 .chart-col:hover .chart-bar {
   filter: brightness(1.25);
-  box-shadow: 0 0 20px rgba(167, 139, 250, 0.5);
 }
 .chart-label {
   font-size: 10px;
