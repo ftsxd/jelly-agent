@@ -978,3 +978,115 @@ func TestSinkReceivesTheRealCallOnEveryPath(t *testing.T) {
 		t.Errorf("sink saw %+v, want the routing failure recorded", got)
 	}
 }
+
+// A delivery that could not be stored must not be advertised as readable.
+//
+// The write failing is not the call failing: the tool has already run, and for
+// a mutating tool reporting failure would invite a retry that repeats the side
+// effect. So the call succeeds and simply says the result is unrecoverable —
+// which is the outcome a later reader has to be able to trust, because a
+// citation that cannot be resolved is worse than an absent one.
+func TestStorageFailureLeavesNoDanglingReference(t *testing.T) {
+	m := ops.ToolMetadata{Name: "get_pods", RemoteName: "get_pods", Server: "k8s"}
+	reg := keyedReg{names: fakeReg{m.Name: m}, keys: map[string]ops.ToolMetadata{m.Key(): m}}
+
+	gw := New(Config{
+		Registry: reg,
+		Executors: map[string]Executor{m.Server: ExecutorFunc(
+			func(context.Context, string, map[string]any) (map[string]any, error) {
+				return map[string]any{"pods": []any{"a"}}, nil
+			})},
+		Policy: Policy{MaxSideEffect: ops.SideEffectMutating},
+		Results: KeeperFunc(func(context.Context, CallMeta, string, map[string]any) error {
+			return errors.New("disk full")
+		}),
+	})
+
+	res, err := gw.Execute(t.Context(), prodContext(), ops.OriginModel, "get_pods", nil)
+	if err != nil {
+		t.Fatalf("the call must still succeed: %v", err)
+	}
+	if !res.Call.OK {
+		t.Error("call reported not OK; the tool ran and a retry would repeat it")
+	}
+	if res.Call.Retrievable {
+		t.Error("call claims the delivery is retrievable after the write failed")
+	}
+	if res.Evidence != nil && res.Evidence.Retrievable {
+		t.Error("evidence claims retrievable after the write failed")
+	}
+}
+
+// And a delivery that was stored says so, on both the call and the evidence
+// that cites it.
+func TestStoredDeliveryIsMarkedRetrievable(t *testing.T) {
+	m := ops.ToolMetadata{Name: "get_pods", RemoteName: "get_pods", Server: "k8s"}
+	reg := keyedReg{names: fakeReg{m.Name: m}, keys: map[string]ops.ToolMetadata{m.Key(): m}}
+
+	var keptTool string
+	var keptPayload map[string]any
+	gw := New(Config{
+		Registry: reg,
+		Executors: map[string]Executor{m.Server: ExecutorFunc(
+			func(context.Context, string, map[string]any) (map[string]any, error) {
+				return map[string]any{"pods": []any{"a"}}, nil
+			})},
+		Policy: Policy{MaxSideEffect: ops.SideEffectMutating},
+		Results: KeeperFunc(func(_ context.Context, _ CallMeta, tool string, delivered map[string]any) error {
+			keptTool, keptPayload = tool, delivered
+			return nil
+		}),
+	})
+
+	res, err := gw.Execute(t.Context(), prodContext(), ops.OriginModel, "get_pods", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Call.Retrievable || res.Evidence == nil || !res.Evidence.Retrievable {
+		t.Error("a stored delivery was not marked retrievable")
+	}
+	if keptTool != "get_pods" {
+		t.Errorf("kept under tool %q, want the canonical name", keptTool)
+	}
+	// The payload handed to storage is what the tool returned, before the
+	// gateway shaped or bounded anything — that is the only version worth
+	// keeping, and the reason to store it at this point in the sequence.
+	if keptPayload == nil || keptPayload["pods"] == nil {
+		t.Errorf("kept %v, want the tool's own payload", keptPayload)
+	}
+}
+
+// Storage runs before shaping, so a ceiling that shortens the prompt cannot
+// shorten what was kept.
+func TestWhatIsKeptIsNotBounded(t *testing.T) {
+	long := strings.Repeat("z", 20_000)
+	m := ops.ToolMetadata{
+		Name: "big", RemoteName: "big", Server: "k8s", MaxResultBytes: 200,
+	}
+	reg := keyedReg{names: fakeReg{m.Name: m}, keys: map[string]ops.ToolMetadata{m.Key(): m}}
+
+	var kept map[string]any
+	gw := New(Config{
+		Registry: reg,
+		Executors: map[string]Executor{m.Server: ExecutorFunc(
+			func(context.Context, string, map[string]any) (map[string]any, error) {
+				return map[string]any{"output": long}, nil
+			})},
+		Policy: Policy{MaxSideEffect: ops.SideEffectMutating},
+		Results: KeeperFunc(func(_ context.Context, _ CallMeta, _ string, d map[string]any) error {
+			kept = d
+			return nil
+		}),
+	})
+
+	res, err := gw.Execute(t.Context(), prodContext(), ops.OriginModel, "big", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Evidence.Truncated {
+		t.Fatal("premise broken: the ceiling should have shortened the prompt copy")
+	}
+	if got := kept["output"].(string); len(got) != len(long) {
+		t.Errorf("kept %d bytes, want the unshortened %d", len(got), len(long))
+	}
+}

@@ -73,6 +73,9 @@ type Evidence struct {
 	Data      json.RawMessage `json:"data,omitempty"`
 	Truncated bool            `json:"truncated,omitempty"`
 	Redacted  bool            `json:"redacted,omitempty"`
+	// Retrievable mirrors ToolCall.Retrievable, so a conclusion that cites
+	// this observation can say whether the full delivery is still readable.
+	Retrievable bool `json:"retrievable,omitempty"`
 }
 
 // Pinned reports whether the context budget must keep this observation even
@@ -97,6 +100,12 @@ type ToolCall struct {
 	OK      bool   `json:"ok"`
 	ErrKind string `json:"err_kind,omitempty"`
 	Err     string `json:"err,omitempty"`
+
+	// Retrievable says the delivery behind this call reached durable storage
+	// and can be read back in full. False means it cannot — either nothing
+	// keeps deliveries, or the write failed — and the distinction matters,
+	// because a shortened result is only recoverable when this is true.
+	Retrievable bool `json:"retrievable,omitempty"`
 
 	// Replayed marks a call the gateway answered from its dedup cache. These
 	// are excluded from the success-rate denominator: nothing was attempted,

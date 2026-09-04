@@ -6,6 +6,7 @@ package engine
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -28,6 +29,7 @@ import (
 	jellymetrics "github.com/jelly-agent/jelly-agent/internal/metrics"
 	jellymodel "github.com/jelly-agent/jelly-agent/internal/model"
 	"github.com/jelly-agent/jelly-agent/internal/ops"
+	"github.com/jelly-agent/jelly-agent/internal/record"
 	"github.com/jelly-agent/jelly-agent/internal/sandbox"
 	"github.com/jelly-agent/jelly-agent/internal/selector"
 	jellysession "github.com/jelly-agent/jelly-agent/internal/session"
@@ -113,6 +115,12 @@ type Engine struct {
 	// admit keeps each session's tool set stable, to protect the prompt cache.
 	admitOnce sync.Once
 	admit     *admissions
+
+	// recordStore durably keeps tool deliveries so a shortened result can be
+	// read back.
+	recordsOnce sync.Once
+	recordStore *record.Store
+	recordsErr  error
 }
 
 // New wraps a loaded config in an engine.
@@ -284,6 +292,11 @@ func (e *Engine) toolRegistry() (*toolreg.Store, *gateway.Gateway) {
 			// record of what was asked for rather than of what was done, and
 			// one Seal's citations could not be checked against.
 			Sink: gateway.SinkFunc(e.recordGatewayCall),
+			// Durable, and distinct from the sink above: this one decides
+			// whether a shortened result can be read back later, so its
+			// failure changes what we may claim rather than merely losing a
+			// row.
+			Results: gateway.KeeperFunc(e.keepToolResult),
 		})
 	})
 	return e.toolStore, e.gw
@@ -440,6 +453,74 @@ func (e *Engine) sideEffectCeiling() ops.SideEffectLevel {
 	return ops.SideEffectMutating
 }
 
+// keepToolResult commits what a tool delivered, before any shaping.
+//
+// Returning an error is the point: the gateway publishes a retrievable
+// reference only when this succeeds. Nothing here is best-effort.
+func (e *Engine) keepToolResult(ctx context.Context, meta gateway.CallMeta, tool string, delivered map[string]any) error {
+	store, err := e.records()
+	if err != nil {
+		return err
+	}
+	payload, err := json.Marshal(delivered)
+	if err != nil {
+		return fmt.Errorf("encode delivery: %w", err)
+	}
+	return store.Put(ctx, record.Record{
+		Scope: record.Scope{
+			AppName: AppName, UserID: UserID, SessionID: meta.SessionID,
+		},
+		InvocationID: meta.InvocationID,
+		CallID:       meta.CallID,
+		Tool:         tool,
+		At:           time.Now(),
+		Payload:      payload,
+		Upstream:     upstreamCut(delivered),
+	})
+}
+
+// upstreamCut reads whether the tool had already shortened its own output.
+//
+// Three states, not two. Our own tools report it — fetch_url truncates to
+// max_chars inside the tool and sets the flag — but a third-party MCP server
+// has no such convention, and the flag also carries omitempty, so an absent
+// key means "the tool did not say" rather than "the tool delivered
+// everything". Recording that as No would turn a partial page into a promise
+// of a complete one.
+func upstreamCut(delivered map[string]any) record.Upstream {
+	v, present := delivered["truncated"]
+	if !present {
+		return record.UpstreamUnknown
+	}
+	if b, ok := v.(bool); ok {
+		if b {
+			return record.UpstreamYes
+		}
+		return record.UpstreamNo
+	}
+	// Present but not a bool — a tool using the key for something else. Not a
+	// claim we can read either way.
+	return record.UpstreamUnknown
+}
+
+// records opens the delivery store on first use.
+func (e *Engine) records() (*record.Store, error) {
+	e.recordsOnce.Do(func() {
+		path := e.sessionDBPath
+		if path == "" {
+			path, e.recordsErr = jellysession.DefaultDBPath()
+			if e.recordsErr != nil {
+				return
+			}
+		}
+		e.recordStore, e.recordsErr = record.Open(path)
+	})
+	return e.recordStore, e.recordsErr
+}
+
+// Records exposes the delivery store, for the console's re-read endpoint.
+func (e *Engine) Records() (*record.Store, error) { return e.records() }
+
 // recordGatewayCall stores what the gateway actually did.
 //
 // A failed insert must not fail the call: the row is observability, the call is
@@ -453,6 +534,7 @@ func (e *Engine) recordGatewayCall(_ context.Context, meta gateway.CallMeta, res
 		StartedAt: res.Call.StartedAt, Duration: res.Call.Duration,
 		OK: res.Call.OK, ErrKind: res.Call.ErrKind, Err: res.Call.Err,
 		ResultBytes: res.Call.ResultBytes, Replayed: res.Call.Replayed,
+		Retrievable: res.Call.Retrievable,
 	}
 	if res.Evidence != nil {
 		row.EvidenceID = res.Evidence.ID

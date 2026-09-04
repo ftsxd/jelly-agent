@@ -39,6 +39,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sort"
 	"strconv"
 	"strings"
@@ -46,6 +47,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/jelly-agent/jelly-agent/internal/logging"
 	"github.com/jelly-agent/jelly-agent/internal/ops"
 	"github.com/jelly-agent/jelly-agent/internal/toolreg"
 )
@@ -184,6 +186,24 @@ func (p Policy) permits(m ops.ToolMetadata) (ops.SideEffectLevel, error) {
 	return level, nil
 }
 
+// ResultKeeper durably stores what a tool delivered, before any shaping.
+//
+// An interface so the storage can move to a networked database when the
+// deployment needs one — several machines sharing the data, rolling
+// restarts — without the gateway learning anything about schemas. Returning an
+// error is the contract that matters: it means no reference exists, and the
+// caller must not pretend otherwise.
+type ResultKeeper interface {
+	Keep(ctx context.Context, meta CallMeta, tool string, delivered map[string]any) error
+}
+
+// KeeperFunc adapts a function to ResultKeeper.
+type KeeperFunc func(context.Context, CallMeta, string, map[string]any) error
+
+func (f KeeperFunc) Keep(ctx context.Context, meta CallMeta, tool string, delivered map[string]any) error {
+	return f(ctx, meta, tool, delivered)
+}
+
 // Sink receives every completed call and the evidence it produced.
 //
 // It exists because the gateway is the only place that knows what actually
@@ -227,6 +247,9 @@ type Config struct {
 	Policy  Policy
 	// Sink records completed calls. Optional; nil records nothing.
 	Sink Sink
+	// Results durably keeps tool deliveries. Optional; nil means nothing is
+	// retrievable afterwards, and every call says so rather than implying it.
+	Results ResultKeeper
 }
 
 // Gateway executes tool calls under policy, with arguments injected,
@@ -241,6 +264,10 @@ type Gateway struct {
 	shapers map[string]Shaper
 	policy  Policy
 	sink    Sink
+	// results durably keeps what tools deliver. Distinct from sink: that one
+	// is observability and may fail silently, this one gates whether a
+	// reference is published at all.
+	results ResultKeeper
 
 	// executors is guarded because it is filled after construction: the
 	// gateway is built once per engine, while the executor for a set of tools
@@ -286,6 +313,7 @@ func New(cfg Config) *Gateway {
 		shapers:   cfg.Shapers,
 		policy:    cfg.Policy,
 		sink:      cfg.Sink,
+		results:   cfg.Results,
 	}
 }
 
@@ -405,6 +433,27 @@ func (g *Gateway) ExecuteAs(ctx context.Context, meta CallMeta, ic *ops.Incident
 	call.OK = true
 	call.ResultBytes = payloadSize(raw)
 
+	// Committed before anything is shaped or bounded, and before the evidence
+	// that will cite it exists.
+	//
+	// The order is the guarantee. A reference is only published once the
+	// payload behind it is durable, because an unresolvable citation is worse
+	// than an absent one — a later reader cannot tell "we never kept this"
+	// from "we lost it".
+	//
+	// A failure here does not fail the call. The tool has already run; for a
+	// mutating tool, reporting failure would invite a retry that repeats the
+	// side effect. So the call succeeds and simply carries no reference, which
+	// is the honest outcome: the result is unrecoverable and says so.
+	if g.results != nil {
+		if err := g.results.Keep(ctx, meta, m.Name, raw); err != nil {
+			slog.Error("工具返回未能落库，本次结果无法事后重读",
+				"tool", m.Name, "call_id", meta.CallID, logging.Err(err))
+		} else {
+			call.Retrievable = true
+		}
+	}
+
 	ev := &ops.Evidence{
 		ID:         g.nextEvidenceID(),
 		Source:     ops.Source{Backend: m.Backend, Tool: m.Name, Server: m.Server},
@@ -434,6 +483,9 @@ func (g *Gateway) ExecuteAs(ctx context.Context, meta CallMeta, ic *ops.Incident
 		ev.Truncated = true
 	}
 	call.Truncated = ev.Truncated
+	// Retrievable travels with the evidence too, so a report that cites e3 can
+	// say whether e3's full payload can still be read.
+	ev.Retrievable = call.Retrievable
 	call.EvidenceIDs = []string{ev.ID}
 	return Result{Call: call, Evidence: ev}, nil
 }

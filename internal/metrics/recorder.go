@@ -64,7 +64,8 @@ CREATE TABLE IF NOT EXISTS tool_calls (
 	err           TEXT    NOT NULL DEFAULT '',
 	result_bytes  INTEGER NOT NULL DEFAULT 0,
 	evidence_id   TEXT    NOT NULL DEFAULT '',
-	replayed      INTEGER NOT NULL DEFAULT 0
+	replayed      INTEGER NOT NULL DEFAULT 0,
+	retrievable   INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_tool_calls_at      ON tool_calls(at);
 CREATE INDEX IF NOT EXISTS idx_tool_calls_session ON tool_calls(session_id);
@@ -124,6 +125,7 @@ func addMissingColumns(db *sql.DB) error {
 	for _, col := range []struct{ name, ddl string }{
 		{"evidence_id", "ALTER TABLE tool_calls ADD COLUMN evidence_id TEXT NOT NULL DEFAULT ''"},
 		{"replayed", "ALTER TABLE tool_calls ADD COLUMN replayed INTEGER NOT NULL DEFAULT 0"},
+		{"retrievable", "ALTER TABLE tool_calls ADD COLUMN retrievable INTEGER NOT NULL DEFAULT 0"},
 	} {
 		var count int
 		err := db.QueryRow(
@@ -232,12 +234,13 @@ func (r *Recorder) RecordGatewayCall(c GatewayCall) error {
 	_, err := r.db.Exec(
 		`INSERT INTO tool_calls
 		 (at, session_id, invocation_id, agent, call_id, tool, args,
-		  duration_ms, ok, err_kind, err, result_bytes, evidence_id, replayed)
-		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		  duration_ms, ok, err_kind, err, result_bytes, evidence_id, replayed,
+		  retrievable)
+		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		at.UTC().Format(time.RFC3339Nano), c.SessionID, c.InvocationID, c.Agent,
 		c.CallID, c.Tool, encodeArgs(c.Args), c.Duration.Milliseconds(),
 		boolToInt(c.OK), c.ErrKind, truncate(c.Err, 1000), c.ResultBytes,
-		c.EvidenceID, boolToInt(c.Replayed),
+		c.EvidenceID, boolToInt(c.Replayed), boolToInt(c.Retrievable),
 	)
 	if err != nil {
 		return fmt.Errorf("metrics: insert gateway call: %w", err)
@@ -262,6 +265,11 @@ type GatewayCall struct {
 	Err         string
 	ResultBytes int
 	Replayed    bool
+	// Retrievable says the delivery behind this call reached durable storage.
+	// Recorded so "how much of this run can still be read in full" is a query
+	// rather than a guess — the guarantee is only worth having if it is
+	// auditable after the fact.
+	Retrievable bool
 
 	// EvidenceID links the row to the observation a conclusion can cite. A
 	// row without one either failed or produced nothing to cite — and that

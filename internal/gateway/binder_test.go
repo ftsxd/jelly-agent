@@ -241,7 +241,6 @@ func TestAdoptionDoesNotAnswerForNamesNeverSeen(t *testing.T) {
 	}
 }
 
-
 // The name a toolset reports is not the server it is. ADK's mcptoolset answers
 // "mcp_tool_set" for every instance, so binding by it put two servers in one
 // executor slot: the second registration took over the first server's traffic,
