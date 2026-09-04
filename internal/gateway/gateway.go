@@ -513,7 +513,7 @@ func (g *Gateway) ExecuteAs(ctx context.Context, meta CallMeta, ic *ops.Incident
 	// payload the model cannot get back is destroying an observation, not
 	// budgeting one.
 	if g.budget != nil && len(ev.Data) > 0 && call.Retrievable {
-		if allowed := g.budget.Allow(ctx, meta, len(ev.Data)); allowed < len(ev.Data) {
+		if !g.budget.Fits(ctx, meta, ev.Data) {
 			ev.Preview = previewOf(ev.Data)
 			ev.Data = nil
 			ev.Withheld = true

@@ -29,14 +29,19 @@ import "context"
 // Optional: a nil budget means no dynamic decision, which is the behaviour
 // this had before — the operator's explicit ceiling, or nothing.
 type ResultBudget interface {
-	// Allow reports how many bytes of payload may reach the prompt for this
-	// call. It is at most size. Zero means the payload does not fit and only
-	// an overview should be sent.
+	// Fits reports whether this payload may reach the prompt for this call.
 	//
-	// Implementations must deduct what they grant, so that several tools
+	// The payload itself is passed rather than its size, so the decision is
+	// made on a token estimate of the actual bytes instead of on a
+	// bytes-per-token ratio. That ratio is not a small detail: the estimator
+	// counts a CJK rune as one token and four ASCII characters as one, so the
+	// real range is three to four bytes per token, and a budget assuming one
+	// withholds payloads three to four times sooner than it needs to.
+	//
+	// Implementations must deduct what they admit, so that several tools
 	// answering in the same round are judged on their combined size rather
 	// than each against the whole remaining budget.
-	Allow(ctx context.Context, meta CallMeta, size int) int
+	Fits(ctx context.Context, meta CallMeta, payload []byte) bool
 }
 
 // maxPreviewBytes bounds the preview sent in place of a withheld payload.

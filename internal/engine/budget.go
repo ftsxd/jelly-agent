@@ -54,15 +54,6 @@ const (
 	resultShare = 0.25
 )
 
-// bytesPerToken converts a token allowance into a byte allowance.
-//
-// Deliberately pessimistic. tokens.Estimate counts a CJK rune as one token
-// and other characters as a quarter of one, so for the mixed JSON these
-// results are, one byte per token is the conservative end. Being pessimistic
-// here withholds a payload slightly sooner than strictly necessary, which
-// costs a search; being optimistic overruns the window, which costs the turn.
-const bytesPerToken = 1
-
 // resultBudget tracks, per invocation, how much room tool results have left.
 type resultBudget struct {
 	mu sync.Mutex
@@ -114,14 +105,22 @@ func (b *resultBudget) observe(invocationID string, promptTokens, contextWindow,
 		b.evictIfFullLocked()
 		b.order = append(b.order, invocationID)
 	}
-	b.byID[invocationID] = room * bytesPerToken
+	b.byID[invocationID] = room
 }
 
-// Allow implements gateway.ResultBudget.
-func (b *resultBudget) Allow(_ context.Context, meta gateway.CallMeta, size int) int {
+// Fits implements gateway.ResultBudget.
+//
+// Room and payload are both measured in tokens by the same estimator, so
+// there is no bytes-per-token ratio to get wrong. The first version had one,
+// set to 1, and was therefore three to four times more pessimistic than the
+// estimator it stood in for — a CJK rune is three bytes for one token and
+// four ASCII characters are four bytes for one.
+func (b *resultBudget) Fits(_ context.Context, meta gateway.CallMeta, payload []byte) bool {
 	if meta.InvocationID == "" {
-		return size
+		return true
 	}
+	want := tokens.EstimateBytes(payload)
+
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
@@ -129,16 +128,16 @@ func (b *resultBudget) Allow(_ context.Context, meta gateway.CallMeta, size int)
 	if !tracked {
 		// No observation for this round — no window configured, or a call
 		// that arrived outside one. Not a licence to withhold.
-		return size
+		return true
 	}
-	if size <= room {
-		b.byID[meta.InvocationID] = room - size
-		return size
+	if want <= room {
+		b.byID[meta.InvocationID] = room - want
+		return true
 	}
 	// Does not fit. Nothing is deducted: the payload is withheld whole, so it
 	// costs the prompt only its overview, and a sibling call in the same round
-	// that does fit should still be allowed through.
-	return 0
+	// that does fit should still get through.
+	return false
 }
 
 func (b *resultBudget) evictIfFullLocked() {

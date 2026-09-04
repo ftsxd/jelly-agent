@@ -11,6 +11,15 @@ func meta(inv string) gateway.CallMeta {
 	return gateway.CallMeta{SessionID: "s1", InvocationID: inv, CallID: "c1"}
 }
 
+// payloadOf builds an ASCII payload of a known estimated token size.
+//
+// ASCII is four characters per token in the estimator, so the size is exact
+// rather than approximate — these assertions are about the budget's
+// arithmetic, and a fuzzy input would hide an off-by-a-lot.
+func payloadOf(estTokens int) []byte {
+	return []byte(strings.Repeat("x", estTokens*4))
+}
+
 // 验收其一：小结果不被迫找回。
 //
 // This is the regression the whole design has to avoid. A fixed ceiling cut a
@@ -22,28 +31,30 @@ func TestASmallResultOnAFreshPromptIsPassedThroughWhole(t *testing.T) {
 	// 64k window, a 2k prompt, 8k reserved for the reply.
 	b.observe("inv1", 2000, 64000, 8000)
 
-	for _, size := range []int{50, 600, 2988, 9947} {
-		if got := b.Allow(nil, meta("inv1"), size); got != size {
-			t.Errorf("a %d-byte result was cut to %d on a nearly empty prompt", size, got)
+	// Real sizes from a measured run: an empty listing, a preview, a business
+	// group listing, and the alert listing that the old 8000-byte ceiling cut.
+	for _, bytes := range []int{50, 600, 2988, 9947} {
+		if !b.Fits(nil, meta("inv1"), []byte(strings.Repeat("x", bytes))) {
+			t.Errorf("a %d-byte result was withheld on a nearly empty prompt", bytes)
 		}
 	}
 }
 
 // 验收其二：大结果不会直接撑爆请求。
-func TestAResultLargerThanTheRoundsRoomIsWithheldWhole(t *testing.T) {
+func TestAResultLargerThanTheRoundsRoomIsWithheld(t *testing.T) {
 	b := newResultBudget()
-	// A 64k window with a 50k prompt and 8k for the reply leaves 6k, and the
-	// per-round share caps it at 16k anyway — so 6k is the room.
+	// A 64k window with a 50k prompt and 8k for the reply leaves 6k tokens,
+	// and the per-round share caps it at 16k anyway — so 6k is the room.
 	b.observe("inv1", 50000, 64000, 8000)
 
-	if got := b.Allow(nil, meta("inv1"), 41709); got != 0 {
-		t.Errorf("a 41709-byte result got %d bytes of room on a nearly full prompt", got)
+	if b.Fits(nil, meta("inv1"), payloadOf(20000)) {
+		t.Error("a 20k-token result was admitted with 6k tokens of room")
 	}
-	// Withheld whole, not cut: nothing was deducted, so a sibling that does
+	// Withheld whole, not cut, and nothing deducted — so a sibling that does
 	// fit still gets through. A half-sent JSON object is what produced seven
 	// pagination guesses.
-	if got := b.Allow(nil, meta("inv1"), 1000); got != 1000 {
-		t.Errorf("a small sibling call was refused %d/1000 after a large one was withheld", got)
+	if !b.Fits(nil, meta("inv1"), payloadOf(1000)) {
+		t.Error("a small sibling call was refused after a large one was withheld")
 	}
 }
 
@@ -56,16 +67,16 @@ func TestParallelResultsAreJudgedOnTheirCombinedSize(t *testing.T) {
 	b := newResultBudget()
 	b.observe("inv1", 0, 20000, 5000) // room = min(15000, 25% of 20000) = 5000
 
-	granted, withheld := 0, 0
+	admitted, withheld := 0, 0
 	for i := 0; i < 8; i++ {
-		if got := b.Allow(nil, meta("inv1"), 1000); got == 1000 {
-			granted++
+		if b.Fits(nil, meta("inv1"), payloadOf(1000)) {
+			admitted++
 		} else {
 			withheld++
 		}
 	}
-	if granted != 5 {
-		t.Errorf("granted %d of 8 one-kilobyte results, want 5 — the room was 5000 bytes", granted)
+	if admitted != 5 {
+		t.Errorf("admitted %d of 8 one-thousand-token results, want 5 — the room was 5000 tokens", admitted)
 	}
 	if withheld != 3 {
 		t.Errorf("withheld %d, want 3", withheld)
@@ -77,16 +88,32 @@ func TestParallelResultsAreJudgedOnTheirCombinedSize(t *testing.T) {
 func TestEachRoundGetsAFreshAllowance(t *testing.T) {
 	b := newResultBudget()
 	b.observe("inv1", 0, 20000, 5000)
-	if got := b.Allow(nil, meta("inv1"), 5000); got != 5000 {
-		t.Fatalf("first round: %d", got)
+	if !b.Fits(nil, meta("inv1"), payloadOf(5000)) {
+		t.Fatal("the round's whole room was refused")
 	}
-	if got := b.Allow(nil, meta("inv1"), 1); got != 0 {
-		t.Fatalf("the round's room was spent but %d bytes were still granted", got)
+	if b.Fits(nil, meta("inv1"), payloadOf(1)) {
+		t.Fatal("the round's room was spent but another payload was still admitted")
 	}
 	// Next round: the prompt grew by what was just sent.
 	b.observe("inv1", 5000, 20000, 5000)
-	if got := b.Allow(nil, meta("inv1"), 4000); got != 4000 {
-		t.Errorf("second round refused %d/4000 despite a fresh allowance", got)
+	if !b.Fits(nil, meta("inv1"), payloadOf(4000)) {
+		t.Error("the second round refused a payload despite a fresh allowance")
+	}
+}
+
+// The estimate must be the estimator's, not a bytes-per-token guess.
+//
+// The first version assumed one byte per token, which withheld ASCII payloads
+// roughly four times sooner than necessary: a 40KB log is about 10k tokens,
+// not 40k. This pins the arithmetic to the estimator that measures the prompt.
+func TestTheBudgetMeasuresTokensNotBytes(t *testing.T) {
+	b := newResultBudget()
+	b.observe("inv1", 0, 40000, 10000) // room = min(30000, 25% of 40000) = 10000
+
+	// 36KB of ASCII is about 9k tokens, so it fits a 10k-token room. A
+	// byte-based budget would have refused it.
+	if !b.Fits(nil, meta("inv1"), []byte(strings.Repeat("x", 36000))) {
+		t.Error("36KB of ASCII (~9k tokens) was withheld from a 10k-token room")
 	}
 }
 
@@ -96,8 +123,8 @@ func TestEachRoundGetsAFreshAllowance(t *testing.T) {
 func TestNoContextWindowMeansNoBudget(t *testing.T) {
 	b := newResultBudget()
 	b.observe("inv1", 1_000_000, 0, 0)
-	if got := b.Allow(nil, meta("inv1"), 10_000_000); got != 10_000_000 {
-		t.Errorf("a result was withheld with no configured window: %d", got)
+	if !b.Fits(nil, meta("inv1"), payloadOf(10_000_000)) {
+		t.Error("a result was withheld with no configured window")
 	}
 }
 
@@ -106,11 +133,11 @@ func TestNoContextWindowMeansNoBudget(t *testing.T) {
 // through the model callback.
 func TestAnUnobservedRoundPassesThrough(t *testing.T) {
 	b := newResultBudget()
-	if got := b.Allow(nil, meta("never-seen"), 99999); got != 99999 {
-		t.Errorf("an unobserved round was budgeted: %d", got)
+	if !b.Fits(nil, meta("never-seen"), payloadOf(99999)) {
+		t.Error("an unobserved round was budgeted")
 	}
-	if got := b.Allow(nil, gateway.CallMeta{}, 99999); got != 99999 {
-		t.Errorf("a call with no invocation id was budgeted: %d", got)
+	if !b.Fits(nil, gateway.CallMeta{}, payloadOf(99999)) {
+		t.Error("a call with no invocation id was budgeted")
 	}
 }
 
@@ -119,10 +146,10 @@ func TestAnUnobservedRoundPassesThrough(t *testing.T) {
 func TestAnOverfullPromptLeavesNoRoomRatherThanNegativeRoom(t *testing.T) {
 	b := newResultBudget()
 	b.observe("inv1", 100000, 64000, 8000)
-	if got := b.Allow(nil, meta("inv1"), 10); got != 0 {
-		t.Errorf("room = %d on a prompt already over the window", got)
+	if b.Fits(nil, meta("inv1"), payloadOf(1)) {
+		t.Error("a payload was admitted on a prompt already over the window")
 	}
-	// Asserted on the stored quantity too, not only on the decision. Allow
+	// Asserted on the stored quantity too, not only on the decision. Fits
 	// happens to treat a negative room like zero, so without this the clamp
 	// is untested code that merely looks careful.
 	if room := b.byID["inv1"]; room != 0 {

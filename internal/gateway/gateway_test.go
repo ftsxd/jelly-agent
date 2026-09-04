@@ -13,6 +13,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/jelly-agent/jelly-agent/internal/ops"
+	"github.com/jelly-agent/jelly-agent/internal/tokens"
 	"github.com/jelly-agent/jelly-agent/internal/toolreg"
 )
 
@@ -1174,15 +1175,16 @@ func TestRetrievableIsReportedWhenAHandleExists(t *testing.T) {
 	}
 }
 
-// budgetOf grants the first n bytes of the round and withholds the rest.
+// budgetOf grants the first n estimated tokens of the round and withholds the
+// rest.
 type budgetOf struct{ room int }
 
-func (b *budgetOf) Allow(_ context.Context, _ CallMeta, size int) int {
-	if size <= b.room {
-		b.room -= size
-		return size
+func (b *budgetOf) Fits(_ context.Context, _ CallMeta, payload []byte) bool {
+	if n := tokens.EstimateBytes(payload); n <= b.room {
+		b.room -= n
+		return true
 	}
-	return 0
+	return false
 }
 
 // A payload that does not fit is withheld whole, and what reaches the model is

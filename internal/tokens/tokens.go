@@ -35,3 +35,23 @@ func isCJK(r rune) bool {
 		return false
 	}
 }
+
+// EstimateBytes is Estimate over a byte slice, without the copy that
+// converting a large payload to a string would cost.
+//
+// It exists because the result budget estimates payloads of several megabytes
+// on every tool call, and the alternative was a bytes-per-token ratio — which
+// is a guess where this is a measurement. The first version of that budget
+// used 1 byte per token and was therefore three to four times more
+// pessimistic than the estimator it was standing in for.
+func EstimateBytes(b []byte) int {
+	cjk, other := 0, 0
+	for _, r := range string(b) {
+		if isCJK(r) {
+			cjk++
+		} else {
+			other++
+		}
+	}
+	return cjk + (other+3)/4
+}
