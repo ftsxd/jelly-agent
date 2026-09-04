@@ -3,8 +3,10 @@ import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import Icon from '../components/Icon.vue'
 import SessionPicker from '../components/SessionPicker.vue'
+import AgentTimeline from '../components/AgentTimeline.vue'
 import { api, streamChat } from '../api'
 import { renderMarkdown } from '../markdown'
+import { applyFrame, emptyTimeline, finalAnswer } from '../timeline'
 
 const PROVIDER_KEY = 'jelly.provider' // remembers the last-used provider
 const AGENT_KEY = 'jelly.agent' // remembers the last-used agent (multi-agent)
@@ -14,7 +16,7 @@ const historySessions = ref([])
 const provider = ref('')
 const agents = ref([]) // enabled named agents (multi-agent); empty = single-agent mode
 const agentName = ref('') // '' = single agent on the chosen provider
-const messages = ref([]) // {role, text, tools: [{name,args,response}], usage, provider, model}
+const messages = ref([]) // {role, text, timeline, usage, provider, model}
 const input = ref('')
 const sessionId = ref('')
 const busy = ref(false)
@@ -69,24 +71,56 @@ async function loadHistorySessions() {
   try { historySessions.value = (await api.sessions(100, 0)).sessions || [] } catch { /* history is optional */ }
 }
 
+// Replay runs through the same reducer as the live stream.
+//
+// The old version rebuilt messages from the transcript DTO, which lists a
+// turn's calls and its results as two separate arrays — so the pairing was
+// already gone by the time it arrived, and every historical tool rendered as
+// a pending call next to an orphan result.
 async function openHistorySession(id) {
   if (!id || busy.value) return
   error.value = ''
   try {
-    const detail = await api.session(id)
+    const detail = await api.sessionTimeline(id)
     sessionId.value = detail.id
-    messages.value = (detail.events || []).filter((ev) => ev.text || ev.tool_calls?.length || ev.tool_results?.length).map((ev) => ({
-      role: ev.role,
-      text: ev.text || '',
-      tools: [
-        ...(ev.tool_calls || []).map((t) => ({ name: t.name, args: t.args, response: null, ok: null, error: '' })),
-        ...(ev.tool_results || []).map((t) => ({ name: t.name, args: null, response: t.response, ok: t.ok, error: t.error || '' })),
-      ],
-      usage: null,
-      provider: '', model: '', author: ev.author || '',
-    }))
+    messages.value = replayMessages(detail.events || [])
     await scrollDown()
-  } catch (e) { error.value = e.message }
+  } catch (e) {
+    error.value = e.message
+  }
+}
+
+// replayMessages splits a session's frames into the alternating user/agent
+// bubbles the chat view shows.
+//
+// A user_message frame starts a new pair. Everything until the next one
+// belongs to the agent's answer, which is exactly the grouping the live path
+// produces one request at a time.
+function replayMessages(frames) {
+  const out = []
+  let live = null
+  for (const fr of frames) {
+    if (fr.type === 'user_message') {
+      out.push({ role: 'user', text: fr.text || '' })
+      live = {
+        role: 'agent', text: '', timeline: emptyTimeline(),
+        usage: null, provider: '', model: '', author: '',
+      }
+      out.push(live)
+      continue
+    }
+    if (!live) {
+      // Frames before any user message — a session that starts mid-run.
+      live = {
+        role: 'agent', text: '', timeline: emptyTimeline(),
+        usage: null, provider: '', model: '', author: '',
+      }
+      out.push(live)
+    }
+    applyFrame(live.timeline, fr)
+    live.usage = live.timeline.usage
+  }
+  return out
 }
 
 watch(provider, (name) => {
@@ -118,11 +152,11 @@ async function send() {
   const agentMsg = {
     role: 'agent',
     text: '',
-    tools: [],
+    timeline: emptyTimeline(),
     usage: null,
     provider: provider.value,
     model: modelOf(provider.value),
-    author: '', // which (sub-)agent produced the latest text, for multi-agent
+    author: '', // which (sub-)agent produced the reply, for multi-agent
   }
   messages.value.push(agentMsg)
   // Vue 3 only tracks mutations made through the reactive proxy. The literal we
@@ -137,36 +171,7 @@ async function send() {
   try {
     await streamChat(
       { message: text, sessionId: sessionId.value, provider: provider.value, agent: agentName.value },
-      (ev) => {
-        switch (ev.type) {
-          case 'session':
-            sessionId.value = ev.session_id
-            router.replace({ query: { session: ev.session_id } })
-            loadHistorySessions()
-            break
-          case 'text_delta':
-            live.text += ev.text
-            if (ev.agent) live.author = ev.agent
-            scrollDown()
-            break
-          case 'tool_call':
-            live.tools.push({ name: ev.name, args: ev.args, response: null, ok: null, error: '' })
-            scrollDown()
-            break
-          case 'tool_result': {
-            const t = [...live.tools].reverse().find((t) => t.name === ev.name && t.response === null)
-            if (t) Object.assign(t, { response: ev.response, ok: ev.ok, error: ev.error || '' })
-            else live.tools.push({ name: ev.name, args: null, response: ev.response, ok: ev.ok, error: ev.error || '' })
-            break
-          }
-          case 'usage':
-            live.usage = ev
-            break
-          case 'error':
-            error.value = ev.message
-            break
-        }
-      },
+      (ev) => handleFrame(live, ev),
       abort.signal,
     )
   } catch (e) {
@@ -182,21 +187,44 @@ function stop() {
   if (abort) abort.abort()
 }
 
-function fmtArgs(args) {
-  if (!args) return ''
-  return Object.entries(args)
-    .map(([k, v]) => `${k}=${JSON.stringify(v)}`)
-    .join(', ')
+// handleFrame folds one frame into a message, plus the few things that are
+// this view's own business rather than the timeline's: the resolved session id
+// and the error banner.
+//
+// Everything about *what happened* goes to the reducer. Nothing here decides
+// how a call pairs with its result or whether a tool succeeded — the same view
+// used to do both, and got both wrong.
+function handleFrame(live, ev) {
+  switch (ev.type) {
+    case 'session':
+      sessionId.value = ev.session_id
+      router.replace({ query: { session: ev.session_id } })
+      loadHistorySessions()
+      break
+    case 'error':
+      error.value = ev.message
+      break
+    default:
+      break
+  }
+  applyFrame(live.timeline, ev)
+  if (ev.type === 'done') live.usage = live.timeline.usage
+  if (ev.type === 'text_delta' || ev.type === 'tool_call') scrollDown()
 }
 
-// A tool that failed still comes back as a normal response, so success is read
-// from the server's `ok` flag, never from the payload having arrived.
-function resultSummary(t) {
-  if (!t.response) return '执行中…'
-  if (t.error) return t.error.length > 200 ? t.error.slice(0, 200) + '…' : t.error
-  if (Array.isArray(t.response.results)) return `${t.response.results.length} 条结果`
-  const s = JSON.stringify(t.response)
-  return s.length > 120 ? s.slice(0, 120) + '…' : s
+// The reply bubble is the last root-level text the reducer folded. Sub-agent
+// prose stays in the timeline: merging it into the answer is what made a
+// handoff produce one bubble attributed to whichever agent spoke last.
+function answerOf(m) {
+  if (m.role !== 'agent') return m.text || ''
+  const step = m.timeline ? finalAnswer(m.timeline) : null
+  return step ? step.text : m.text || ''
+}
+
+function authorOf(m) {
+  if (!m.timeline) return m.author || ''
+  const step = finalAnswer(m.timeline)
+  return step ? step.agent : m.author || ''
 }
 </script>
 
@@ -254,28 +282,19 @@ function resultSummary(t) {
           <Icon :name="m.role === 'user' ? 'user' : 'bot'" :size="16" />
         </div>
         <div class="bubble-wrap">
-          <div v-if="m.role === 'agent' && m.author && m.author !== 'root'" class="who mono dim">
-            <Icon name="bot" :size="12" /> {{ m.author }}
+          <div v-if="m.role === 'agent' && authorOf(m) && authorOf(m) !== 'root'" class="who mono dim">
+            <Icon name="bot" :size="12" /> {{ authorOf(m) }}
           </div>
           <div v-else-if="m.role === 'agent' && m.provider && showProviderTag" class="who mono dim">
             <Icon name="bot" :size="12" /> {{ m.provider }}<span v-if="m.model"> · {{ m.model }}</span>
           </div>
-          <div v-for="(t, ti) in m.tools" :key="ti" class="tool-chip">
-            <div class="tool-head">
-              <Icon name="tool" :size="13" />
-              <span class="mono tool-name">{{ t.name }}</span>
-              <span v-if="t.args" class="mono dim tool-args">{{ fmtArgs(t.args) }}</span>
-            </div>
-            <div class="tool-res mono" :class="{ pending: !t.response, failed: t.ok === false }">
-              {{ resultSummary(t) }}
-            </div>
-          </div>
+          <AgentTimeline v-if="m.timeline" :timeline="m.timeline" class="msg-tl" />
 
           <!-- Agent replies are markdown; a user's own message is not. Sending
                user input through the renderer would let someone paste markup
                into their own transcript, and there is nothing to gain from
                formatting what they just typed. -->
-          <div v-if="m.text && m.role === 'agent'" class="bubble agent md" v-html="renderMarkdown(m.text)"></div>
+          <div v-if="answerOf(m) && m.role === 'agent'" class="bubble agent md" v-html="renderMarkdown(answerOf(m))"></div>
           <div v-else-if="m.text" class="bubble" :class="m.role">{{ m.text }}</div>
           <div v-else-if="m.role === 'agent' && busy" class="bubble agent typing">
             <span class="spinner" />
@@ -510,43 +529,10 @@ function resultSummary(t) {
   gap: var(--sp-2);
 }
 
-.tool-chip {
-  border: 1px solid var(--border);
-  border-left: 2px solid var(--accent);
-  border-radius: var(--radius-sm);
-  background: var(--surface-2);
-  overflow: hidden;
-}
-.tool-head {
-  display: flex;
-  align-items: center;
-  gap: var(--sp-2);
-  padding: var(--sp-2) var(--sp-3);
-  color: var(--accent);
-}
-.tool-name {
-  font-size: 13px;
-  font-weight: 600;
-}
-.tool-args {
-  font-size: 12px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.tool-res {
-  padding: var(--sp-2) var(--sp-3);
-  font-size: 12px;
-  color: var(--text-dim);
-  border-top: 1px solid var(--border);
-  word-break: break-word;
-}
-.tool-res.pending {
-  color: var(--text-muted);
-}
-.tool-res.failed {
-  color: var(--danger);
-  background: var(--danger-tint);
+/* The timeline sits above the reply, close enough to read as part of the same
+   answer rather than as a separate panel. */
+.msg-tl {
+  margin-bottom: var(--sp-2);
 }
 
 .who {

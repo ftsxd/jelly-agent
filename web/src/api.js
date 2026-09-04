@@ -54,6 +54,9 @@ export const api = {
   sessions: (limit = 50, offset = 0) => jget(`/api/sessions?limit=${limit}&offset=${offset}`),
   sessionIds: () => jget('/api/sessions/ids'),
   session: (id) => jget(`/api/sessions/${encodeURIComponent(id)}`),
+  // The run as a frame list, folded by timeline.js — the same vocabulary the
+  // live stream sends, so replay and live share one reducer.
+  sessionTimeline: (id) => jget(`/api/sessions/${encodeURIComponent(id)}/timeline`),
   deleteSession: (id) => jdelete(`/api/sessions/${encodeURIComponent(id)}`),
   deleteSessions: (ids) => jpost('/api/sessions/delete', { ids }),
   skills: () => jget('/api/skills'),
