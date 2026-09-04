@@ -30,12 +30,12 @@ func TestFillerYieldsToWhatIsAlreadyInThePrompt(t *testing.T) {
 	cat := catalogue("pad1", "pad2", "logs", "sql")
 	a := newAdmissions()
 
-	first := a.admit("s1", []string{"logs"}, []string{"pad1", "pad2"}, cat, 3)
+	first := a.admit("s1", pick{matched: []string{"logs"}, filler: []string{"pad1", "pad2"}}, cat, 3)
 	if !slices.Equal(first, []string{"pad1", "pad2", "logs"}) {
 		t.Fatalf("first turn = %v", first)
 	}
 
-	second := a.admit("s1", []string{"sql"}, []string{"pad1", "pad2"}, cat, 3)
+	second := a.admit("s1", pick{matched: []string{"sql"}, filler: []string{"pad1", "pad2"}}, cat, 3)
 	if !slices.Contains(second, "sql") {
 		t.Fatalf("second turn = %v, want the newly matched tool", second)
 	}
@@ -47,7 +47,7 @@ func TestFillerYieldsToWhatIsAlreadyInThePrompt(t *testing.T) {
 	}
 
 	// And it has settled: a third turn matching either one renders the same set.
-	third := a.admit("s1", []string{"logs"}, []string{"pad1", "pad2"}, cat, 3)
+	third := a.admit("s1", pick{matched: []string{"logs"}, filler: []string{"pad1", "pad2"}}, cat, 3)
 	if !slices.Equal(third, second) {
 		t.Errorf("third turn = %v, want it identical to %v", third, second)
 	}
@@ -62,7 +62,7 @@ func TestFillerYieldsToWhatIsAlreadyInThePrompt(t *testing.T) {
 func TestPresentationIsAlwaysCatalogueOrder(t *testing.T) {
 	cat := catalogue("zebra", "apple", "mango")
 	a := newAdmissions()
-	got := a.admit("s1", []string{"mango", "zebra"}, []string{"apple"}, cat, 10)
+	got := a.admit("s1", pick{matched: []string{"mango", "zebra"}, filler: []string{"apple"}}, cat, 10)
 	if !slices.Equal(got, []string{"zebra", "apple", "mango"}) {
 		t.Errorf("got %v, want catalogue order (zebra, apple, mango)", got)
 	}
@@ -79,8 +79,8 @@ func TestAMatchIsNeverDisplacedByHistory(t *testing.T) {
 	cat := catalogue("a", "b", "c", "d")
 	a := newAdmissions()
 
-	a.admit("s1", []string{"a", "b"}, nil, cat, 2)
-	got := a.admit("s1", []string{"c", "d"}, nil, cat, 2)
+	a.admit("s1", pick{matched: []string{"a", "b"}, filler: nil}, cat, 2)
+	got := a.admit("s1", pick{matched: []string{"c", "d"}, filler: nil}, cat, 2)
 	if !slices.Contains(got, "c") || !slices.Contains(got, "d") {
 		t.Fatalf("got %v, want both newly matched tools", got)
 	}
@@ -94,8 +94,8 @@ func TestAMatchIsNeverDisplacedByHistory(t *testing.T) {
 func TestSessionsAreIndependent(t *testing.T) {
 	cat := catalogue("a", "b", "c")
 	a := newAdmissions()
-	a.admit("s1", []string{"a"}, nil, cat, 10)
-	got := a.admit("s2", []string{"b"}, nil, cat, 10)
+	a.admit("s1", pick{matched: []string{"a"}, filler: nil}, cat, 10)
+	got := a.admit("s2", pick{matched: []string{"b"}, filler: nil}, cat, 10)
 	if !slices.Equal(got, []string{"b"}) {
 		t.Errorf("s2 = %v, want only its own tools", got)
 	}
@@ -106,8 +106,8 @@ func TestSessionsAreIndependent(t *testing.T) {
 func TestNoSessionMeansNoStickiness(t *testing.T) {
 	cat := catalogue("a", "b")
 	a := newAdmissions()
-	a.admit("", []string{"a"}, nil, cat, 10)
-	got := a.admit("", []string{"b"}, nil, cat, 10)
+	a.admit("", pick{matched: []string{"a"}, filler: nil}, cat, 10)
+	got := a.admit("", pick{matched: []string{"b"}, filler: nil}, cat, 10)
 	if !slices.Equal(got, []string{"b"}) {
 		t.Errorf("got %v, want no carry-over without a session", got)
 	}
@@ -119,7 +119,7 @@ func TestOldSessionsAreEvicted(t *testing.T) {
 	cat := catalogue("a")
 	a := newAdmissions()
 	for i := 0; i < maxAdmitSessions+50; i++ {
-		a.admit("s"+strconv.Itoa(i), []string{"a"}, nil, cat, 10)
+		a.admit("s"+strconv.Itoa(i), pick{matched: []string{"a"}, filler: nil}, cat, 10)
 	}
 	a.mu.Lock()
 	n := len(a.byID)
@@ -132,9 +132,9 @@ func TestOldSessionsAreEvicted(t *testing.T) {
 func TestForgetDropsASession(t *testing.T) {
 	cat := catalogue("a", "b")
 	a := newAdmissions()
-	a.admit("s1", []string{"a"}, nil, cat, 10)
+	a.admit("s1", pick{matched: []string{"a"}, filler: nil}, cat, 10)
 	a.forget("s1")
-	got := a.admit("s1", []string{"b"}, nil, cat, 10)
+	got := a.admit("s1", pick{matched: []string{"b"}, filler: nil}, cat, 10)
 	if !slices.Equal(got, []string{"b"}) {
 		t.Errorf("got %v, want the session forgotten", got)
 	}
@@ -148,10 +148,151 @@ func TestAdmitIsConcurrencySafe(t *testing.T) {
 	for i := 0; i < 20; i++ {
 		go func(i int) {
 			defer func() { done <- struct{}{} }()
-			a.admit("s"+strconv.Itoa(i%3), []string{"a", "b"}, nil, cat, 10)
+			a.admit("s"+strconv.Itoa(i%3), pick{matched: []string{"a", "b"}, filler: nil}, cat, 10)
 		}(i)
 	}
 	for i := 0; i < 20; i++ {
 		<-done
+	}
+}
+
+// Baseline tools do not spend budget. The selector has said so since it was
+// written — a baseline tool is one a workflow stage runs before the model gets
+// a turn, so excluding it breaks the stage rather than narrowing a choice.
+//
+// Folding it in with everything else broke that invariant: with a budget of
+// one, the baseline tool displaced the very tool the question had matched.
+func TestBaselineDoesNotSpendBudget(t *testing.T) {
+	cat := catalogue("collect_metrics", "get_logs")
+	a := newAdmissions()
+	got := a.admit("s1", pick{
+		baseline: []string{"collect_metrics"},
+		matched:  []string{"get_logs"},
+	}, cat, 1)
+	if !slices.Contains(got, "get_logs") {
+		t.Errorf("got %v, want the matched tool — baseline must not take its slot", got)
+	}
+	if !slices.Contains(got, "collect_metrics") {
+		t.Errorf("got %v, want the baseline tool", got)
+	}
+}
+
+// A baseline tool must not accumulate into the standing set either, or it
+// would come back next turn through the history and eat the budget it was
+// supposed to sit outside of.
+func TestBaselineIsNotRememberedAsAStandingTool(t *testing.T) {
+	cat := catalogue("collect_metrics", "a", "b")
+	a := newAdmissions()
+	a.admit("s1", pick{baseline: []string{"collect_metrics"}, matched: []string{"a"}}, cat, 1)
+	got := a.admit("s1", pick{baseline: []string{"collect_metrics"}, matched: []string{"b"}}, cat, 1)
+	if !slices.Contains(got, "b") {
+		t.Errorf("got %v, want the newly matched tool", got)
+	}
+	if !slices.Contains(got, "collect_metrics") {
+		t.Errorf("got %v, want the baseline tool still present", got)
+	}
+}
+
+// A tool that has been retired must not hold a slot. The catalogue is the
+// authority on what exists; a name missing from it cannot be resolved by the
+// caller, so the slot buys nothing — and with a budget of one it produced an
+// empty tool list.
+func TestRetiredToolsReleaseTheirSlot(t *testing.T) {
+	a := newAdmissions()
+	a.admit("s1", pick{matched: []string{"old_tool"}}, catalogue("old_tool"), 1)
+
+	// old_tool is gone from the catalogue; new_tool is all there is.
+	got := a.admit("s1", pick{filler: []string{"new_tool"}}, catalogue("new_tool"), 1)
+	if !slices.Equal(got, []string{"new_tool"}) {
+		t.Errorf("got %v, want [new_tool] — the retired tool must release its slot", got)
+	}
+}
+
+// Retirement must also clear the remembered set, or the dead name keeps being
+// filtered out on every later turn while still occupying the record.
+func TestRetiredToolIsForgotten(t *testing.T) {
+	a := newAdmissions()
+	a.admit("s1", pick{matched: []string{"old_tool"}}, catalogue("old_tool"), 5)
+	a.admit("s1", pick{matched: []string{"new_tool"}}, catalogue("new_tool"), 5)
+
+	a.mu.Lock()
+	kept := append([]string(nil), a.byID["s1"]...)
+	a.mu.Unlock()
+	if slices.Contains(kept, "old_tool") {
+		t.Errorf("standing set = %v, want the retired tool dropped", kept)
+	}
+}
+
+// admit takes three slices and must not assume they are disjoint or that
+// every name still exists. The engine happens to hand it clean input today,
+// which is exactly why these are worth pinning: a defensive branch nothing
+// reaches is a branch nobody notices breaking.
+func TestAdmitToleratesOverlappingAndStaleInput(t *testing.T) {
+	cat := catalogue("collect_metrics", "get_logs")
+
+	t.Run("a baseline name repeated in matched must not spend budget", func(t *testing.T) {
+		a := newAdmissions()
+		got := a.admit("s1", pick{
+			baseline: []string{"collect_metrics"},
+			matched:  []string{"collect_metrics", "get_logs"},
+		}, cat, 1)
+		if !slices.Contains(got, "get_logs") {
+			t.Errorf("got %v; the repeated baseline name took the only slot", got)
+		}
+		if n := len(got); n != 2 {
+			t.Errorf("got %v (%d entries), want the baseline plus one scored tool", got, n)
+		}
+	})
+
+	t.Run("a name missing from the catalogue is dropped", func(t *testing.T) {
+		a := newAdmissions()
+		got := a.admit("s1", pick{
+			matched: []string{"gone", "get_logs"},
+			filler:  []string{"also_gone"},
+		}, cat, 5)
+		if slices.Contains(got, "gone") || slices.Contains(got, "also_gone") {
+			t.Errorf("got %v, want only tools the catalogue still has", got)
+		}
+		if !slices.Contains(got, "get_logs") {
+			t.Errorf("got %v, want the surviving tool", got)
+		}
+	})
+
+	t.Run("a stale name must not consume a slot", func(t *testing.T) {
+		a := newAdmissions()
+		got := a.admit("s1", pick{matched: []string{"gone"}, filler: []string{"get_logs"}}, cat, 1)
+		if !slices.Equal(got, []string{"get_logs"}) {
+			t.Errorf("got %v, want [get_logs] — the stale name must release its slot", got)
+		}
+	})
+
+	t.Run("duplicates never reach the output twice", func(t *testing.T) {
+		a := newAdmissions()
+		got := a.admit("s1", pick{
+			matched: []string{"get_logs", "get_logs"},
+			filler:  []string{"get_logs"},
+		}, cat, 5)
+		if !slices.Equal(got, []string{"get_logs"}) {
+			t.Errorf("got %v, want a single entry", got)
+		}
+	})
+}
+
+// The standing set records the tools that competed for a slot, not the ones
+// that sit outside the budget. Storing a baseline tool there would have it
+// come back next turn as history and spend budget it is exempt from.
+func TestStandingSetExcludesBaseline(t *testing.T) {
+	cat := catalogue("collect_metrics", "get_logs")
+	a := newAdmissions()
+	a.admit("s1", pick{baseline: []string{"collect_metrics"}, matched: []string{"get_logs"}}, cat, 5)
+
+	a.mu.Lock()
+	kept := append([]string(nil), a.byID["s1"]...)
+	a.mu.Unlock()
+	if slices.Contains(kept, "collect_metrics") {
+		t.Errorf("standing set = %v, want the baseline tool excluded", kept)
+	}
+	if !slices.Contains(kept, "get_logs") {
+		t.Errorf("standing set = %v, want the scored tool recorded", kept)
 	}
 }

@@ -65,30 +65,44 @@ func (s *selectingToolset) Tools(ctx agent.ReadonlyContext) ([]adktool.Tool, err
 	}
 
 	res := selector.Select(queryOf(ctx), metas, s.cfg)
-	if s.report != nil {
-		s.report(res)
-	}
 
-	// Selected is in catalogue order; the ranking and the matched flag live in
-	// Candidates. Both matter here: matched says which slots this question has
-	// earned, and the ranking orders the rest.
-	var matched, filler []string
+	// Selected is in catalogue order; the ranking, the matched flag and the
+	// baseline flag live in Candidates. All three matter: baseline is outside
+	// the budget, matched says which slots this question has earned, and the
+	// ranking orders whatever is left.
+	var p pick
 	for _, c := range res.Candidates {
 		if !slices.Contains(res.Selected, c.Tool) {
 			continue
 		}
-		if c.Matched || c.Baseline {
-			matched = append(matched, c.Tool)
-		} else {
-			filler = append(filler, c.Tool)
+		switch {
+		case c.Baseline:
+			p.baseline = append(p.baseline, c.Tool)
+		case c.Matched:
+			p.matched = append(p.matched, c.Tool)
+		default:
+			p.filler = append(p.filler, c.Tool)
 		}
 	}
 
 	var final []string
 	if s.admit != nil {
-		final = s.admit.admit(sessionOf(ctx), matched, filler, order, s.cfg.MaxTools)
+		final = s.admit.admit(sessionOf(ctx), p, order, s.cfg.MaxTools)
 	} else {
-		final = sortByCatalogue(append(append([]string(nil), matched...), filler...), order)
+		all := append(append(append([]string(nil), p.baseline...), p.matched...), p.filler...)
+		final = sortByCatalogue(dedupe(all), order)
+	}
+
+	// Reported after admission, not before.
+	//
+	// The ranking alone is not what the model receives: admission keeps tools
+	// the ranking dropped and drops filler the ranking kept. A log written
+	// before that step names a different set than the request carries, which
+	// is the one thing this record must never do — it exists to explain why a
+	// tool was or was not offered, and it is the evidence any cache-hit
+	// analysis rests on.
+	if s.report != nil {
+		s.report(withOutcome(res, final))
 	}
 
 	out := make([]adktool.Tool, 0, len(final))
@@ -211,4 +225,34 @@ func logSelection(res selector.Result) {
 		"total", total,
 		"cut_count", total-len(res.Selected),
 		group)
+}
+
+// withOutcome rewrites a selection result to describe what was actually sent.
+//
+// Selected becomes the final set. A candidate the ranking cut but admission
+// kept has its suppression reason cleared and says why it survived; one the
+// ranking kept but admission dropped gains a reason saying so. Without that,
+// the record and the request disagree and nobody can tell which to believe.
+func withOutcome(res selector.Result, final []string) selector.Result {
+	out := selector.Result{
+		Selected:   final,
+		Candidates: make([]ops.Candidate, len(res.Candidates)),
+		Capped:     len(final) < len(res.Candidates),
+	}
+	copy(out.Candidates, res.Candidates)
+	for i := range out.Candidates {
+		c := &out.Candidates[i]
+		sent := slices.Contains(final, c.Tool)
+		ranked := slices.Contains(res.Selected, c.Tool)
+		switch {
+		case sent && !ranked:
+			c.Suppressed = ""
+			c.Reason = strings.TrimSpace(c.Reason + " · 会话内已在提示词中，保留以维持缓存前缀")
+		case !sent && ranked:
+			c.Suppressed = "让位给会话内已在提示词中的工具"
+		case !sent && c.Suppressed == "":
+			c.Suppressed = "超出本次工具预算"
+		}
+	}
+	return out
 }

@@ -56,21 +56,51 @@ func newAdmissions() *admissions {
 	return &admissions{byID: map[string][]string{}}
 }
 
+// pick is the turn's selection, split by the claim each tool has on a slot.
+type pick struct {
+	// Baseline tools are unconditional: a workflow stage runs them before the
+	// model gets a turn, so they do not spend budget. The selector has said so
+	// since it was written; folding them in with everything else broke that,
+	// and with a budget of one a baseline tool displaced the very tool the
+	// question had matched.
+	baseline []string
+	// Matched are the tools this question hit. Never displaced: a set that
+	// lacks the tool the question needs has the model told it does not exist,
+	// and answering anyway.
+	matched []string
+	// Filler scored nothing and is present only because the budget had room.
+	// It yields to whatever the session already has — that yielding is what
+	// keeps the prompt prefix stable across turns.
+	filler []string
+}
+
 // admit decides the turn's tool set and remembers it.
 //
-// matched are the tools this question hit; they are never displaced, because a
-// set that lacks the tool the question needs produces the failure this design
-// exists to prevent — the model told the tool does not exist, answering
-// anyway. filler are the rest of the selection, ranked best-first, and they
-// yield to whatever the session already has.
+// order maps a tool name to its position in the catalogue, and is also the
+// authority on what still exists: a name missing from it has been retired, and
+// carrying it forward would spend a slot on a tool the caller cannot resolve —
+// which is worse than dropping it, because the slot buys nothing. With a
+// budget of one that produced an empty tool list.
 //
-// order maps a tool name to its position in the catalogue. The result is
-// sorted by it, so an identical set always renders identically — otherwise two
-// turns that chose the same tools would still miss the cache.
-func (a *admissions) admit(session string, matched, filler []string, order map[string]int, budget int) []string {
+// The result is sorted by catalogue position, so an identical set always
+// renders identically; otherwise two turns that chose the same tools would
+// still miss the cache.
+func (a *admissions) admit(session string, p pick, order map[string]int, budget int) []string {
+	live := func(names []string) []string {
+		out := make([]string, 0, len(names))
+		for _, n := range names {
+			if _, ok := order[n]; ok {
+				out = append(out, n)
+			}
+		}
+		return out
+	}
+	baseline, matched, filler := live(p.baseline), live(p.matched), live(p.filler)
+
 	if session == "" {
 		// No session to be stable across; nothing to remember.
-		return sortByCatalogue(append(append([]string(nil), matched...), filler...), order)
+		all := append(append(append([]string(nil), baseline...), matched...), filler...)
+		return sortByCatalogue(dedupe(all), order)
 	}
 
 	a.mu.Lock()
@@ -81,26 +111,42 @@ func (a *admissions) admit(session string, matched, filler []string, order map[s
 		a.evictIfFullLocked()
 		a.order = append(a.order, session)
 	}
+	prev = live(prev)
 
+	// Baseline sits outside the budget, so the budget is what is left for
+	// everything that has to compete for a slot.
 	room := budget
 	if room <= 0 {
 		room = len(matched) + len(prev) + len(filler)
 	}
-	final := make([]string, 0, room)
+	scored := make([]string, 0, room)
 	take := func(names []string) {
 		for _, n := range names {
-			if len(final) >= room || slices.Contains(final, n) {
+			if len(scored) >= room || slices.Contains(scored, n) || slices.Contains(baseline, n) {
 				continue
 			}
-			final = append(final, n)
+			scored = append(scored, n)
 		}
 	}
 	take(matched) // this question's needs come first
 	take(prev)    // then keep the prompt as it was
 	take(filler)  // only then spend what is left on padding
 
-	a.byID[session] = final
-	return sortByCatalogue(final, order)
+	// Remembered without the baseline tools: they are added unconditionally
+	// every turn, so storing them would let them eat next turn's budget
+	// through prev.
+	a.byID[session] = scored
+	return sortByCatalogue(dedupe(append(append([]string(nil), baseline...), scored...)), order)
+}
+
+func dedupe(names []string) []string {
+	out := make([]string, 0, len(names))
+	for _, n := range names {
+		if !slices.Contains(out, n) {
+			out = append(out, n)
+		}
+	}
+	return out
 }
 
 // forget drops a session's bookkeeping.

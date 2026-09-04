@@ -4,6 +4,7 @@ import (
 	"context"
 	"os/exec"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -361,5 +362,78 @@ func TestAFastToolDoesNotEarnASlot(t *testing.T) {
 	}
 	if !slices.Contains(second, "get_logs") {
 		t.Errorf("second turn = %v, want the previous turn's tool kept over the fast padding", second)
+	}
+}
+
+// The record has to name the set the request carries.
+//
+// Admission keeps tools the ranking cut and drops filler the ranking kept, so
+// a log written before that step describes a different request than the one
+// that went out. This log exists to explain why a tool was or was not offered,
+// and it is the evidence any cache-hit analysis rests on — disagreeing with
+// the request is the one thing it must never do.
+func TestSelectionLogNamesWhatWasSent(t *testing.T) {
+	pad := ops.ToolMetadata{Name: "pad"}
+	logs := ops.ToolMetadata{Name: "get_logs", UseCases: []string{"查看容器日志"}}
+	adm := newAdmissions()
+	adm.admit("s1", pick{matched: []string{"get_logs"}}, map[string]int{"get_logs": 1}, 1)
+
+	var logged selector.Result
+	sel := &selectingToolset{
+		static: []adktool.Tool{
+			&stubTool{name: pad.Name, meta: &pad},
+			&stubTool{name: logs.Name, meta: &logs},
+		},
+		cfg:    selector.Config{MaxTools: 1},
+		admit:  adm,
+		report: func(r selector.Result) { logged = r },
+	}
+	got, err := sel.Tools(&askingCtx{question: "毫不相关的问题", session: "s1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sent := toolNames(got)
+	if !slices.Equal(logged.Selected, sent) {
+		t.Fatalf("log says %v, request carried %v", logged.Selected, sent)
+	}
+
+	// And it says why each tool ended up where it did, or the record explains
+	// nothing.
+	for _, c := range logged.Candidates {
+		inSet := slices.Contains(sent, c.Tool)
+		if inSet && c.Suppressed != "" {
+			t.Errorf("%s was sent but is marked suppressed (%q)", c.Tool, c.Suppressed)
+		}
+		if !inSet && c.Suppressed == "" {
+			t.Errorf("%s was not sent but carries no reason", c.Tool)
+		}
+	}
+}
+
+// A tool the ranking cut but admission kept must say so, not carry a stale
+// "over budget" note.
+func TestRetainedToolExplainsItself(t *testing.T) {
+	pad := ops.ToolMetadata{Name: "pad"}
+	logs := ops.ToolMetadata{Name: "get_logs", UseCases: []string{"查看容器日志"}}
+	adm := newAdmissions()
+	adm.admit("s1", pick{matched: []string{"get_logs"}}, map[string]int{"get_logs": 1}, 1)
+
+	var logged selector.Result
+	sel := &selectingToolset{
+		static: []adktool.Tool{
+			&stubTool{name: pad.Name, meta: &pad},
+			&stubTool{name: logs.Name, meta: &logs},
+		},
+		cfg:    selector.Config{MaxTools: 1},
+		admit:  adm,
+		report: func(r selector.Result) { logged = r },
+	}
+	if _, err := sel.Tools(&askingCtx{question: "毫不相关的问题", session: "s1"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range logged.Candidates {
+		if c.Tool == "get_logs" && !strings.Contains(c.Reason, "缓存") {
+			t.Errorf("get_logs reason = %q, want it to say it was kept for the cache prefix", c.Reason)
+		}
 	}
 }
