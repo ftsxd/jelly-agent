@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"iter"
 	"net/http"
 	"strconv"
 	"strings"
@@ -29,11 +30,10 @@ type chatRequest struct {
 // sessionSeq disambiguates web session ids created within the same nanosecond.
 var sessionSeq atomic.Uint64
 
-// handleChatStream runs one turn and streams structured events to the client as
-// Server-Sent Events. Event shapes (the "type" field): "session" (the resolved
-// id, sent first), "text_delta", "tool_call", "tool_result", "usage", "done",
-// and "error". The frontend reads this over fetch + ReadableStream (EventSource
-// can't POST).
+// handleChatStream runs one turn and streams it to the client as Server-Sent
+// Events. The frame vocabulary lives in timeline.go and is shared with the
+// replay endpoint, so a run looks the same live as it does afterwards. The
+// frontend reads this over fetch + ReadableStream (EventSource can't POST).
 func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 	var req chatRequest
 	if err := decodeJSON(r, &req); err != nil {
@@ -96,58 +96,43 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 
 	sse := &sseWriter{w: w, flusher: flusher}
-	sse.send("session", map[string]any{"session_id": sessionID})
+	sse.frame(frameSession, map[string]any{
+		"session_id": sessionID, "v": frameVersion, "ts": time.Now().UnixMilli(),
+	})
 
 	msg := genai.NewContentFromText(req.Message, genai.RoleUser)
-	for ev, runErr := range r2.Run(ctx, engine.UserID, sessionID, msg, agent.RunConfig{StreamingMode: agent.StreamingModeSSE}) {
-		if runErr != nil {
-			sse.send("error", map[string]any{"message": runErr.Error()})
-			return
-		}
-		if ev == nil || ev.Content == nil {
-			continue
-		}
-		if ev.Partial {
-			for _, p := range ev.Content.Parts {
-				if p != nil && !p.Thought && p.Text != "" {
-					sse.send("text_delta", map[string]any{"text": p.Text, "agent": ev.Author})
-				}
-			}
-			continue
-		}
-		emitFinal(sse, ev)
+	st, err := streamTurn(sse, r2.Run(ctx, engine.UserID, sessionID, msg,
+		agent.RunConfig{StreamingMode: agent.StreamingModeSSE}))
+	if err != nil {
+		return // the error frame is already out
 	}
 
 	// Index the just-finished turn into L2 so future searches see it.
 	indexSession(ctx, svc, search, sessionID)
-	sse.send("done", map[string]any{"session_id": sessionID})
+	sse.frame(frameDone, map[string]any{
+		"session_id": sessionID, "ts": time.Now().UnixMilli(), "usage": st.usage(),
+	})
 }
 
-// emitFinal forwards tool calls/results and token usage from a non-partial
-// event. Text was already streamed via partials, so it is not re-sent.
-func emitFinal(sse *sseWriter, ev *adksession.Event) {
-	for _, p := range ev.Content.Parts {
-		switch {
-		case p == nil:
-			continue
-		case p.FunctionCall != nil:
-			sse.send("tool_call", map[string]any{"name": p.FunctionCall.Name, "args": p.FunctionCall.Args, "agent": ev.Author})
-		case p.FunctionResponse != nil:
-			resp := p.FunctionResponse.Response
-			sse.send("tool_result", map[string]any{
-				"name": p.FunctionResponse.Name, "response": resp, "agent": ev.Author,
-				"ok": !toolFailed(resp), "error": toolError(resp),
+// streamTurn projects a run's events into frames and reports what the turn
+// spent.
+//
+// It exists as a function taking a sequence rather than living inside the
+// handler so that a test can drive the whole projection from constructed
+// events — no provider, no model, no socket. Without that seam the streaming
+// path is expensive enough to test that nobody would.
+func streamTurn(out sink, seq iter.Seq2[*adksession.Event, error]) (*turnState, error) {
+	st := newTurnState()
+	for ev, err := range seq {
+		if err != nil {
+			out.frame(frameError, map[string]any{
+				"message": err.Error(), "ts": time.Now().UnixMilli(),
 			})
+			return st, err
 		}
+		project(ev, out, st)
 	}
-	if ev.UsageMetadata != nil {
-		u := ev.UsageMetadata
-		sse.send("usage", map[string]any{
-			"prompt":     u.PromptTokenCount,
-			"completion": u.CandidatesTokenCount,
-			"total":      u.TotalTokenCount,
-		})
-	}
+	return st, nil
 }
 
 // resolveSession returns an existing session id when the client supplied a known
@@ -190,8 +175,15 @@ type sseWriter struct {
 	flusher http.Flusher
 }
 
+// frame makes sseWriter a sink, so the live stream and the replay endpoint
+// share one projector. See timeline.go.
+func (s *sseWriter) frame(typ string, payload map[string]any) { s.send(typ, payload) }
+
 // send writes one event as `data: {"type":...,...}` and flushes immediately.
 func (s *sseWriter) send(typ string, payload map[string]any) {
+	if payload == nil {
+		payload = map[string]any{}
+	}
 	payload["type"] = typ
 	b, err := json.Marshal(payload)
 	if err != nil {

@@ -247,6 +247,43 @@ type toolResult struct {
 }
 
 // handleSessionDetail returns one session's transcript as structured turns.
+// handleSessionTimeline replays a stored session as the same frames the live
+// stream emits.
+//
+// A separate endpoint rather than a new shape for handleSessionDetail, because
+// that one serves two consumers already — the sessions transcript and the chat
+// view's "continue this session" hydration — and they are a different
+// projection: a transcript is one row per event, a timeline is one frame per
+// thing that happened. Folding both into one DTO would give it two redundant
+// representations of the same run. Once both views read this endpoint, the old
+// one has no callers left and can go.
+func (s *Server) handleSessionTimeline(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	svc, err := s.engine().NewSessionService()
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	resp, err := svc.Get(r.Context(), &adksession.GetRequest{AppName: engine.AppName, UserID: engine.UserID, SessionID: id})
+	if err != nil || resp.Session == nil {
+		writeErr(w, http.StatusNotFound, "session not found")
+		return
+	}
+
+	var events []*adksession.Event
+	for ev := range resp.Session.Events().All() {
+		events = append(events, ev)
+	}
+	frames, usage := projectAll(events)
+	if frames == nil {
+		frames = []map[string]any{} // a JSON array, never null
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"id": resp.Session.ID(), "v": frameVersion,
+		"events": frames, "usage": usage,
+	})
+}
+
 func (s *Server) handleSessionDetail(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	svc, err := s.engine().NewSessionService()
