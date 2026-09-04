@@ -24,7 +24,6 @@
 package record
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"database/sql"
@@ -44,6 +43,8 @@ import (
 	// init — which is what happened when this file first imported the other
 	// one.
 	_ "github.com/glebarez/go-sqlite"
+
+	"github.com/jelly-agent/jelly-agent/internal/ops"
 )
 
 // Upstream reports whether the tool had already shortened its own output.
@@ -425,7 +426,7 @@ func (s *Store) read(ctx context.Context, sc Scope, cond string, key any, offset
 			ErrExpired, Label(seq), expired, c.Total)
 	}
 	c.Label = Label(seq)
-	c.Lines = countLines(buf)
+	c.Lines = ops.CountLines(buf)
 	c.At, _ = time.Parse(time.RFC3339Nano, at)
 
 	if offset >= len(buf) {
@@ -454,21 +455,4 @@ func (s *Store) Delete(ctx context.Context, sc Scope) error {
 		`DELETE FROM tool_results WHERE app_name=? AND user_id=? AND session_id=?`,
 		sc.AppName, sc.UserID, sc.SessionID)
 	return err
-}
-
-// countLines counts lines the way a line scanner does: a trailing newline ends
-// the last line rather than starting an empty one.
-//
-// It has to agree with Search, which uses bufio.Scanner. The same payload
-// reporting 1000 lines from one tool and 1001 from another is worse than
-// either number being slightly off — the reader cannot tell which to believe.
-func countLines(buf []byte) int {
-	if len(buf) == 0 {
-		return 0
-	}
-	n := bytes.Count(buf, []byte{'\n'})
-	if buf[len(buf)-1] != '\n' {
-		n++
-	}
-	return n
 }

@@ -252,6 +252,10 @@ type Config struct {
 	Policy  Policy
 	// Sink records completed calls. Optional; nil records nothing.
 	Sink Sink
+	// Budget decides how much of a result may reach the prompt, from what the
+	// round has already spent. Optional; nil keeps the old behaviour, where
+	// only an explicit per-tool ceiling applies.
+	Budget ResultBudget
 	// Results durably keeps tool deliveries. Optional; nil means nothing is
 	// retrievable afterwards, and every call says so rather than implying it.
 	Results ResultKeeper
@@ -273,6 +277,8 @@ type Gateway struct {
 	// is observability and may fail silently, this one gates whether a
 	// reference is published at all.
 	results ResultKeeper
+	// budget decides how much of a result reaches the prompt. Optional.
+	budget ResultBudget
 
 	// executors is guarded because it is filled after construction: the
 	// gateway is built once per engine, while the executor for a set of tools
@@ -319,6 +325,7 @@ func New(cfg Config) *Gateway {
 		policy:    cfg.Policy,
 		sink:      cfg.Sink,
 		results:   cfg.Results,
+		budget:    cfg.Budget,
 	}
 }
 
@@ -488,11 +495,29 @@ func (g *Gateway) ExecuteAs(ctx context.Context, meta CallMeta, ic *ops.Incident
 		ev.Summary = fmt.Sprintf("结果整形失败（%v），以下为原始返回", err)
 		ev.Data = rawJSON(raw)
 	}
+	// Recorded before any bounding, so a withheld payload can still report the
+	// scale of what the tool actually produced.
+	ev.FullBytes = len(ev.Data)
+	ev.FullLines = ops.CountLines(ev.Data)
+
+	// The operator's explicit ceiling first: it is their number and they may
+	// have a reason this code cannot see.
 	if bounded, cut := boundPayload(ev.Data, m.MaxResultBytes); cut {
 		// A nil result is deliberate, not a failure: below a few bytes there
 		// is no payload worth carrying, and Truncated says so.
 		ev.Data = bounded
 		ev.Truncated = true
+	}
+	// Then the live question: does what is left still fit the prompt it is
+	// about to join. Only asked when the bytes are recoverable — withholding a
+	// payload the model cannot get back is destroying an observation, not
+	// budgeting one.
+	if g.budget != nil && len(ev.Data) > 0 && call.Retrievable {
+		if allowed := g.budget.Allow(ctx, meta, len(ev.Data)); allowed < len(ev.Data) {
+			ev.Preview = previewOf(ev.Data)
+			ev.Data = nil
+			ev.Withheld = true
+		}
 	}
 	if bounded, cut := boundSummary(ev.Summary, m.MaxResultBytes); cut {
 		// Recorded separately from Truncated. A summary is a one-line preview

@@ -461,6 +461,21 @@ func toolPayload(ev *ops.Evidence) map[string]any {
 			sentData = true
 		}
 	}
+	if ev.Withheld {
+		// Deliberately not under "data". A model handed half an object treats
+		// it as the object; that is how a cut listing turned into seven
+		// pagination guesses. Under its own key, with the scale next to it,
+		// the fragment reads as what it is — a sample.
+		out["preview"] = ev.Preview
+		out["overview"] = map[string]any{
+			"bytes": ev.FullBytes, "lines": ev.FullLines,
+			"note": "完整内容未进入本次上下文（本轮剩余预算不足），已保存，可搜索与分段读取。",
+		}
+	} else if ev.FullBytes > 0 {
+		// Stated even when everything fitted, so "how big was this" never
+		// requires a tool call.
+		out["overview"] = map[string]any{"bytes": ev.FullBytes, "lines": ev.FullLines}
+	}
 	// Always stated, never implied. read_result's own error message points at
 	// this field to explain why a handle did not resolve, so a model that was
 	// never shown it is being referred to something it cannot see.
@@ -468,7 +483,7 @@ func toolPayload(ev *ops.Evidence) map[string]any {
 
 	// Incomplete means the model's copy is short of what the tool delivered.
 	// A shortened summary only counts when the summary is all it got.
-	incomplete := ev.Truncated || (ev.SummaryTruncated && !sentData)
+	incomplete := ev.Truncated || ev.Withheld || (ev.SummaryTruncated && !sentData)
 	if !incomplete {
 		return out
 	}

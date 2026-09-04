@@ -121,7 +121,7 @@ func (f *fakeCallbackCtx) AgentName() string    { return "jelly" }
 // model going silent, not like a telemetry bug.
 func TestModelCallbacksNeverAlterExecution(t *testing.T) {
 	e := newTestEngine(t)
-	before, after := e.modelCallbacks("deepseek-v4-flash")
+	before, after := e.modelCallbacks("deepseek-v4-flash", 0, 0)
 	if len(before) != 1 || len(after) != 1 {
 		t.Fatalf("callbacks = %d before / %d after, want 1 each", len(before), len(after))
 	}

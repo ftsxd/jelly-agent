@@ -97,8 +97,8 @@ func NewReadResultTool(store *record.Store, scope Scoper) (adktool.Tool, error) 
 	return functiontool.New(
 		functiontool.Config{
 			Name: ReadResultName,
-			Description: "按 evidence_id 读取某次工具调用的完整返回（分段）。" +
-				"当结果里 truncated 为真、或需要被省略的细节时使用；" +
+			Description: "按 evidence_id 分段读取某次工具调用已保存的完整返回。" +
+				"当前可见信息不足，或需要精确搜索、计数时使用；信息已足够时直接回答。" +
 				"用返回的 next_offset 继续读下一段。",
 		},
 		func(tc adktool.Context, args ReadResultArgs) (ReadResultOut, error) {
@@ -171,10 +171,9 @@ func NewSearchResultTool(store *record.Store, scope Scoper) (adktool.Tool, error
 	return functiontool.New(
 		functiontool.Config{
 			Name: SearchResultName,
-			Description: "在某次工具调用【被省略的】返回里按正则搜索（按行匹配，可带上下文）。" +
-				"仅在结果里 truncated 为真时使用——那说明进入上下文的只是一部分。" +
-				"若完整内容已经在上下文里，直接读上下文，不要再来搜索。" +
-				"定位到以后用 read_result 读取命中附近的内容，不要逐段读完全文。返回会给出命中总数。",
+			Description: "在某次工具调用已保存的完整返回里按正则搜索（按行匹配，可带上下文）。" +
+				"当前可见信息不足，或需要精确搜索、计数时使用；信息已足够时直接回答。" +
+				"返回会给出命中总数，所以统计类问题应当搜索而不是逐段读完全文。",
 		},
 		func(tc adktool.Context, args SearchResultArgs) (record.SearchResult, error) {
 			return searchResult(tc, store, scope(tc), args)

@@ -97,15 +97,18 @@ func BuiltinMetadata() toolreg.Source {
 				MaxResultBytes: 6000,
 			},
 			{
-				Name:        "read_result",
-				Description: "按 evidence_id 分段读取某次工具调用的完整返回。工具结果里 truncated 为真时，被省略的部分只能从这里取回。",
+				Name: "read_result",
+				// The trigger is "what I can see is not enough", not a flag
+				// value. A result may be complete and still insufficient, and
+				// it may be marked truncated and still answer the question.
+				Description: "按 evidence_id 分段读取某次工具调用已保存的完整返回。当前可见信息不足，或需要精确搜索、计数时使用；信息已足够时直接回答。",
 				UseCases: []string{
-					"结果被截断，需要看完整内容",
+					"进入上下文的只是概况或预览，需要看具体内容",
 					"需要返回里被省略的细节",
 					"继续读取上一段之后的内容",
 				},
 				AntiExamples: []string{
-					"结果没有被截断时（完整内容已经在上下文里）",
+					"可见信息已经足够回答时（再读是白花 token）",
 					"想重新执行一次工具时（这里只读已保存的结果，不会重新调用）",
 				},
 				Produces:     ops.KindText,
@@ -135,13 +138,13 @@ func BuiltinMetadata() toolreg.Source {
 				// and on a 42KB result that was already complete in the
 				// prompt the model searched it four times and read it three
 				// more — for bytes it already had, at four times the tokens.
-				Description: "在某次工具调用【被省略的】返回里按正则按行搜索，可带上下文。仅在结果里 truncated 为真时使用；完整内容已在上下文里就直接读上下文。",
+				Description: "在某次工具调用已保存的完整返回里按正则按行搜索，可带上下文，并给出命中总数。当前可见信息不足，或需要精确搜索、计数时使用；信息已足够时直接回答。",
 				UseCases: []string{
-					"结果被截断，要在被省略的部分里定位关键行",
-					"统计被省略部分里某类内容出现了多少次",
+					"在超出上下文的返回里定位关键行",
+					"统计某类内容出现了多少次（返回全量计数，不必逐段读完）",
 				},
 				AntiExamples: []string{
-					"结果没有被截断时（完整内容已经在上下文里，再搜索是白花 token）",
+					"可见信息已经足够回答时（再搜索是白花 token）",
 					"想重新执行一次工具时（这里只搜已保存的结果）",
 				},
 				Produces:     ops.KindText,

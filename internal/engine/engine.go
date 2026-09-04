@@ -116,6 +116,10 @@ type Engine struct {
 	admitOnce sync.Once
 	admit     *admissions
 
+	// budget tracks how much room each round has left for tool results.
+	budgetOnce sync.Once
+	budget     *resultBudget
+
 	// recordStore durably keeps tool deliveries so a shortened result can be
 	// read back.
 	recordsOnce sync.Once
@@ -297,6 +301,10 @@ func (e *Engine) toolRegistry() (*toolreg.Store, *gateway.Gateway) {
 			// failure changes what we may claim rather than merely losing a
 			// row.
 			Results: gateway.KeeperFunc(e.keepToolResult),
+			// Decides per round whether a result still fits the prompt it is
+			// joining. Only ever withholds a payload the store has already
+			// committed, so nothing it declines is lost.
+			Budget: e.resultBudget(),
 		})
 	})
 	return e.toolStore, e.gw
@@ -416,6 +424,16 @@ func (e *Engine) systemInstruction(core *memory.Core, instruction string, allowS
 func (e *Engine) admissions() *admissions {
 	e.admitOnce.Do(func() { e.admit = newAdmissions() })
 	return e.admit
+}
+
+// resultBudget returns the process-wide per-round result ledger.
+//
+// One per engine, for the same reason as the admission record: it is keyed by
+// invocation, and an agent rebuilt per request must not lose the round it is
+// in the middle of.
+func (e *Engine) resultBudget() *resultBudget {
+	e.budgetOnce.Do(func() { e.budget = newResultBudget() })
+	return e.budget
 }
 
 // MaxTools exposes the resolved tool budget, for the console's prompt view.
@@ -714,9 +732,15 @@ func (e *Engine) toolCallbacks() ([]llmagent.BeforeToolCallback, []llmagent.Afte
 // Token counts come from the response's usage metadata, which is also what
 // ADK's generate_content span reports — this publishes them as a counter so a
 // dashboard can show spend over a window, which a span cannot.
-func (e *Engine) modelCallbacks(modelName string) ([]llmagent.BeforeModelCallback, []llmagent.AfterModelCallback) {
+func (e *Engine) modelCallbacks(modelName string, contextWindow, replyTokens int) ([]llmagent.BeforeModelCallback, []llmagent.AfterModelCallback) {
 	before := func(ctx agent.CallbackContext, req *adkmodel.LLMRequest) (*adkmodel.LLMResponse, error) {
 		jellytelemetry.StartLLMCall(ctx.InvocationID())
+		// The request about to be sent is exactly the baseline this round's
+		// tool results will be appended to, so this is where the room left
+		// for them is known. Measured here rather than guessed at from a
+		// turn counter, which is what a fixed byte ceiling amounts to.
+		e.resultBudget().observe(ctx.InvocationID(),
+			promptTokensOf(requestTexts(req)), contextWindow, replyTokens)
 		return nil, nil
 	}
 	after := func(ctx agent.CallbackContext, resp *adkmodel.LLMResponse, respErr error) (*adkmodel.LLMResponse, error) {
@@ -1091,7 +1115,7 @@ func (e *Engine) buildNode(name, description, provider, instruction string, tool
 	}
 
 	beforeTool, afterTool := e.toolCallbacks()
-	beforeModel, afterModel := e.modelCallbacks(mdl.Name())
+	beforeModel, afterModel := e.modelCallbacks(mdl.Name(), prov.ContextWindow, prov.MaxTokens)
 
 	a, err := llmagent.New(llmagent.Config{
 		Name:        name,

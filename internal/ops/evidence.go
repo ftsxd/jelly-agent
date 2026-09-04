@@ -81,7 +81,23 @@ type Evidence struct {
 	// the payload could not be rendered as JSON, because then the summary is
 	// all the model got and cutting it does lose information.
 	SummaryTruncated bool `json:"summary_truncated,omitempty"`
-	Redacted         bool `json:"redacted,omitempty"`
+
+	// Withheld says the payload was kept out of the prompt entirely because
+	// it would not fit, rather than cut down to size. A cut JSON object is
+	// worse than an absent one — the model cannot parse it and cannot tell
+	// what is missing — so past the budget the whole payload is replaced by
+	// FullBytes, FullLines and Preview, and recovered through the handle.
+	Withheld bool `json:"withheld,omitempty"`
+	// FullBytes and FullLines describe the delivery as the tool produced it,
+	// so a model that was not given the payload still knows its scale and can
+	// decide between searching it and asking a narrower question.
+	FullBytes int `json:"full_bytes,omitempty"`
+	FullLines int `json:"full_lines,omitempty"`
+	// Preview is a small head of a withheld payload. Its job is to show the
+	// shape — field names, the flavour of the records — so the model can
+	// write a search pattern that matches something.
+	Preview  string `json:"preview,omitempty"`
+	Redacted bool   `json:"redacted,omitempty"`
 	// Retrievable mirrors ToolCall.Retrievable, so a conclusion that cites
 	// this observation can say whether the full delivery is still readable.
 	Retrievable bool `json:"retrievable,omitempty"`

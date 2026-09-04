@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1170,5 +1171,127 @@ func TestRetrievableIsReportedWhenAHandleExists(t *testing.T) {
 	}
 	if got := toolPayload(res.Evidence)["retrievable"]; got != true {
 		t.Errorf("payload retrievable = %v, want true", got)
+	}
+}
+
+// budgetOf grants the first n bytes of the round and withholds the rest.
+type budgetOf struct{ room int }
+
+func (b *budgetOf) Allow(_ context.Context, _ CallMeta, size int) int {
+	if size <= b.room {
+		b.room -= size
+		return size
+	}
+	return 0
+}
+
+// A payload that does not fit is withheld whole, and what reaches the model is
+// an overview plus a preview plus a handle — never a cut JSON object.
+//
+// The distinction is the point. A model handed half an object treats it as the
+// object: it cannot tell which records are missing, and the observed
+// behaviour was seven pagination guesses at 68k tokens. An overview it can
+// act on is both smaller and more useful.
+func TestAnOversizedResultArrivesAsAnOverviewNotACutObject(t *testing.T) {
+	big := map[string]any{"list": make([]any, 0, 400)}
+	rows := big["list"].([]any)
+	for i := 0; i < 400; i++ {
+		rows = append(rows, map[string]any{"id": i, "name": "rule-" + strconv.Itoa(i), "metric": "cpu"})
+	}
+	big["list"] = rows
+
+	g := newGW(t, k8sMeta(), &recorder{result: big}, Policy{})
+	g.results = KeeperFunc(func(context.Context, CallMeta, string, map[string]any) (string, error) {
+		return "e3", nil
+	})
+	g.budget = &budgetOf{room: 500} // far less than the payload
+
+	res, err := g.Execute(context.Background(), prodContext(), ops.OriginModel, "k8s_get_pods", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Evidence.Withheld {
+		t.Fatal("an oversized payload was not withheld")
+	}
+	if res.Evidence.FullBytes < 10000 {
+		t.Errorf("full_bytes = %d, want the pre-bounding size", res.Evidence.FullBytes)
+	}
+
+	out := toolPayload(res.Evidence)
+	if _, present := out["data"]; present {
+		t.Error("a withheld payload was still sent under \"data\"; the model will treat the fragment as the whole")
+	}
+	preview, _ := out["preview"].(string)
+	if preview == "" {
+		t.Error("no preview, so the model cannot tell what shape to search for")
+	}
+	if len([]rune(preview)) > maxPreviewBytes {
+		t.Errorf("preview is %d runes, over the %d bound", len([]rune(preview)), maxPreviewBytes)
+	}
+	ov, _ := out["overview"].(map[string]any)
+	if ov == nil || ov["bytes"] == nil || ov["lines"] == nil {
+		t.Errorf("overview = %v, want the scale of what was withheld", ov)
+	}
+	if ov["bytes"] != res.Evidence.FullBytes {
+		t.Errorf("overview bytes = %v, want %d", ov["bytes"], res.Evidence.FullBytes)
+	}
+	// And it must point at the recovery path, since the handle is real.
+	note, _ := out["truncated_note"].(string)
+	if !strings.Contains(note, "search_result") {
+		t.Errorf("note does not point at search_result: %q", note)
+	}
+	if out["retrievable"] != true {
+		t.Error("a withheld payload must be reported retrievable or nobody will fetch it")
+	}
+}
+
+// A result that fits is untouched, and still reports its own scale so "how big
+// is this" never costs a tool call.
+func TestAFittingResultIsUntouchedButStillReportsItsScale(t *testing.T) {
+	g := newGW(t, k8sMeta(), &recorder{result: map[string]any{"summary": "ok", "n": 3}}, Policy{})
+	g.results = KeeperFunc(func(context.Context, CallMeta, string, map[string]any) (string, error) {
+		return "e1", nil
+	})
+	g.budget = &budgetOf{room: 1 << 20}
+
+	res, err := g.Execute(context.Background(), prodContext(), ops.OriginModel, "k8s_get_pods", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Evidence.Withheld || res.Evidence.Truncated {
+		t.Error("a small result was withheld or truncated")
+	}
+	out := toolPayload(res.Evidence)
+	if out["data"] == nil {
+		t.Error("the payload did not reach the model")
+	}
+	if _, present := out["truncated"]; present {
+		t.Error("a complete result was flagged truncated")
+	}
+	if ov, _ := out["overview"].(map[string]any); ov == nil || ov["bytes"] == nil {
+		t.Error("a complete result did not report its scale")
+	}
+}
+
+// Withholding is only allowed when the bytes are recoverable. Withholding a
+// payload nobody can fetch is destroying an observation we already paid for,
+// not budgeting one.
+func TestAnUnstorableResultIsNeverWithheld(t *testing.T) {
+	big := strings.Repeat("x", 50000)
+	g := newGW(t, k8sMeta(), &recorder{result: map[string]any{"blob": big}}, Policy{})
+	g.results = KeeperFunc(func(context.Context, CallMeta, string, map[string]any) (string, error) {
+		return "", errors.New("disk full")
+	})
+	g.budget = &budgetOf{room: 100}
+
+	res, err := g.Execute(context.Background(), prodContext(), ops.OriginModel, "k8s_get_pods", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Evidence.Withheld {
+		t.Error("a payload that could not be stored was withheld anyway; the observation is now unreachable")
+	}
+	if res.Call.Retrievable {
+		t.Error("a failed store reported retrievable")
 	}
 }
