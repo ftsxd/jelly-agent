@@ -163,20 +163,34 @@ type historyInput struct {
 	MaxTokens        *int `json:"max_tokens"`
 	KeepRecent       int  `json:"keep_recent"`
 	ToolResultTokens int  `json:"tool_result_tokens"`
+	// MaxResultBytes lives under `tools` in the config file, which is where it
+	// belongs, but it is edited here on purpose: it and history compaction are
+	// the only two things bounding what reaches the context window, and they
+	// interact. Turning compaction off is safe only while this ceiling is set,
+	// and leaving this at zero is safe only while compaction is on. A form
+	// that showed one without the other would invite exactly the combination
+	// that leaves neither.
+	MaxResultBytes int `json:"max_result_bytes"`
 }
 
 // handleHistory reports the current compaction settings plus the defaults that
 // apply when a field is unset, so the form can show what is actually in force.
 func (s *Server) handleHistory(w http.ResponseWriter, _ *http.Request) {
-	h := s.engine().Config().History
+	cfg := s.engine().Config()
+	h := cfg.History
 	writeJSON(w, http.StatusOK, map[string]any{
 		"max_tokens":         h.MaxTokens, // null ⇒ default applies
 		"keep_recent":        h.KeepRecent,
 		"tool_result_tokens": h.ToolResultTokens,
+		"max_result_bytes":   cfg.Tools.MaxResultBytes, // 0 ⇒ no ceiling
+		// Reported so the form can say so rather than leaving the operator to
+		// discover it from a provider error that names nothing about tools.
+		"context_unguarded": s.engine().ContextUnguarded(),
 		"defaults": map[string]int{
 			"max_tokens":         history.DefaultMaxTokens,
 			"keep_recent":        history.DefaultKeepRecent,
 			"tool_result_tokens": history.DefaultToolResultTokens,
+			"max_result_bytes":   0,
 		},
 	})
 }
@@ -208,6 +222,7 @@ func (s *Server) handleSetHistory(w http.ResponseWriter, r *http.Request) {
 	}
 	raw.History.KeepRecent = max(0, in.KeepRecent)
 	raw.History.ToolResultTokens = max(0, in.ToolResultTokens)
+	raw.Tools.MaxResultBytes = max(0, in.MaxResultBytes)
 
 	if err := s.persist(w, raw, path); err != nil {
 		return

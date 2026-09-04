@@ -47,7 +47,7 @@ func TestSelectionRanksRealMCPTools(t *testing.T) {
 		Registry: gateway.Snapshot(reg),
 		Policy:   gateway.Policy{MaxSideEffect: ops.SideEffectMutating},
 	})
-	binder := &gateway.Binder{GW: gw, Registry: gateway.Snapshot(reg), Fallback: undeclaredFallback}
+	binder := &gateway.Binder{GW: gw, Registry: gateway.Snapshot(reg), Fallback: New(&config.Config{}).undeclaredFallback()}
 
 	set, err := jellymcp.Toolset(ctx, config.MCPServer{
 		Name: "k8s", Transport: "stdio", Command: "python3",
@@ -158,4 +158,53 @@ func toolNames(ts []adktool.Tool) []string {
 		out = append(out, t.Name())
 	}
 	return out
+}
+
+// The result ceiling defaults to off, and that is safe only because history
+// compaction is on. Turning both off leaves nothing bounding the context, and
+// the symptom is a provider error that says nothing about tool results — so
+// the condition has to be detectable and reported rather than discovered.
+func TestContextGuardrails(t *testing.T) {
+	zero := 0
+	big := 24000
+	cases := []struct {
+		name      string
+		history   *int
+		resultCap int
+		unguarded bool
+	}{
+		{"默认：压缩开、返回不限", nil, 0, false},
+		{"压缩关、返回限了", &zero, 8000, false},
+		{"压缩开、返回限了", &big, 8000, false},
+		{"两者都关", &zero, 0, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			cfg := &config.Config{}
+			cfg.History.MaxTokens = c.history
+			cfg.Tools.MaxResultBytes = c.resultCap
+			if got := New(cfg).contextUnguarded(); got != c.unguarded {
+				t.Errorf("contextUnguarded() = %v, want %v", got, c.unguarded)
+			}
+		})
+	}
+}
+
+// The default must be no ceiling. A ceiling that cuts a result the model
+// cannot then use costs more than the bytes it saves: the run that produced
+// this default retried seven times and spent 68k tokens to save two kilobytes.
+func TestUndeclaredResultBoundDefaultsToUnlimited(t *testing.T) {
+	if got := New(&config.Config{}).undeclaredFallback().MaxResultBytes; got != 0 {
+		t.Errorf("default MaxResultBytes = %d, want 0 (no ceiling)", got)
+	}
+}
+
+// And it must be settable, because a server that can return something
+// genuinely enormous is a real case.
+func TestUndeclaredResultBoundIsConfigurable(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Tools.MaxResultBytes = 4096
+	if got := New(cfg).undeclaredFallback().MaxResultBytes; got != 4096 {
+		t.Errorf("MaxResultBytes = %d, want the configured 4096", got)
+	}
 }

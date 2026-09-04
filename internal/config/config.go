@@ -68,6 +68,28 @@ type Tools struct {
 	// negative to turn selection off and send every tool, which is what
 	// happened before this existed.
 	MaxTools int `mapstructure:"max_tools" yaml:"max_tools,omitempty"`
+
+	// MaxResultBytes caps a single tool result for a tool whose own metadata
+	// does not size it — in practice every MCP tool, since a third-party
+	// server ships no metadata of ours.
+	//
+	// Zero means no cap, and that is the default. Bounding the context window
+	// is not this knob's job: internal/history already does it, and does it
+	// better — it shortens results only once the prompt exceeds its budget,
+	// takes the oldest first, and protects the current exchange. This cap
+	// fires unconditionally on every result, including the newest, which is
+	// precisely the one history exists to protect.
+	//
+	// The failure that produced this default is worth recording. A cap of 8000
+	// bytes cut a 9947-byte alert-rule listing, the model could not read the
+	// list, so it retried with seven different pagination guesses — eight
+	// model calls, 68k tokens, to save two kilobytes. A truncated result the
+	// model cannot use costs more than the bytes it saves, because the retries
+	// re-send the whole history each time.
+	//
+	// Set it when a server can return something genuinely enormous and you
+	// would rather lose the tail than the turn.
+	MaxResultBytes int `mapstructure:"max_result_bytes" yaml:"max_result_bytes,omitempty"`
 }
 
 // Logging configures the process-wide structured logger. JSON is the default

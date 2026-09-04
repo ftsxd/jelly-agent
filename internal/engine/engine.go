@@ -248,6 +248,12 @@ func (e *Engine) toolRegistry() (*toolreg.Store, *gateway.Gateway) {
 		}
 		e.toolStore.Swap(reg)
 
+		if e.contextUnguarded() {
+			slog.Warn("上下文无任何上限保护：history.max_tokens 为 0 关闭了压缩，而 tools.max_result_bytes 为 0 不限制单次返回。"+
+				"一个足够大的工具返回会直接让请求失败，且报错不会提到工具返回。二者至少开启一个。",
+				"history_max_tokens", 0, "tools_max_result_bytes", 0)
+		}
+
 		// The ceiling is derived from what is actually configured, not set to
 		// the widest level and left there.
 		//
@@ -294,13 +300,35 @@ func (e *Engine) toolRegistry() (*toolreg.Store, *gateway.Gateway) {
 // sets a read-only ceiling is the one that will see MCP calls refused, which is
 // the point of setting it.
 //
-// The two bounds are the built-ins' own values. Zero would mean "no bound",
-// which is a fine default for a tool someone sized and a bad one for a remote
-// nobody did.
-var undeclaredFallback = gateway.Fallback{
-	Govern:         true,
-	Timeout:        30 * time.Second,
-	MaxResultBytes: 8000,
+// The result bound comes from config and is unbounded by default; see
+// config.Tools.MaxResultBytes for why. The timeout stays fixed: a hanging
+// server should not hang a turn, and unlike a byte ceiling a deadline cannot
+// damage a result that does arrive.
+// contextUnguarded reports that nothing bounds what reaches the context
+// window.
+//
+// Two mechanisms can bound it and either is enough: history compaction, which
+// shortens results once the prompt exceeds its budget, and the gateway's
+// per-result byte ceiling. The ceiling is off by default on purpose (see
+// config.Tools.MaxResultBytes), which is safe precisely because compaction is
+// on by default. Turning compaction off as well leaves neither, and the
+// symptom of that is a single enormous tool result failing the request with a
+// provider error that names nothing about tool results.
+// ContextUnguarded exposes the check for the console, so the settings form can
+// say that neither bound is in force.
+func (e *Engine) ContextUnguarded() bool { return e.contextUnguarded() }
+
+func (e *Engine) contextUnguarded() bool {
+	compactionOff := e.cfg.History.MaxTokens != nil && *e.cfg.History.MaxTokens <= 0
+	return compactionOff && e.cfg.Tools.MaxResultBytes <= 0
+}
+
+func (e *Engine) undeclaredFallback() gateway.Fallback {
+	return gateway.Fallback{
+		Govern:         true,
+		Timeout:        30 * time.Second,
+		MaxResultBytes: e.cfg.Tools.MaxResultBytes,
+	}
 }
 
 // SystemPrompt is the instruction the given agent sends on every turn, for a
@@ -870,7 +898,7 @@ func (e *Engine) buildNode(name, description, provider, instruction string, tool
 		GW:       gw,
 		Registry: gateway.Snapshot(store.Load()),
 		Context:  e.incidentFor,
-		Fallback: undeclaredFallback,
+		Fallback: e.undeclaredFallback(),
 		Report:   e.reportUndeclared,
 	}
 	tools = binder.Tools("", tools)

@@ -461,6 +461,13 @@ func toolPayload(ev *ops.Evidence) map[string]any {
 	}
 	if ev.Truncated {
 		out["truncated"] = true
+		// Actionable, because "truncated" alone is read as "ask for less".
+		// That is what happened in practice: a model told only that a listing
+		// was cut retried it seven times with smaller and smaller pages,
+		// each attempt hitting the same ceiling and re-sending the whole
+		// history. What it needed to know is that the ceiling is on the
+		// response, so a different page size will not get past it.
+		out["truncated_note"] = "结果已超出返回上限被截断。重复调用或改变分页不会绕过该上限——请改用更精确的过滤条件，或向用户说明只取到了部分结果。"
 	}
 	return out
 }

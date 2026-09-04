@@ -25,7 +25,7 @@ const toggleError = ref('')
 // representable; a max_tokens of 0 means compaction is off entirely.
 const hist = ref(null) // server state incl. defaults
 const histOpen = ref(false)
-const histForm = ref({ max_tokens: '', keep_recent: '', tool_result_tokens: '' })
+const histForm = ref({ max_tokens: '', keep_recent: '', tool_result_tokens: '', max_result_bytes: '' })
 const histSaving = ref(false)
 const histError = ref('')
 const histNotice = ref('')
@@ -42,6 +42,7 @@ async function loadHistory() {
       max_tokens: hist.value.max_tokens ?? '',
       keep_recent: hist.value.keep_recent || '',
       tool_result_tokens: hist.value.tool_result_tokens || '',
+      max_result_bytes: hist.value.max_result_bytes || '',
     }
   } catch (e) {
     histError.value = e.message
@@ -69,6 +70,7 @@ async function saveHistory() {
       max_tokens: histNum(histForm.value.max_tokens), // null = 用默认预算
       keep_recent: histNum(histForm.value.keep_recent) ?? 0,
       tool_result_tokens: histNum(histForm.value.tool_result_tokens) ?? 0,
+      max_result_bytes: histNum(histForm.value.max_result_bytes) ?? 0,
     })
     histNotice.value = `已保存到 ${r.saved_to}（即时热重载）`
     await loadHistory()
@@ -248,7 +250,25 @@ function fmtTime(unix) {
                   :placeholder="`留空 = ${hist?.defaults?.tool_result_tokens ?? 800}`" :disabled="compactionOff" />
                 <span class="tiny muted">超出后保留首尾、省略中间</span>
               </label>
+              <!-- Under `tools` in the config file, edited here because it and
+                   compaction are the only two things bounding what reaches the
+                   context, and they interact. -->
+              <label class="field">
+                <span class="label">工具返回硬上限（字节）</span>
+                <input v-model="histForm.max_result_bytes" class="input" type="number" min="0" step="1000"
+                  placeholder="留空或 0 = 不限制" />
+                <span class="tiny muted">0 = 不限制（推荐）。它在调用时无条件截断每个返回，不看预算</span>
+              </label>
             </div>
+            <p class="tiny muted hint2">
+              两者的性质不同：上面的 token 上限只在超出历史预算时才动手，从旧到新，保护当前这轮；
+              下面的字节上限每次调用都切，切的正是最新那个结果。把返回从中间切断后模型往往无法使用、
+              会换参数重试，而每次重试都要重发整段历史——省下的字节远不及重试的代价。
+            </p>
+            <p v-if="hist?.context_unguarded" class="tiny warn">
+              当前压缩已关闭且返回不限制，没有任何东西约束进入上下文的内容。一个足够大的工具返回会
+              直接让请求失败，而报错不会提到工具返回。二者至少开启一个。
+            </p>
             <p v-if="!searchEnabled && !compactionOff" class="tiny warn">
               L2 会话检索当前关闭，被压缩丢弃的早期对话将无法找回。开启下方的 L2 可让 agent 用 load_memory 检索历史。
             </p>
@@ -637,5 +657,10 @@ function fmtTime(unix) {
   .body {
     grid-template-columns: 1fr;
   }
+}
+.hint2 {
+  margin: var(--sp-2) 0 0;
+  line-height: 1.7;
+  color: var(--text-muted);
 }
 </style>

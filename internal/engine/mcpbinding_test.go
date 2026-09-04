@@ -45,7 +45,7 @@ func TestMCPToolsAreBoundPerServer(t *testing.T) {
 	})
 	undeclared := map[string][]string{}
 	binder := &gateway.Binder{
-		GW: gw, Registry: gateway.Snapshot(reg), Fallback: undeclaredFallback,
+		GW: gw, Registry: gateway.Snapshot(reg), Fallback: New(&config.Config{}).undeclaredFallback(),
 		Report: func(server string, names []string) { undeclared[server] = names },
 	}
 
