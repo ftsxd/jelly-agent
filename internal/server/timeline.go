@@ -105,6 +105,15 @@ type turnState struct {
 	// the last round's tokens while the sessions page displayed the sum — the
 	// same session, two pages, two numbers.
 	totalPrompt, totalCompletion, totalTokens int32
+
+	// totalCached accumulates prompt tokens served from cache, and
+	// cacheReported says whether any provider response actually carried the
+	// figure. Without the flag a zero is ambiguous between "the cache is not
+	// working" and "we cannot see the cache", and a console that renders both
+	// as 0% hit rate would send someone chasing a cache that was never
+	// reported in the first place.
+	totalCached   int32
+	cacheReported bool
 }
 
 func newTurnState() *turnState { return &turnState{} }
@@ -120,11 +129,17 @@ func (s *turnState) enter(invocation string) {
 
 // usage returns the turn's accumulated token counts.
 func (s *turnState) usage() map[string]any {
-	return map[string]any{
+	u := map[string]any{
 		"prompt":     s.totalPrompt,
 		"completion": s.totalCompletion,
 		"total":      s.totalTokens,
 	}
+	// Emitted only when a provider reported it. An absent key is what the
+	// console must show as "unknown"; a present zero is a real cache miss.
+	if s.cacheReported {
+		u["cached"] = s.totalCached
+	}
+	return u
 }
 
 // project turns one ADK event into frames.
@@ -225,12 +240,21 @@ func projectFinal(ev *adksession.Event, out sink, st *turnState, ts int64) {
 		st.totalPrompt += u.PromptTokenCount
 		st.totalCompletion += u.CandidatesTokenCount
 		st.totalTokens += u.TotalTokenCount
-		out.frame(frameLLMTurn, map[string]any{
+		turnFrame := map[string]any{
 			"round": st.invocation, "turn": st.turn,
 			"agent": ev.Author, "branch": ev.Branch, "ts": ts,
 			"prompt": u.PromptTokenCount, "completion": u.CandidatesTokenCount,
 			"total": u.TotalTokenCount, "finish_reason": string(ev.FinishReason),
-		})
+		}
+		// The slice, not the count: it is the only one of the two that
+		// distinguishes a reported zero from nothing reported. See
+		// model.toUsage.
+		if u.CacheTokensDetails != nil {
+			st.totalCached += u.CachedContentTokenCount
+			st.cacheReported = true
+			turnFrame["cached"] = u.CachedContentTokenCount
+		}
+		out.frame(frameLLMTurn, turnFrame)
 		// Kept for the frontend that predates llm_turn. Remove once no
 		// consumer reads it.
 		out.frame(frameUsage, map[string]any{

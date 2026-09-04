@@ -262,15 +262,29 @@ func toLLMResponse(resp openai.ChatCompletionResponse) *adkmodel.LLMResponse {
 }
 
 // toUsage maps OpenAI token usage onto the genai usage metadata.
+//
+// The cached count needs two fields, not one. CachedContentTokenCount is a
+// bare int32, so on its own it cannot distinguish "the provider reported no
+// cache hit" from "the provider reported nothing" — and those call for
+// opposite conclusions. CacheTokensDetails is a slice, so its nil-ness carries
+// exactly that distinction, and a per-modality breakdown of cached tokens is
+// what the field is for. Consumers must test the slice, not the count.
 func toUsage(u *openai.Usage) *genai.GenerateContentResponseUsageMetadata {
 	if u == nil {
 		return nil
 	}
-	return &genai.GenerateContentResponseUsageMetadata{
+	out := &genai.GenerateContentResponseUsageMetadata{
 		PromptTokenCount:     int32(u.PromptTokens),
 		CandidatesTokenCount: int32(u.CompletionTokens),
 		TotalTokenCount:      int32(u.TotalTokens),
 	}
+	if c := readCacheUsage(u); c.Known {
+		out.CachedContentTokenCount = int32(c.Cached)
+		out.CacheTokensDetails = []*genai.ModalityTokenCount{{
+			Modality: genai.MediaModalityText, TokenCount: int32(c.Cached),
+		}}
+	}
+	return out
 }
 
 // mapFinishReason maps an OpenAI finish reason to the genai equivalent.

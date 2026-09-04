@@ -647,3 +647,75 @@ func TestTurnCounterResetsPerInvocation(t *testing.T) {
 		t.Errorf("both answers share round %v; they are different invocations", texts[0]["round"])
 	}
 }
+
+// cachedUsage builds usage the way model.toUsage does for a provider that
+// reported caching — the slice is the reporting marker, not the count.
+func cachedUsage(prompt, completion, total, cached int32) evOpt {
+	return func(e *adksession.Event) {
+		e.UsageMetadata = &genai.GenerateContentResponseUsageMetadata{
+			PromptTokenCount: prompt, CandidatesTokenCount: completion, TotalTokenCount: total,
+			CachedContentTokenCount: cached,
+			CacheTokensDetails: []*genai.ModalityTokenCount{{
+				Modality: genai.MediaModalityText, TokenCount: cached,
+			}},
+		}
+	}
+}
+
+// A cache hit of zero and a provider that never mentioned caching must not
+// look the same to the console. Rendering both as "0% cached" would send
+// someone tuning a cache that was never observable, which is the mistake that
+// made the 58k-token session take a manual investigation to explain.
+func TestCacheReportingSurvivesProjection(t *testing.T) {
+	t.Run("报告了命中", func(t *testing.T) {
+		frames, totals := run(
+			event(at(0), "model", []*genai.Part{textPart("a")}, cachedUsage(4595, 4, 4599, 0)),
+			event(at(10), "model", []*genai.Part{textPart("b")}, cachedUsage(4595, 4, 4599, 4480)),
+		)
+		turns := only(frames, frameLLMTurn)
+		if len(turns) != 2 {
+			t.Fatalf("llm_turn frames = %d, want 2", len(turns))
+		}
+		if turns[0]["cached"] != int32(0) {
+			t.Errorf("first turn cached = %v, want a reported 0", turns[0]["cached"])
+		}
+		if turns[1]["cached"] != int32(4480) {
+			t.Errorf("second turn cached = %v, want 4480", turns[1]["cached"])
+		}
+		if totals["cached"] != int32(4480) {
+			t.Errorf("total cached = %v, want 4480", totals["cached"])
+		}
+	})
+
+	t.Run("提供方未报告", func(t *testing.T) {
+		frames, totals := run(
+			event(at(0), "model", []*genai.Part{textPart("a")}, usage(4595, 4, 4599)),
+		)
+		turns := only(frames, frameLLMTurn)
+		if len(turns) != 1 {
+			t.Fatalf("llm_turn frames = %d, want 1", len(turns))
+		}
+		if _, present := turns[0]["cached"]; present {
+			t.Error("a turn with no cache report still carried a cached figure")
+		}
+		if _, present := totals["cached"]; present {
+			t.Error("totals claimed a cached figure the provider never reported")
+		}
+	})
+
+	// Mixed is the realistic case on a provider change or a fallback: the
+	// total must cover only the rounds that reported, and must still be
+	// marked as present so the console shows a number rather than nothing.
+	t.Run("部分轮次有报告", func(t *testing.T) {
+		_, totals := run(
+			event(at(0), "model", []*genai.Part{textPart("a")}, usage(100, 4, 104)),
+			event(at(10), "model", []*genai.Part{textPart("b")}, cachedUsage(4595, 4, 4599, 4480)),
+		)
+		if totals["cached"] != int32(4480) {
+			t.Errorf("total cached = %v, want 4480 from the one round that reported", totals["cached"])
+		}
+		if totals["prompt"] != int32(4695) {
+			t.Errorf("total prompt = %v, want 4695 across both rounds", totals["prompt"])
+		}
+	})
+}

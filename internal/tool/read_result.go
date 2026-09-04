@@ -31,6 +31,7 @@ import (
 	"google.golang.org/adk/tool/functiontool"
 
 	"github.com/jelly-agent/jelly-agent/internal/record"
+	"github.com/jelly-agent/jelly-agent/internal/telemetry"
 )
 
 // Names of the store's own readers. Exported so the keeper can exempt them
@@ -137,6 +138,9 @@ func readResult(ctx context.Context, store *record.Store, sc record.Scope, args 
 	if chunk.Upstream == record.UpstreamYes {
 		out.Note += "注意：该工具在返回给系统之前已自行截断过输出，因此这里也不是它上游的完整内容。"
 	}
+	// Attributed to the tool that produced the bytes, not to read_result: the
+	// question is which tools the model has to come back for.
+	telemetry.RecordStoreBytes(ctx, telemetry.RecordServed, chunk.Tool, int64(len(chunk.Data)))
 	return out, nil
 }
 
@@ -183,6 +187,22 @@ func searchResult(ctx context.Context, store *record.Store, sc record.Scope, arg
 	if errors.Is(err, record.ErrNotFound) {
 		return record.SearchResult{}, fmt.Errorf(
 			"引用 %q 在本次会话中找不到对应的已保存结果——它可能来自其他会话，或该次调用的返回未能落库（结果里 retrievable 为假时即是如此）", args.Ref)
+	}
+	if err == nil {
+		// Only what came back, not the payload scanned: this counter measures
+		// what the store put in front of the model, and search's whole point
+		// is that those two numbers are very different.
+		served := 0
+		for _, h := range res.Hits {
+			served += len(h.Text)
+			for _, l := range h.Before {
+				served += len(l)
+			}
+			for _, l := range h.After {
+				served += len(l)
+			}
+		}
+		telemetry.RecordStoreBytes(ctx, telemetry.RecordServed, res.Tool, int64(served))
 	}
 	return res, err
 }

@@ -142,6 +142,8 @@ func (m *OpenAILLM) generateOnce(ctx context.Context, req *adkmodel.LLMRequest) 
 			// a backoff — a wrong answer to "why was this turn slow".
 			telemetry.RecordLLMAttempts(ctx, attempt+1)
 			if err == nil {
+				c := readCacheUsage(&resp.Usage)
+				telemetry.RecordCacheUsage(ctx, m.modelID(req), c.Prompt, c.Cached, c.Known)
 				yield(toLLMResponse(resp), nil)
 				return
 			}
@@ -216,6 +218,12 @@ func (m *OpenAILLM) streamAttempt(ctx context.Context, req *adkmodel.LLMRequest,
 			}
 		}
 	}
+	// Recorded before yielding: the consumer may stop iterating, and a cache
+	// figure that only lands when the caller reads to the end would go missing
+	// exactly on the turns that were abandoned.
+	c := readCacheUsage(acc.usage)
+	telemetry.RecordCacheUsage(ctx, m.modelID(req), c.Prompt, c.Cached, c.Known)
+
 	yield(acc.final(m.modelID(req)), nil)
 	return true, nil
 }

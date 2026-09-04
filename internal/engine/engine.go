@@ -474,7 +474,7 @@ func (e *Engine) keepToolResult(ctx context.Context, meta gateway.CallMeta, tool
 	if err != nil {
 		return "", fmt.Errorf("encode delivery: %w", err)
 	}
-	return store.Put(ctx, record.Record{
+	label, err := store.Put(ctx, record.Record{
 		Scope: record.Scope{
 			AppName: AppName, UserID: UserID, SessionID: meta.SessionID,
 		},
@@ -485,6 +485,14 @@ func (e *Engine) keepToolResult(ctx context.Context, meta gateway.CallMeta, tool
 		Payload:      payload,
 		Upstream:     upstreamCut(delivered),
 	})
+	if err != nil {
+		return "", err
+	}
+	// Counted only on success, so the stored/served ratio compares bytes that
+	// are actually recoverable. Counting an attempt would make a failing store
+	// look like one the model simply never reads from.
+	jellytelemetry.RecordStoreBytes(ctx, jellytelemetry.RecordStored, tool, int64(len(payload)))
+	return label, nil
 }
 
 // upstreamCut reads whether the tool had already shortened its own output.

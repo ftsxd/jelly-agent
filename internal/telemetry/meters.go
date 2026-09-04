@@ -47,9 +47,12 @@ type meters struct {
 	toolCalls    metric.Int64Counter
 	toolDuration metric.Float64Histogram
 
-	llmCalls    metric.Int64Counter
-	llmDuration metric.Float64Histogram
-	llmTokens   metric.Int64Counter
+	llmCalls     metric.Int64Counter
+	llmDuration  metric.Float64Histogram
+	llmTokens    metric.Int64Counter
+	llmCacheRuns metric.Int64Counter
+
+	recordBytes metric.Int64Counter
 
 	promptTokens metric.Int64Histogram
 }
@@ -128,6 +131,32 @@ func buildInstruments(mp metric.MeterProvider) (*meters, error) {
 		metric.WithUnit("{token}")); err != nil {
 		return nil, err
 	}
+	// Whether the provider reported caching at all, as its own counter.
+	//
+	// The cached-token count goes onto jelly.llm.tokens as kind="cached", but
+	// a counter cannot express "the provider said nothing" — an absent figure
+	// and a zero one both add nothing. This is what separates them: a
+	// dashboard divides cached tokens by the calls where reported=true, so a
+	// provider that reports nothing shows as no coverage rather than as a
+	// cache that is failing.
+	if ms.llmCacheRuns, err = m.Int64Counter("jelly.llm.cache.calls",
+		metric.WithDescription("模型调用数，按提供方是否报告了缓存命中拆分"),
+		metric.WithUnit("{call}")); err != nil {
+		return nil, err
+	}
+	// Bytes through the delivery store, in both directions.
+	//
+	// One counter with a direction attribute rather than two instruments,
+	// because the only interesting number is the ratio: everything a tool
+	// delivered is committed, and what matters is how much of it the model
+	// ever came back for. A store that takes in megabytes and serves nothing
+	// is either working perfectly (nothing needed recovering) or not being
+	// offered at all, and the read side is what tells them apart.
+	if ms.recordBytes, err = m.Int64Counter("jelly.record.bytes",
+		metric.WithDescription("结果存储的字节数，按写入/读回与工具拆分"),
+		metric.WithUnit("By")); err != nil {
+		return nil, err
+	}
 	// Prompt composition is a histogram because the shape matters: the history
 	// share creeping up is the thing to catch, and an average hides it.
 	if ms.promptTokens, err = m.Int64Histogram("jelly.prompt.tokens",
@@ -147,7 +176,66 @@ const (
 	attrKeyModel   = attribute.Key("model")
 	attrKeyKind    = attribute.Key("kind")
 	attrKeyPart    = attribute.Key("part")
+	// reported=false means the provider told us nothing about caching, which
+	// is not the same as a zero hit and must not be averaged in as one.
+	attrKeyReported = attribute.Key("reported")
+	attrKeyDir      = attribute.Key("direction")
 )
+
+// Directions for jelly.record.bytes.
+const (
+	RecordStored = "stored"
+	RecordServed = "served"
+)
+
+// RecordStoreBytes publishes bytes into or out of the delivery store.
+//
+// tool is the tool whose result the bytes belong to, not the reader that
+// fetched them: "how much of get_logs did the model ever come back for" is the
+// question, and attributing a read to read_result would answer a different and
+// useless one.
+func RecordStoreBytes(ctx context.Context, dir, tool string, n int64) {
+	if n <= 0 {
+		return
+	}
+	ms := instruments.Load()
+	if ms == nil {
+		return
+	}
+	ms.recordBytes.Add(ctx, n, metric.WithAttributes(
+		attrKeyDir.String(dir), attrKeyTool.String(tool)))
+}
+
+// RecordCacheUsage publishes one model call's prompt-cache accounting.
+//
+// Called from the model layer rather than from the engine's after-model hook,
+// because by the time usage has been mapped onto genai's metadata the cached
+// count is a plain int32 and "absent" has already collapsed into zero. The
+// distinction only exists at the provider boundary, so that is where it is
+// recorded.
+func RecordCacheUsage(ctx context.Context, model string, promptTokens, cachedTokens int64, known bool) {
+	ms := instruments.Load()
+	if ms == nil {
+		return
+	}
+	ms.llmCacheRuns.Add(ctx, 1, metric.WithAttributes(
+		attrKeyModel.String(model), attrKeyReported.Bool(known)))
+	if !known {
+		// Nothing to publish. Adding zero would be indistinguishable from a
+		// reported miss, which is the confusion this whole path avoids.
+		return
+	}
+	if cachedTokens > 0 {
+		ms.llmTokens.Add(ctx, cachedTokens, metric.WithAttributes(
+			attrKeyModel.String(model), attrKeyKind.String("cached")))
+	}
+	// The uncached remainder, so "what did we actually pay full price for" is
+	// a query rather than a subtraction a dashboard has to get right.
+	if fresh := promptTokens - cachedTokens; fresh > 0 {
+		ms.llmTokens.Add(ctx, fresh, metric.WithAttributes(
+			attrKeyModel.String(model), attrKeyKind.String("uncached")))
+	}
+}
 
 // RecordToolCall publishes one tool invocation.
 //
