@@ -50,6 +50,40 @@ function startEdit(s) {
   })
 }
 
+// Three states, not two. A server nobody has consulted since the process
+// started has reported nothing — and drawing that as healthy is a claim the
+// console cannot make. It is exactly the case that made today's outage look
+// like the agent being unable rather than a host being unreachable.
+function healthLabel(s) {
+  if (s.health === 'down') return '不可用'
+  if (s.health === 'up') return '正常'
+  return '未探测'
+}
+
+function healthClass(s) {
+  if (s.health === 'down') return 'badge-bad'
+  if (s.health === 'up') return 'badge-accent'
+  return ''
+}
+
+function healthTitle(s) {
+  if (s.health === 'down') {
+    const retry = s.retry_at ? `，${fmtTime(s.retry_at)} 后重试` : ''
+    return `${s.health_error || '取工具列表失败'}${retry}\n对话不会中断，但这台服务器的工具本轮不可用。`
+  }
+  if (s.health === 'up') return `最近一次取工具列表成功：${fmtTime(s.checked_at)}`
+  return '本进程启动后还没有对话用到它，所以不知道它是否可用'
+}
+
+function fmtTime(iso) {
+  if (!iso) return ''
+  try {
+    return new Date(iso).toLocaleTimeString('zh-CN', { hour12: false })
+  } catch {
+    return iso
+  }
+}
+
 function cancel() {
   editing.value = false
   error.value = ''
@@ -273,13 +307,20 @@ async function testForm() {
         </div>
       </div>
       <div v-else class="list">
-        <div v-for="s in servers" :key="s.name" class="card srv" :class="{ off: !s.enabled }">
+        <div v-for="s in servers" :key="s.name" class="card srv" :class="{ off: !s.enabled, down: s.enabled && s.health === 'down' }">
           <div class="srv-row">
             <div class="srv-main">
               <div class="srv-head">
                 <span class="srv-name">{{ s.name }}</span>
                 <span class="badge">{{ s.transport }}</span>
                 <span class="badge" :class="s.enabled ? 'badge-accent' : ''">{{ s.enabled ? '已启用' : '已停用' }}</span>
+                <!-- Liveness, so a degraded turn is visible here rather than
+                     only in the process log. "未探测" is its own state and not
+                     a synonym for healthy: a server nothing has consulted yet
+                     has told us nothing. -->
+                <span v-if="s.enabled" class="badge" :class="healthClass(s)" :title="healthTitle(s)">
+                  {{ healthLabel(s) }}
+                </span>
               </div>
               <div class="srv-meta mono dim">
                 {{ s.transport === 'stdio' ? [s.command, ...(s.args || [])].join(' ') : s.url }}
@@ -325,6 +366,14 @@ async function testForm() {
 </template>
 
 <style scoped>
+.srv.down {
+  border-color: var(--danger-border, var(--danger));
+}
+.badge-bad {
+  background: var(--danger-tint);
+  color: var(--danger);
+}
+
 .hint {
   font-size: 12px;
   color: var(--text-muted);

@@ -4,6 +4,8 @@ import { useRouter } from 'vue-router'
 import Icon from '../components/Icon.vue'
 import { api } from '../api'
 import { absTime, relTime } from '../time'
+import AgentTimeline from '../components/AgentTimeline.vue'
+import { emptyTimeline, reduceFrames } from '../timeline'
 
 const PAGE = 50 // sessions per page
 
@@ -116,12 +118,31 @@ async function removeChecked() {
   }
 }
 
+// The stored run, folded by the same reducer the live stream uses.
+//
+// Replay reads /timeline rather than re-deriving a shape from the transcript,
+// so the two views cannot drift: the frames are projected server-side by the
+// function the live path calls, and folded client-side by the function the
+// live path calls. That was the whole point of the frame vocabulary, and until
+// now this page was the half that never got connected — so a finished run
+// showed a flat event list while the same run, live, showed steps.
+const timeline = ref(null)
+
 async function open(id) {
   selected.value = id
   detailLoading.value = true
   detail.value = null
+  timeline.value = null
   try {
     detail.value = await api.session(id)
+    try {
+      const { frames } = await api.sessionTimeline(id)
+      timeline.value = reduceFrames(frames || [], emptyTimeline())
+    } catch {
+      // The transcript below still renders. A replay that cannot be projected
+      // is a degraded view, not a broken page.
+      timeline.value = null
+    }
   } catch (e) {
     error.value = e.message
   } finally {
@@ -257,6 +278,8 @@ function continueChat(id) { router.push({ path: '/chat', query: { session: id } 
             <span class="mono dim">{{ detail.id }}</span>
             <div class="detail-actions"><span class="badge mono">total {{ detail.usage.total }} tok</span><button class="btn btn-sm" @click="continueChat(detail.id)">继续对话</button></div>
           </div>
+          <AgentTimeline v-if="timeline" :timeline="timeline" dense class="detail-tl" />
+
           <div class="transcript">
             <div v-if="!detail.events.length" class="empty"><span class="muted">（空会话）</span></div>
             <div v-for="(ev, i) in detail.events" :key="i" class="ev" :class="ev.role">
@@ -282,6 +305,10 @@ function continueChat(id) { router.push({ path: '/chat', query: { session: id } 
 </template>
 
 <style scoped>
+.detail-tl {
+  margin-bottom: var(--sp-3);
+}
+
 .view {
   display: flex;
   flex-direction: column;

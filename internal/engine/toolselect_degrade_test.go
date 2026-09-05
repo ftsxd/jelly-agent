@@ -74,7 +74,7 @@ func TestADeadMCPServerIsNotRetriedEveryTurn(t *testing.T) {
 // back has to be picked up again, not kept out.
 func TestARecoveredMCPServerComesBack(t *testing.T) {
 	h := newToolsetHealth()
-	h.fail("n9e-mcp")
+	h.fail("n9e-mcp", errors.New("i/o timeout"))
 	if !h.skip("n9e-mcp") {
 		t.Fatal("a just-failed server was not in cooldown")
 	}
@@ -86,7 +86,7 @@ func TestARecoveredMCPServerComesBack(t *testing.T) {
 		t.Error("the cooldown never expires, so a recovered server stays out")
 	}
 
-	h.fail("n9e-mcp")
+	h.fail("n9e-mcp", errors.New("i/o timeout"))
 	h.ok("n9e-mcp")
 	if h.skip("n9e-mcp") {
 		t.Error("a server that answered is still marked down")
@@ -129,4 +129,45 @@ func containsName(names []string, want string) bool {
 		}
 	}
 	return false
+}
+
+// The console has to be able to tell "down" from "we have not looked".
+//
+// A server nothing has consulted since the process started has reported
+// nothing, and drawing that as healthy is a claim the console cannot make. It
+// is exactly the case that made an unreachable host look like the agent simply
+// being unable.
+func TestHealthSnapshotSeparatesDownFromUnknown(t *testing.T) {
+	h := newToolsetHealth()
+	if got := h.snapshot(); len(got) != 0 {
+		t.Errorf("a server nobody consulted appeared in the snapshot: %v", got)
+	}
+
+	h.fail("n9e-mcp", errors.New(`dial tcp 49.234.245.200:443: i/o timeout`))
+	h.ok("k8s-mcp")
+
+	snap := h.snapshot()
+	down, ok := snap["n9e-mcp"]
+	if !ok {
+		t.Fatal("the failing server is missing from the snapshot")
+	}
+	if down.Up {
+		t.Error("a server in cooldown is reported up")
+	}
+	// The reason has to survive: without it the console can say "不可用" but
+	// not why, and the operator is back to reading process logs.
+	if !strings.Contains(down.Error, "i/o timeout") {
+		t.Errorf("error = %q, want the real reason", down.Error)
+	}
+	if down.RetryAt.IsZero() {
+		t.Error("no retry time, so the console cannot say when it will be tried again")
+	}
+
+	up, ok := snap["k8s-mcp"]
+	if !ok || !up.Up || up.Error != "" {
+		t.Errorf("healthy server = %+v", up)
+	}
+	if up.CheckedAt.IsZero() {
+		t.Error("a healthy server has no checked-at, so the console cannot say how fresh that is")
+	}
 }

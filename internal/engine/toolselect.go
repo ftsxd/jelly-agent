@@ -71,7 +71,7 @@ func (s *selectingToolset) Tools(ctx agent.ReadonlyContext) ([]adktool.Tool, err
 			slog.Error("MCP 服务器取工具列表失败，本轮跳过该服务器的工具（对话继续，但它提供的能力暂时不可用）",
 				"server", set.name, "cooldown", toolsetCooldown.String(), logging.Err(err))
 			if s.health != nil {
-				s.health.fail(set.name)
+				s.health.fail(set.name, err)
 			}
 			continue
 		}

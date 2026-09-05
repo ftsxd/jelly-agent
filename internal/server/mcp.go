@@ -5,6 +5,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/jelly-agent/jelly-agent/internal/config"
 	jellymcp "github.com/jelly-agent/jelly-agent/internal/mcp"
@@ -43,15 +44,37 @@ func (s *Server) handleListMCP(w http.ResponseWriter, _ *http.Request) {
 		HeaderKeys []string `json:"header_keys,omitempty"`
 		Enabled    bool     `json:"enabled"`
 		Tools      []string `json:"tools,omitempty"`
+
+		// Liveness, so a degraded turn is visible from the browser. "unknown"
+		// is its own state and not a synonym for healthy: a server nothing has
+		// consulted yet has told us nothing, and drawing it green would be a
+		// claim we cannot make.
+		Health    string `json:"health"` // "up" | "down" | "unknown"
+		Error     string `json:"health_error,omitempty"`
+		RetryAt   string `json:"retry_at,omitempty"`
+		CheckedAt string `json:"checked_at,omitempty"`
 	}
 	servers := s.engine().Config().MCP
+	health := s.engine().MCPHealth()
 	out := make([]mcpDTO, 0, len(servers))
 	for _, m := range servers {
-		out = append(out, mcpDTO{
+		d := mcpDTO{
 			Name: m.Name, Transport: m.Transport, Command: m.Command, Args: m.Args,
 			URL: m.URL, EnvKeys: sortedKeys(m.Env), HeaderKeys: sortedKeys(m.Headers),
-			Enabled: m.Enabled, Tools: m.Tools,
-		})
+			Enabled: m.Enabled, Tools: m.Tools, Health: "unknown",
+		}
+		if h, ok := health[m.Name]; ok {
+			d.CheckedAt = h.CheckedAt.Format(time.RFC3339)
+			if h.Up {
+				d.Health = "up"
+			} else {
+				d.Health, d.Error = "down", h.Error
+				if !h.RetryAt.IsZero() {
+					d.RetryAt = h.RetryAt.Format(time.RFC3339)
+				}
+			}
+		}
+		out = append(out, d)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"servers": out})
 }

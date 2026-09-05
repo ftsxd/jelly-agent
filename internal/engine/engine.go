@@ -449,6 +449,14 @@ func (e *Engine) toolsetHealth() *toolsetHealth {
 	return e.health
 }
 
+// MCPHealth reports what is known about each MCP server's liveness.
+//
+// Exported for the console. A degraded turn is otherwise invisible from the
+// browser: the server is skipped, the model answers without those tools, and
+// "我查不到告警" reads as the agent being unable rather than as a host being
+// unreachable.
+func (e *Engine) MCPHealth() map[string]ServerHealth { return e.toolsetHealth().snapshot() }
+
 // MaxTools exposes the resolved tool budget, for the console's prompt view.
 func (e *Engine) MaxTools() int { return e.maxTools() }
 
