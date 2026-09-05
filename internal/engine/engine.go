@@ -120,6 +120,10 @@ type Engine struct {
 	budgetOnce sync.Once
 	budget     *resultBudget
 
+	// health remembers which MCP servers are not answering.
+	healthOnce sync.Once
+	health     *toolsetHealth
+
 	// recordStore durably keeps tool deliveries so a shortened result can be
 	// read back.
 	recordsOnce sync.Once
@@ -434,6 +438,15 @@ func (e *Engine) admissions() *admissions {
 func (e *Engine) resultBudget() *resultBudget {
 	e.budgetOnce.Do(func() { e.budget = newResultBudget() })
 	return e.budget
+}
+
+// toolsetHealth returns the process-wide MCP liveness record.
+//
+// One per engine, like the admission record: it is keyed by server name and
+// an agent rebuilt per request must not forget that a server is down.
+func (e *Engine) toolsetHealth() *toolsetHealth {
+	e.healthOnce.Do(func() { e.health = newToolsetHealth() })
+	return e.health
 }
 
 // MaxTools exposes the resolved tool budget, for the console's prompt view.
@@ -1113,9 +1126,9 @@ func (e *Engine) buildNode(name, description, provider, instruction string, tool
 		Report:   e.reportUndeclared,
 	}
 	tools = binder.Tools("", tools)
-	bound := make([]adktool.Toolset, 0, len(toolsets))
+	bound := make([]namedSet, 0, len(toolsets))
 	for _, ts := range toolsets {
-		bound = append(bound, binder.Toolset(ts.Name, ts.Set))
+		bound = append(bound, namedSet{name: ts.Name, set: binder.Toolset(ts.Name, ts.Set)})
 	}
 	// One selecting toolset rather than a static tool list plus N toolsets:
 	// the budget is global, and ADK only re-consults toolsets. See
@@ -1126,6 +1139,7 @@ func (e *Engine) buildNode(name, description, provider, instruction string, tool
 		cfg:    selector.Config{MaxTools: e.maxTools()},
 		report: logSelection,
 		admit:  e.admissions(),
+		health: e.toolsetHealth(),
 	}
 
 	beforeTool, afterTool := e.toolCallbacks()

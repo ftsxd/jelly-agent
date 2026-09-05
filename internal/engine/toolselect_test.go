@@ -63,7 +63,7 @@ func TestSelectionRanksRealMCPTools(t *testing.T) {
 	}
 
 	sel := &selectingToolset{
-		sets: []adktool.Toolset{binder.Toolset("k8s", set)},
+		sets: []namedSet{{name: "k8s", set: binder.Toolset("k8s", set)}},
 		cfg:  selector.Config{MaxTools: 2},
 	}
 

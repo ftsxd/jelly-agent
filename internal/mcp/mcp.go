@@ -11,6 +11,7 @@ package mcp
 import (
 	"context"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -130,14 +131,39 @@ func ListTools(ctx context.Context, srv config.MCPServer) ([]ToolInfo, error) {
 // httpClient returns an HTTP client that injects the given headers on every
 // request (e.g. Authorization for a remote MCP server). Returns nil when there
 // are no headers, so the SDK uses its default client.
+// dialTimeout bounds how long a connection attempt waits.
+//
+// http.DefaultTransport allows thirty seconds, and the tool list is fetched
+// once per user message — so a server that has gone away made every turn
+// thirty seconds slower, including turns that would never have called it.
+// Five seconds is generous for a reachable server and quick enough that a
+// dead one is noticed rather than waited on. It pairs with the cooldown in
+// the engine, which stops the attempt being repeated at all for a while.
+const dialTimeout = 5 * time.Second
+
+// transport builds the HTTP transport used for MCP over http/sse.
+//
+// Cloned from the default rather than constructed from scratch, so proxy
+// settings, HTTP/2 and connection pooling keep working; only the dial
+// deadline is ours.
+func transport() *http.Transport {
+	base, ok := http.DefaultTransport.(*http.Transport)
+	if !ok {
+		return &http.Transport{DialContext: (&net.Dialer{Timeout: dialTimeout}).DialContext}
+	}
+	t := base.Clone()
+	t.DialContext = (&net.Dialer{Timeout: dialTimeout, KeepAlive: 30 * time.Second}).DialContext
+	t.TLSHandshakeTimeout = dialTimeout
+	t.ResponseHeaderTimeout = 30 * time.Second
+	return t
+}
+
 func httpClient(headers map[string]string) *http.Client {
-	if len(headers) == 0 {
-		return nil
+	c := &http.Client{Timeout: 60 * time.Second, Transport: transport()}
+	if len(headers) > 0 {
+		c.Transport = &headerRoundTripper{headers: headers, base: c.Transport}
 	}
-	return &http.Client{
-		Timeout:   60 * time.Second,
-		Transport: &headerRoundTripper{headers: headers, base: http.DefaultTransport},
-	}
+	return c
 }
 
 type headerRoundTripper struct {

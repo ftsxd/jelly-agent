@@ -8,6 +8,7 @@ import (
 	"google.golang.org/adk/agent"
 	adktool "google.golang.org/adk/tool"
 
+	"github.com/jelly-agent/jelly-agent/internal/logging"
 	"github.com/jelly-agent/jelly-agent/internal/ops"
 	"github.com/jelly-agent/jelly-agent/internal/selector"
 )
@@ -33,8 +34,11 @@ const defaultMaxTools = 48
 // list held stable through the tool-calling loop is exactly the granularity
 // selection wants: tools must not appear and vanish mid-loop.
 type selectingToolset struct {
-	static []adktool.Tool    // built-ins, already bound to the gateway
-	sets   []adktool.Toolset // MCP servers, already bound
+	static []adktool.Tool // built-ins, already bound to the gateway
+	sets   []namedSet     // MCP servers, already bound
+	// health remembers which servers are not answering, so an unreachable one
+	// is skipped instead of costing a dial timeout on every turn.
+	health *toolsetHealth
 	cfg    selector.Config
 	report func(selector.Result)
 	// admit keeps the set stable across a session's turns. Shared across
@@ -48,9 +52,31 @@ func (s *selectingToolset) Name() string { return "jelly_selector" }
 func (s *selectingToolset) Tools(ctx agent.ReadonlyContext) ([]adktool.Tool, error) {
 	all := slices.Clone(s.static)
 	for _, set := range s.sets {
-		got, err := set.Tools(ctx)
+		// A server that is down must not take the conversation with it.
+		//
+		// This used to return the error, and ADK aborts the invocation on it —
+		// so one unreachable MCP server meant "你好" could not be answered
+		// either. The tools that server offers are unavailable; everything
+		// else, including simply talking, is not. Degrading to the tools that
+		// do answer is the only behaviour that matches what the user asked
+		// for.
+		if s.health != nil && s.health.skip(set.name) {
+			continue
+		}
+		got, err := set.tools(ctx)
 		if err != nil {
-			return nil, err
+			// Loud, because the model will now answer without these tools and
+			// may say it cannot do something it normally can. That is a
+			// degraded answer and the operator has to be able to see why.
+			slog.Error("MCP 服务器取工具列表失败，本轮跳过该服务器的工具（对话继续，但它提供的能力暂时不可用）",
+				"server", set.name, "cooldown", toolsetCooldown.String(), logging.Err(err))
+			if s.health != nil {
+				s.health.fail(set.name)
+			}
+			continue
+		}
+		if s.health != nil {
+			s.health.ok(set.name)
 		}
 		all = append(all, got...)
 	}
