@@ -29,6 +29,8 @@ import (
 	"io"
 	"regexp"
 	"strings"
+
+	"github.com/jelly-agent/jelly-agent/internal/ops"
 )
 
 // Search bounds.
@@ -132,6 +134,10 @@ func (s *Store) Search(ctx context.Context, sc Scope, label, pattern string, opt
 			ErrExpired, Label(seq), expired, res.Bytes)
 	}
 	res.Ref = Label(seq)
+	// The same view the read path uses, so a hit's line number and the totals
+	// both describe the bytes the caller will read back.
+	buf = ops.TextView(buf)
+	res.Bytes = len(buf)
 	if len(buf) > MaxSearchBytes {
 		return SearchResult{}, fmt.Errorf(
 			"record: 结果 %s 有 %d 字节，超出可搜索上限 %d，请改用分段读取", label, len(buf), MaxSearchBytes)

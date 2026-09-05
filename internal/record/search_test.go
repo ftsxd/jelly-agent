@@ -2,6 +2,7 @@ package record
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -285,5 +286,68 @@ func TestReadAndSearchAgreeOnLineCount(t *testing.T) {
 			t.Errorf("payload %q: read says %d lines, search says %d",
 				payload, chunk.Lines, res.Lines)
 		}
+	}
+}
+
+// The end-to-end shape that was broken: a tool's output arrives as one JSON
+// string field, so the log's newlines are stored as backslash-n.
+//
+// Measured on a 60000-line log before the text view existed: read reported one
+// line, search matched the single enormous line once and clipped it to 400
+// characters, and "how many TIMEOUTs" came back as 1 instead of 1622. Counting
+// is the whole reason search reports a total, so this is the case it has to
+// get right.
+func TestSearchCountsLinesInsideAJSONTextEnvelope(t *testing.T) {
+	var b strings.Builder
+	for i := 0; i < 3000; i++ {
+		if i%37 == 0 {
+			b.WriteString("2026-09-04 WARN payment-api TIMEOUT upstream=db-node-3\n")
+		} else {
+			b.WriteString("2026-09-04 INFO payment-api request ok\n")
+		}
+	}
+	log := b.String()
+	want := strings.Count(log, "TIMEOUT")
+
+	payload, err := json.Marshal(map[string]any{"output": log})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, ref := withPayload(t, string(payload))
+
+	res, err := s.Search(t.Context(), scope("s1"), ref, "TIMEOUT", SearchOpts{Limit: 5})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Total != want || !res.Exact {
+		t.Errorf("total = %d (exact=%v), want %d — the envelope was scanned instead of the text",
+			res.Total, res.Exact, want)
+	}
+	if res.Lines != 3000 {
+		t.Errorf("lines = %d, want 3000", res.Lines)
+	}
+	// A hit must be one log line, not a 400-rune slice of the whole payload.
+	if len(res.Hits) == 0 {
+		t.Fatal("no hits")
+	}
+	if h := res.Hits[0]; !strings.Contains(h.Text, "TIMEOUT") || len(h.Text) > 200 {
+		t.Errorf("first hit is %d chars: %.80q", len(h.Text), h.Text)
+	}
+
+	// Read has to agree with it, or an offset from one means something else to
+	// the other.
+	chunk, err := s.ReadLabel(t.Context(), scope("s1"), ref, 0, DefaultWindow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if chunk.Lines != res.Lines {
+		t.Errorf("read says %d lines, search says %d", chunk.Lines, res.Lines)
+	}
+	if chunk.Total != len(log) {
+		t.Errorf("read total = %d, want the %d-byte log rather than the %d-byte envelope",
+			chunk.Total, len(log), len(payload))
+	}
+	if !strings.HasPrefix(string(chunk.Data), "2026-09-04 WARN") {
+		t.Errorf("read returned the envelope, not the text: %.60q", chunk.Data)
 	}
 }

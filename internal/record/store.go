@@ -426,6 +426,16 @@ func (s *Store) read(ctx context.Context, sc Scope, cond string, key any, offset
 			ErrExpired, Label(seq), expired, c.Total)
 	}
 	c.Label = Label(seq)
+	// Read the text, not the envelope. Almost every MCP tool returns its whole
+	// output in one JSON string field, where the newlines are the characters
+	// backslash and n — so without this a 60000-line log is one line, offsets
+	// step through escape sequences, and search has nothing to match on.
+	//
+	// Total is recomputed from the view rather than taken from the bytes
+	// column, because an offset the caller sends back has to mean the same
+	// thing as the total it was compared against.
+	buf = ops.TextView(buf)
+	c.Total = len(buf)
 	c.Lines = ops.CountLines(buf)
 	c.At, _ = time.Parse(time.RFC3339Nano, at)
 

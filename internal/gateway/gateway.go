@@ -497,8 +497,12 @@ func (g *Gateway) ExecuteAs(ctx context.Context, meta CallMeta, ic *ops.Incident
 	}
 	// Recorded before any bounding, so a withheld payload can still report the
 	// scale of what the tool actually produced.
-	ev.FullBytes = len(ev.Data)
-	ev.FullLines = ops.CountLines(ev.Data)
+	// Measured on the text view, because that is what read_result and
+	// search_result will report: an overview saying "1 line" for a log the
+	// readers describe as sixty thousand is worse than no overview.
+	view := ops.TextView(ev.Data)
+	ev.FullBytes = len(view)
+	ev.FullLines = ops.CountLines(view)
 
 	// The operator's explicit ceiling first: it is their number and they may
 	// have a reason this code cannot see.

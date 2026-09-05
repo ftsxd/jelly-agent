@@ -1297,3 +1297,39 @@ func TestAnUnstorableResultIsNeverWithheld(t *testing.T) {
 		t.Error("a failed store reported retrievable")
 	}
 }
+
+// The overview has to describe the same thing read_result and search_result
+// will describe.
+//
+// Almost every MCP tool returns its whole output in one JSON string field, so
+// the text's newlines are stored as backslash-n and the payload is one line
+// however long it is. An overview counting the envelope tells the model "1
+// line" about a log the readers then describe as sixty thousand — and the
+// overview is what it uses to decide whether searching is worth a call.
+func TestTheOverviewCountsTheTextNotTheEnvelope(t *testing.T) {
+	log := strings.Repeat("2026-09-04 WARN payment-api TIMEOUT upstream=db-node-3\n", 4000)
+
+	g := newGW(t, k8sMeta(), &recorder{result: map[string]any{"output": log}}, Policy{})
+	g.results = KeeperFunc(func(context.Context, CallMeta, string, map[string]any) (string, error) {
+		return "e1", nil
+	})
+	g.budget = &budgetOf{room: 100} // far less than the log, so it is withheld
+
+	res, err := g.Execute(context.Background(), prodContext(), ops.OriginModel, "k8s_get_pods", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Evidence.FullLines != 4000 {
+		t.Errorf("overview lines = %d, want 4000 — the JSON envelope was counted, not the log",
+			res.Evidence.FullLines)
+	}
+	// Bytes likewise: the escaped envelope is larger than the text it wraps,
+	// and the two numbers have to describe one thing.
+	if res.Evidence.FullBytes != len(log) {
+		t.Errorf("overview bytes = %d, want the %d-byte log", res.Evidence.FullBytes, len(log))
+	}
+	ov, _ := toolPayload(res.Evidence)["overview"].(map[string]any)
+	if ov == nil || ov["lines"] != 4000 {
+		t.Errorf("what the model reads says %v lines", ov["lines"])
+	}
+}
