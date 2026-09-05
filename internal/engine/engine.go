@@ -983,19 +983,33 @@ const historyShare = 0.6
 
 // historyBudgetFor resolves the conversation budget.
 //
-// An explicit setting always wins: it is the operator's number and they may
-// have a reason this code cannot see. Otherwise it is derived from what the
-// provider says its model accepts. Zero means neither is available, which
-// leaves the history package's own default to apply — a fallback rather than a
-// guess, because a wrong window is worse than an admittedly generic one.
+// An explicit setting wins: it is the operator's number and they may have a
+// reason this code cannot see. Otherwise it is derived from what the provider
+// says its model accepts. Zero means neither is available, which leaves the
+// history package's own default to apply — a fallback rather than a guess,
+// because a wrong window is worse than an admittedly generic one.
+//
+// The one explicit value that cannot be meant is a budget larger than the
+// window. It does not say "compact later"; it says "never compact", and the
+// conversation then grows until the provider rejects the request outright.
+// "Never compact" is already expressible as an explicit zero, so a number
+// above the window is a mistake rather than a preference — and a silent one,
+// because it only shows up as a 400 on a long session. Found in a real
+// deployment: history.max_tokens was ten million against a one-million window.
 func (e *Engine) historyBudgetFor(contextWindow int) int {
+	derived := 0
+	if contextWindow > 0 {
+		derived = int(float64(contextWindow) * historyShare)
+	}
 	if n := e.cfg.History.MaxTokens; n != nil {
+		if *n > 0 && contextWindow > 0 && *n > contextWindow {
+			slog.Warn("history.max_tokens 超过模型上下文窗口，已按窗口比例改用推导值——历史将永不压缩，长会话会被 provider 直接拒绝；请删掉这个设置，或改成不超过窗口的值（显式 0 才表示关闭压缩）",
+				"history.max_tokens", *n, "context_window", contextWindow, "改用", derived)
+			return derived
+		}
 		return *n
 	}
-	if contextWindow > 0 {
-		return int(float64(contextWindow) * historyShare)
-	}
-	return 0
+	return derived
 }
 
 // withCompaction layers conversation compaction over the raw LLM so a long

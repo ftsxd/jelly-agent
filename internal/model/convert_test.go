@@ -181,9 +181,9 @@ func TestToolParameters_GenaiSchemaLowercased(t *testing.T) {
 		},
 	}
 
-	params, ok := toolParameters(decl).(map[string]any)
+	params, ok := ToolParameters(decl).(map[string]any)
 	if !ok {
-		t.Fatalf("want map params, got %T", toolParameters(decl))
+		t.Fatalf("want map params, got %T", ToolParameters(decl))
 	}
 	if params["type"] != "object" {
 		t.Errorf("top type = %v, want object", params["type"])

@@ -1177,7 +1177,7 @@ func TestRetrievableIsReportedWhenAHandleExists(t *testing.T) {
 
 // budgetOf grants the first n estimated tokens of the round and withholds the
 // rest.
-type budgetOf struct{ room int }
+type budgetOf struct{ room, charged int }
 
 func (b *budgetOf) Fits(_ context.Context, _ CallMeta, payload []byte) bool {
 	if n := tokens.EstimateBytes(payload); n <= b.room {
@@ -1185,6 +1185,13 @@ func (b *budgetOf) Fits(_ context.Context, _ CallMeta, payload []byte) bool {
 		return true
 	}
 	return false
+}
+
+func (b *budgetOf) Cost(payload []byte) int { return tokens.EstimateBytes(payload) }
+
+func (b *budgetOf) Charge(_ context.Context, _ CallMeta, payload []byte) {
+	b.charged += tokens.EstimateBytes(payload)
+	b.room -= tokens.EstimateBytes(payload)
 }
 
 // A payload that does not fit is withheld whole, and what reaches the model is
@@ -1332,4 +1339,128 @@ func TestTheOverviewCountsTheTextNotTheEnvelope(t *testing.T) {
 	if ov == nil || ov["lines"] != 4000 {
 		t.Errorf("what the model reads says %v lines", ov["lines"])
 	}
+}
+
+// The budget has to weigh what the model receives, not just the payload.
+//
+// A response carries a summary, a handle, an overview and a note as well as
+// the data. Sized so the two behaviours differ: the payload alone fits the
+// round, the whole response does not. Measuring only ev.Data admits it and
+// the request goes over the window — the 400 this work exists to prevent.
+func TestTheBudgetWeighsTheWholeResponse(t *testing.T) {
+	log := strings.Repeat("2026-09-04 WARN payment-api TIMEOUT db-node-3\n", 1200) // ~54KB
+	g := newGW(t, k8sMeta(), &recorder{result: map[string]any{"output": log}}, Policy{})
+	g.results = KeeperFunc(func(context.Context, CallMeta, string, map[string]any) (string, error) {
+		return "e1", nil
+	})
+
+	// Measure the two candidates directly, then set the room between them.
+	probe := &ops.Evidence{ID: "e1", Summary: "s", Data: mustJSON(t, map[string]any{"output": log}), Retrievable: true}
+	dataOnly := tokens.EstimateBytes(probe.Data)
+	whole := tokens.EstimateBytes(payloadBytes(probe))
+	if whole <= dataOnly {
+		t.Fatalf("precondition: whole response (%d) should exceed the payload (%d)", whole, dataOnly)
+	}
+	g.budget = &budgetOf{room: (dataOnly + whole) / 2}
+
+	res, err := g.Execute(context.Background(), prodContext(), ops.OriginModel, "k8s_get_pods", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Evidence.Withheld {
+		t.Errorf("the payload (%d tokens) was admitted into a round with room for %d, "+
+			"because only the payload was weighed and not the %d-token response",
+			dataOnly, (dataOnly+whole)/2, whole)
+	}
+}
+
+// When space is very tight the preview goes too, and the handle stays.
+func TestAVeryTightRoundDropsThePreviewButKeepsTheHandle(t *testing.T) {
+	log := strings.Repeat("2026-09-04 WARN payment-api TIMEOUT db-node-3\n", 1200)
+	g := newGW(t, k8sMeta(), &recorder{result: map[string]any{"output": log}}, Policy{})
+	g.results = KeeperFunc(func(context.Context, CallMeta, string, map[string]any) (string, error) {
+		return "e1", nil
+	})
+
+	data := mustJSON(t, map[string]any{"output": log})
+	held := &ops.Evidence{ID: "e1", Summary: "s", Retrievable: true, Withheld: true,
+		Preview: previewOf(data), FullBytes: len(data), FullLines: 1200}
+	bare := *held
+	bare.Preview = ""
+	withPreview := tokens.EstimateBytes(payloadBytes(held))
+	without := tokens.EstimateBytes(payloadBytes(&bare))
+	if without >= withPreview {
+		t.Fatalf("precondition: dropping the preview should shrink the response (%d vs %d)", without, withPreview)
+	}
+	// Room for the bare overview but not for the preview alongside it.
+	g.budget = &budgetOf{room: (without + withPreview) / 2}
+
+	res, err := g.Execute(context.Background(), prodContext(), ops.OriginModel, "k8s_get_pods", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := toolPayload(res.Evidence)
+	if p, _ := out["preview"].(string); p != "" {
+		t.Errorf("a %d-token preview was sent into a round with room for %d",
+			withPreview-without, (without+withPreview)/2)
+	}
+	if out["evidence_id"] == "" || out["retrievable"] != true {
+		t.Error("the handle was dropped; the result is now unrecoverable as well as absent")
+	}
+	if _, present := out["overview"]; !present {
+		t.Error("no overview, so the model cannot tell how much it is missing")
+	}
+}
+
+// Withholding is not always a saving. A small payload wrapped in a preview, an
+// overview and the note explaining them comes out larger than the payload it
+// replaced. Doing it anyway would cost the round more and tell the model less.
+func TestASmallResultIsNotWithheldWhenWithholdingWouldCostMore(t *testing.T) {
+	small := map[string]any{"output": strings.Repeat("x", 400)}
+	g := newGW(t, k8sMeta(), &recorder{result: small}, Policy{})
+	g.results = KeeperFunc(func(context.Context, CallMeta, string, map[string]any) (string, error) {
+		return "e1", nil
+	})
+	g.budget = &budgetOf{room: 1} // nothing fits, so the choice is by size alone
+
+	res, err := g.Execute(context.Background(), prodContext(), ops.OriginModel, "k8s_get_pods", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Evidence.Withheld {
+		t.Error("a small payload was withheld into a larger response than it replaced")
+	}
+	if len(res.Evidence.Data) == 0 {
+		t.Error("the payload was dropped even though sending it was the cheaper option")
+	}
+}
+
+// Several withheld results in one round must not each look free.
+func TestWithheldResultsAccumulateAgainstTheRound(t *testing.T) {
+	log := strings.Repeat("2026-09-04 WARN payment-api TIMEOUT db-node-3\n", 5000)
+	b := &budgetOf{room: 4000}
+	g := newGW(t, k8sMeta(), &recorder{result: map[string]any{"output": log}}, Policy{})
+	g.results = KeeperFunc(func(context.Context, CallMeta, string, map[string]any) (string, error) {
+		return "e1", nil
+	})
+	g.budget = b
+
+	start := b.room
+	for i := 0; i < 5; i++ {
+		if _, err := g.Execute(context.Background(), prodContext(), ops.OriginModel, "k8s_get_pods", nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if b.room >= start {
+		t.Errorf("five withheld results left the room at %d, unchanged from %d", b.room, start)
+	}
+}
+
+func mustJSON(t *testing.T, v any) []byte {
+	t.Helper()
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
 }

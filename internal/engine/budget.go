@@ -34,6 +34,8 @@ import (
 
 	adkmodel "google.golang.org/adk/model"
 
+	jellymodel "github.com/jelly-agent/jelly-agent/internal/model"
+
 	"github.com/jelly-agent/jelly-agent/internal/gateway"
 	"github.com/jelly-agent/jelly-agent/internal/tokens"
 )
@@ -134,10 +136,30 @@ func (b *resultBudget) Fits(_ context.Context, meta gateway.CallMeta, payload []
 		b.byID[meta.InvocationID] = room - want
 		return true
 	}
-	// Does not fit. Nothing is deducted: the payload is withheld whole, so it
-	// costs the prompt only its overview, and a sibling call in the same round
-	// that does fit should still get through.
+	// Does not fit. Nothing is deducted here: the caller will come back with
+	// the smaller shape it actually sends and charge that, and a sibling call
+	// in the same round that does fit should still get through.
 	return false
+}
+
+// Cost implements gateway.ResultBudget.
+func (b *resultBudget) Cost(payload []byte) int { return tokens.EstimateBytes(payload) }
+
+// Charge implements gateway.ResultBudget.
+//
+// Allowed to drive the room negative — clamping would say there is space when
+// there is not, and the next call in the round has to see the truth. observe
+// clamps at the start of each round, so a deficit does not carry forward.
+func (b *resultBudget) Charge(_ context.Context, meta gateway.CallMeta, payload []byte) {
+	if meta.InvocationID == "" {
+		return
+	}
+	spend := tokens.EstimateBytes(payload)
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if room, tracked := b.byID[meta.InvocationID]; tracked {
+		b.byID[meta.InvocationID] = room - spend
+	}
 }
 
 func (b *resultBudget) evictIfFullLocked() {
@@ -212,10 +234,12 @@ func requestTexts(req *adkmodel.LLMRequest) []string {
 					continue
 				}
 				out = append(out, d.Name, d.Description)
-				if d.Parameters != nil {
-					if b, err := json.Marshal(d.Parameters); err == nil {
-						out = append(out, string(b))
-					}
+				// The same selection the wire format makes, not a guess at
+				// it: counting only Parameters missed the whole schema of
+				// every tool that carries the JSON-schema form, which is what
+				// functiontool emits and what MCP tools arrive as.
+				if b, err := json.Marshal(jellymodel.ToolParameters(d)); err == nil {
+					out = append(out, string(b))
 				}
 			}
 		}

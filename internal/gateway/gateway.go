@@ -516,12 +516,15 @@ func (g *Gateway) ExecuteAs(ctx context.Context, meta CallMeta, ic *ops.Incident
 	// about to join. Only asked when the bytes are recoverable — withholding a
 	// payload the model cannot get back is destroying an observation, not
 	// budgeting one.
+	//
+	// Measured on the whole response, not on ev.Data. The model also receives
+	// the summary, the handle, the overview, the note and the status fields,
+	// and a withheld result still sends all of those plus a preview. Charging
+	// only the payload let that ride free, so several withheld results in one
+	// round each cost nothing on paper while pushing the request over the
+	// window in fact.
 	if g.budget != nil && len(ev.Data) > 0 && call.Retrievable {
-		if !g.budget.Fits(ctx, meta, ev.Data) {
-			ev.Preview = previewOf(ev.Data)
-			ev.Data = nil
-			ev.Withheld = true
-		}
+		g.fitResponse(ctx, meta, ev)
 	}
 	if bounded, cut := boundSummary(ev.Summary, m.MaxResultBytes); cut {
 		// Recorded separately from Truncated. A summary is a one-line preview

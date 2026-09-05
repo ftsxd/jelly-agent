@@ -118,7 +118,7 @@ func toOpenAITools(req *adkmodel.LLMRequest) []openai.Tool {
 				Function: &openai.FunctionDefinition{
 					Name:        decl.Name,
 					Description: decl.Description,
-					Parameters:  toolParameters(decl),
+					Parameters:  ToolParameters(decl),
 				},
 			})
 		}
@@ -126,11 +126,19 @@ func toOpenAITools(req *adkmodel.LLMRequest) []openai.Tool {
 	return tools
 }
 
-// toolParameters extracts a JSON-schema object for the tool parameters,
+// ToolParameters extracts a JSON-schema object for the tool parameters,
 // preferring the JSON-schema form that functiontool emits, then the genai
 // Schema, and finally an empty object so providers that require a schema are
 // satisfied.
-func toolParameters(decl *genai.FunctionDeclaration) any {
+//
+// Exported because the result budget has to estimate the same bytes this
+// sends. It did not: it counted only Parameters, while this prefers
+// ParametersJsonSchema — so an MCP tool carrying the JSON-schema form had its
+// entire schema missing from the estimate, the prompt was reported smaller
+// than it is, and a result was admitted that pushed the request past the
+// window. Two places choosing a schema is two places to get it wrong; there is
+// now one.
+func ToolParameters(decl *genai.FunctionDeclaration) any {
 	if decl.ParametersJsonSchema != nil {
 		return decl.ParametersJsonSchema
 	}

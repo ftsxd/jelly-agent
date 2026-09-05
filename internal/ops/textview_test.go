@@ -78,3 +78,54 @@ func TestTheDominantFieldWinsWhateverItIsCalled(t *testing.T) {
 		}
 	}
 }
+
+// Escape-dense text must still be recognised as the payload's content.
+//
+// The share has to be measured on the field as encoded, not as decoded.
+// Escapes make the two diverge badly, and log lines are the escape-dense case
+// by construction — every line ends in one. Measured: 3000 bytes of text that
+// is one third newlines encodes to 4013 bytes, which put the decoded text at
+// 74.8% of the payload and sent a 1000-line log back to being one line.
+func TestEscapeDenseTextIsStillRecognised(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		line string
+	}{
+		{"短行，三分之一是换行", "xx\n"},
+		{"每行都带引号", `say "hi"` + "\n"},
+		{"每行都带反斜杠", `C:\path\to\thing` + "\n"},
+		{"制表符分隔", "a\tb\tc\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := strings.Repeat(tc.line, 1000)
+			payload, err := json.Marshal(map[string]any{"output": body})
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := TextView(payload)
+			if string(got) != body {
+				t.Errorf("view is %d bytes, want the %d-byte text (envelope is %d bytes, decoded share %.1f%%)",
+					len(got), len(body), len(payload),
+					100*float64(len(body))/float64(len(payload)))
+			}
+			if n := CountLines(got); n != 1000 {
+				t.Errorf("lines = %d, want 1000", n)
+			}
+		})
+	}
+}
+
+// The guard still has to hold: a payload whose fields are all small must not
+// be reduced to whichever happens to be biggest, however escape-heavy it is.
+func TestTheGuardSurvivesTheEncodedComparison(t *testing.T) {
+	payload, err := json.Marshal(map[string]any{
+		"status": "degraded\n", "region": "cn-north\n", "owner": "payments\n",
+		"note": strings.Repeat("a\n", 30), "detail": strings.Repeat("b\n", 30),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := TextView(payload); string(got) != string(payload) {
+		t.Errorf("a payload with no dominant field was reduced to %d bytes", len(got))
+	}
+}

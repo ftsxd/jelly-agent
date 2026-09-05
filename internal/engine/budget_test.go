@@ -4,6 +4,9 @@ import (
 	"strings"
 	"testing"
 
+	adkmodel "google.golang.org/adk/model"
+	"google.golang.org/genai"
+
 	"github.com/jelly-agent/jelly-agent/internal/gateway"
 )
 
@@ -168,5 +171,46 @@ func TestPromptEstimateCountsMoreThanTheMessages(t *testing.T) {
 	})
 	if withSchemas <= msgs {
 		t.Errorf("schemas added %d tokens", withSchemas-msgs)
+	}
+}
+
+// The prompt estimate must count the schema the wire format actually sends.
+//
+// It preferred ParametersJsonSchema while the estimate counted only
+// Parameters, so an MCP tool carrying the JSON-schema form — which is what
+// functiontool emits, and what MCP tools arrive as — had its entire schema
+// missing from the estimate. The prompt was then reported far smaller than the
+// provider would bill, and the budget derived from it admitted results that
+// pushed the request past the window: the same 400 this work exists to prevent.
+func TestPromptEstimateCountsTheSchemaThatIsActuallySent(t *testing.T) {
+	schema := map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"service": map[string]any{"type": "string", "description": strings.Repeat("说明文字。", 60)},
+			"since":   map[string]any{"type": "string", "description": strings.Repeat("时间范围。", 60)},
+		},
+		"required": []any{"service"},
+	}
+	req := &adkmodel.LLMRequest{Config: &genai.GenerateContentConfig{
+		Tools: []*genai.Tool{{FunctionDeclarations: []*genai.FunctionDeclaration{{
+			Name: "get_service_logs", Description: "读取日志",
+			// Only the JSON-schema form, which is the shape that was invisible.
+			ParametersJsonSchema: schema,
+		}}}},
+	}}
+
+	got := promptTokensOf(requestTexts(req))
+	bare := promptTokensOf(requestTexts(&adkmodel.LLMRequest{Config: &genai.GenerateContentConfig{
+		Tools: []*genai.Tool{{FunctionDeclarations: []*genai.FunctionDeclaration{{
+			Name: "get_service_logs", Description: "读取日志",
+		}}}},
+	}}))
+	if got <= bare {
+		t.Fatalf("a tool with a %d-field JSON schema estimated %d tokens, the same as one with no schema (%d)",
+			len(schema), got, bare)
+	}
+	// And it must be the real size, not a token or two of placeholder.
+	if got-bare < 100 {
+		t.Errorf("the schema added only %d tokens; it is hundreds of characters", got-bare)
 	}
 }

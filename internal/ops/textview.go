@@ -30,6 +30,13 @@ import (
 // A tool returning several meaningful fields must not have all but the largest
 // silently dropped, so this is deliberately high: at four fifths, what is
 // discarded is punctuation and a key or two, not content.
+//
+// The share is measured on the field as encoded, not as decoded. Escapes make
+// the two diverge badly: 3000 bytes of text that is one third newlines encodes
+// to 4013 bytes, so comparing the decoded 3000 against the encoded envelope
+// puts it at 74.8% and the whole log goes back to being scanned as one line.
+// Encoded against encoded is the comparison that means something — it asks
+// what share of the payload this field occupies, which is the actual question.
 const textShare = 0.8
 
 // TextView returns the payload as the text a reader should scan.
@@ -45,21 +52,23 @@ func TextView(payload []byte) []byte {
 	if err := json.Unmarshal(payload, &obj); err != nil {
 		return payload
 	}
-	best := ""
+	var best json.RawMessage
 	for _, raw := range obj {
 		if len(raw) == 0 || raw[0] != '"' {
 			continue
 		}
-		var s string
-		if err := json.Unmarshal(raw, &s); err != nil {
-			continue
-		}
-		if len(s) > len(best) {
-			best = s
+		if len(raw) > len(best) {
+			best = raw
 		}
 	}
 	if float64(len(best)) < float64(len(payload))*textShare {
 		return payload
 	}
-	return []byte(best)
+	// Decoded only once the field has been chosen, so a large payload is not
+	// unquoted several times just to compare sizes.
+	var text string
+	if err := json.Unmarshal(best, &text); err != nil {
+		return payload
+	}
+	return []byte(text)
 }
