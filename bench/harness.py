@@ -3,9 +3,21 @@
 
 Three groups, each run against the new path and against the baseline. The
 baseline is not a different binary: it is the same one with no context_window
-configured, which is exactly the behaviour before the dynamic budget existed —
-no window means no budget to compute, so every payload goes into the prompt
-whole. It is also what the deployed config looks like today.
+configured. No window means no budget to compute, so every payload goes into
+the prompt whole and only history compaction stands between a large result and
+the window.
+
+That last clause is the whole point of the comparison, and getting it wrong
+once already invalidated a set of numbers. The first runs were made against a
+config that also carried history.max_tokens: 10000000 — a budget above the
+window, which turns compaction off. The baseline then failed every large case
+with a 400, and the failure was reported as "the result budget is what makes
+this possible". It was not: it was the misconfigured history budget. With
+compaction at its default the baseline completes the same cases, and what the
+result budget actually buys is visible in the cost, not in the pass rate.
+
+So the baseline must be run with a sane history budget, or it is measuring a
+misconfiguration rather than an absence.
 
 Answers are planted in the synthetic log (see fake_logs_mcp.py) so "correct"
 is checkable rather than eyeballed.
