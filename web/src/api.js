@@ -1,8 +1,12 @@
 // API client for the jelly-agent backend. Relative URLs so it works both behind
 // the embedded server and the Vite dev proxy.
 
-async function jget(path) {
-  const res = await fetch(path)
+// signal is optional and threaded through so a caller can abandon a request
+// it no longer wants — switching sessions while one is in flight, mainly. A
+// guard on the response alone leaves the request running and the connection
+// held; aborting says so to the browser as well.
+async function jget(path, signal) {
+  const res = await fetch(path, signal ? { signal } : undefined)
   const body = await res.json().catch(() => ({}))
   if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`)
   return body
@@ -53,13 +57,13 @@ export const api = {
   setHistory: (body) => jput('/api/history', body),
   sessions: (limit = 50, offset = 0) => jget(`/api/sessions?limit=${limit}&offset=${offset}`),
   sessionIds: () => jget('/api/sessions/ids'),
-  session: (id) => jget(`/api/sessions/${encodeURIComponent(id)}`),
+  session: (id, signal) => jget(`/api/sessions/${encodeURIComponent(id)}`, signal),
   // The run as a frame list, folded by timeline.js — the same vocabulary the
   // live stream sends, so replay and live share one reducer.
   // The fixed part of every prompt and what it costs. Answers "what do we
   // inject?", which the per-turn token figure cannot.
   prompt: (provider = '') => jget(`/api/prompt${provider ? `?provider=${encodeURIComponent(provider)}` : ''}`),
-  sessionTimeline: (id) => jget(`/api/sessions/${encodeURIComponent(id)}/timeline`),
+  sessionTimeline: (id, signal) => jget(`/api/sessions/${encodeURIComponent(id)}/timeline`, signal),
   deleteSession: (id) => jdelete(`/api/sessions/${encodeURIComponent(id)}`),
   deleteSessions: (ids) => jpost('/api/sessions/delete', { ids }),
   skills: () => jget('/api/skills'),

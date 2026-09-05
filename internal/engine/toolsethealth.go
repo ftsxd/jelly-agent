@@ -15,6 +15,7 @@ package engine
 // instantly in between.
 
 import (
+	"context"
 	"sync"
 	"time"
 
@@ -113,6 +114,19 @@ func (h *toolsetHealth) ok(name string) {
 	h.seen[name] = time.Now()
 }
 
+// discoverTimeout bounds listing a server's tools.
+//
+// Removing the transport's request deadline was right for tool execution — a
+// log query over a wide window legitimately takes a minute — but discovery is
+// not execution. The gateway's per-tool timeout only covers a call; nothing
+// covered the handshake and the list that precede it. A host that connects,
+// completes TLS and then simply never answers left the turn, and every merged
+// waiter behind it, hanging indefinitely.
+//
+// Twenty seconds is far more than a handshake and a list should need, and far
+// less than a conversation should wait to find out a server is mute.
+const discoverTimeout = 20 * time.Second
+
 // listing collapses concurrent tool-list fetches for one server.
 //
 // The cooldown only helps once a failure has been recorded. Before that — the
@@ -120,6 +134,17 @@ func (h *toolsetHealth) ok(name string) {
 // once — every one of them dials it in parallel and every one waits. They are
 // asking the same question of the same server at the same moment, so one
 // answer serves all of them.
+//
+// Two things the first version got wrong, both from sharing the leader's
+// context with everyone behind it. A caller that gave up took the shared
+// fetch down with it: the survivors inherited "context canceled", saw only
+// the built-in tools, and marked a perfectly healthy server down for a
+// minute. And a waiter could not leave on its own cancellation, because it
+// was parked on a channel with nothing else to select on.
+//
+// So the merged fetch runs on its own lifetime — the caller's values, none of
+// the caller's cancellation, and a deadline of its own — and each waiter
+// leaves when its own context says to.
 //
 // Deliberately not a cache: the result is shared only for the duration of one
 // in-flight call. Holding it any longer would freeze a tool list that is meant
@@ -137,24 +162,60 @@ type listingCall struct {
 
 func newListing() *listing { return &listing{calls: map[string]*listingCall{}} }
 
-func (l *listing) do(name string, fn func() ([]adktool.Tool, error)) ([]adktool.Tool, error) {
+// do runs fn for name, or joins an in-flight run of it.
+//
+// fn is handed a context that outlives whichever caller happened to start it,
+// so one caller walking away does not fail the rest.
+func (l *listing) do(ctx context.Context, name string, fn func(context.Context) ([]adktool.Tool, error)) ([]adktool.Tool, error) {
 	l.mu.Lock()
 	if c, running := l.calls[name]; running {
 		l.mu.Unlock()
-		<-c.done
-		return c.tools, c.err
+		return c.wait(ctx)
 	}
 	c := &listingCall{done: make(chan struct{})}
 	l.calls[name] = c
 	l.mu.Unlock()
 
-	c.tools, c.err = fn()
+	go func() {
+		defer close(c.done)
+		// Values carried, cancellation dropped, deadline ours. A leader that
+		// goes away must not cancel the answer everyone else is waiting for.
+		base := context.WithoutCancel(orBackground(ctx))
+		run, cancel := context.WithTimeout(base, discoverTimeout)
+		defer cancel()
 
-	l.mu.Lock()
-	delete(l.calls, name)
-	l.mu.Unlock()
-	close(c.done)
-	return c.tools, c.err
+		c.tools, c.err = fn(run)
+
+		l.mu.Lock()
+		delete(l.calls, name)
+		l.mu.Unlock()
+	}()
+
+	return c.wait(ctx)
+}
+
+// wait blocks for the shared answer, or for this caller's own context.
+func (c *listingCall) wait(ctx context.Context) ([]adktool.Tool, error) {
+	if ctx == nil {
+		<-c.done
+		return c.tools, c.err
+	}
+	select {
+	case <-c.done:
+		return c.tools, c.err
+	case <-ctx.Done():
+		// This caller is leaving; the fetch continues for the others. The
+		// error is the caller's own, which is how the call site knows not to
+		// blame the server for it.
+		return nil, ctx.Err()
+	}
+}
+
+func orBackground(ctx context.Context) context.Context {
+	if ctx == nil {
+		return context.Background()
+	}
+	return ctx
 }
 
 // namedSet pairs a bound toolset with the server it came from, so a failure
@@ -167,4 +228,31 @@ type namedSet struct {
 
 func (n namedSet) tools(ctx agent.ReadonlyContext) ([]adktool.Tool, error) {
 	return n.set.Tools(ctx)
+}
+
+// withDeadline substitutes a context's lifetime while keeping everything ADK
+// reads off the original.
+//
+// ReadonlyContext embeds context.Context, so the toolset's HTTP calls inherit
+// whichever cancellation and deadline it carries. The merged fetch needs its
+// own — the caller's values, none of the caller's cancellation, a deadline of
+// its own — and this is the only seam where that can be substituted.
+type withDeadlineCtx struct {
+	agent.ReadonlyContext
+	run context.Context
+}
+
+func (w withDeadlineCtx) Deadline() (time.Time, bool) { return w.run.Deadline() }
+func (w withDeadlineCtx) Done() <-chan struct{}       { return w.run.Done() }
+func (w withDeadlineCtx) Err() error                  { return w.run.Err() }
+
+// Value still comes from the run context, which was derived from the original
+// with WithoutCancel — so ADK's values are all still there.
+func (w withDeadlineCtx) Value(key any) any { return w.run.Value(key) }
+
+func withDeadline(orig agent.ReadonlyContext, run context.Context) agent.ReadonlyContext {
+	if orig == nil || run == nil {
+		return orig
+	}
+	return withDeadlineCtx{ReadonlyContext: orig, run: run}
 }

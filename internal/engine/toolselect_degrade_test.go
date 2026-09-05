@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"sync"
@@ -216,7 +217,7 @@ func TestConcurrentTurnsShareOneToolListing(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			_, _ = l.do("n9e-mcp", func() ([]adktool.Tool, error) {
+			_, _ = l.do(context.Background(), "n9e-mcp", func(context.Context) ([]adktool.Tool, error) {
 				calls.Add(1)
 				<-release // hold every caller inside the one in-flight fetch
 				return nil, errors.New("i/o timeout")
@@ -235,7 +236,7 @@ func TestConcurrentTurnsShareOneToolListing(t *testing.T) {
 	}
 
 	// And it is not a cache: the next round fetches again.
-	_, _ = l.do("n9e-mcp", func() ([]adktool.Tool, error) { calls.Add(1); return nil, nil })
+	_, _ = l.do(context.Background(), "n9e-mcp", func(context.Context) ([]adktool.Tool, error) { calls.Add(1); return nil, nil })
 	if n := calls.Load(); n != 2 {
 		t.Errorf("a later call reused a finished result (%d calls); the tool list must be re-read per turn", n)
 	}
@@ -286,5 +287,150 @@ func TestConcurrentTurnsShareOneDialThroughTheToolset(t *testing.T) {
 
 	if n := blocked.calls.Load(); n != 1 {
 		t.Errorf("eight concurrent turns dialled %d times, want 1", n)
+	}
+}
+
+// A caller that gives up must not take the shared fetch down with it.
+//
+// The first version handed the leader's context to the merged call, so when
+// the leader was cancelled the survivors inherited "context canceled", saw
+// only the built-in tools, and marked a perfectly healthy server down for a
+// minute — because of a conversation that had nothing to do with it.
+func TestACancellingCallerDoesNotPoisonTheOthers(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var sawCancel atomic.Bool
+
+	l := newListing()
+	fetch := func(run context.Context) ([]adktool.Tool, error) {
+		close(started)
+		<-release
+		if run.Err() != nil {
+			sawCancel.Store(true)
+			return nil, run.Err()
+		}
+		return []adktool.Tool{&stubTool{name: "get_pods"}}, nil
+	}
+
+	leaderCtx, cancelLeader := context.WithCancel(context.Background())
+	// The leader's own outcome is not the subject here — it left, so it gets
+	// its own cancellation. What matters is what the survivor gets.
+	leaderDone := make(chan struct{})
+	go func() { defer close(leaderDone); _, _ = l.do(leaderCtx, "k8s-mcp", fetch) }()
+	<-started
+
+	var wg sync.WaitGroup
+	var survivorTools []adktool.Tool
+	var survivorErr error
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		survivorTools, survivorErr = l.do(context.Background(), "k8s-mcp", fetch)
+	}()
+
+	cancelLeader() // the leader walks away
+	time.Sleep(20 * time.Millisecond)
+	close(release)
+	wg.Wait()
+
+	if sawCancel.Load() {
+		t.Error("the merged fetch inherited the leader's cancellation")
+	}
+	if survivorErr != nil {
+		t.Errorf("a survivor got %v; the server was fine, another caller merely left", survivorErr)
+	}
+	if len(survivorTools) != 1 {
+		t.Errorf("survivor got %d tools, want the server's answer", len(survivorTools))
+	}
+	<-leaderDone
+}
+
+// And a waiter must be able to leave on its own context rather than being
+// parked on a channel with nothing else to select on.
+func TestAWaiterLeavesOnItsOwnCancellation(t *testing.T) {
+	release := make(chan struct{})
+	defer close(release)
+	started := make(chan struct{})
+
+	l := newListing()
+	go func() {
+		_, _ = l.do(context.Background(), "k8s-mcp", func(context.Context) ([]adktool.Tool, error) {
+			close(started)
+			<-release
+			return nil, nil
+		})
+	}()
+	<-started
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := l.do(ctx, "k8s-mcp", func(context.Context) ([]adktool.Tool, error) { return nil, nil })
+		done <- err
+	}()
+	cancel()
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("waiter returned %v, want its own context error", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("a cancelled waiter stayed parked on the shared fetch")
+	}
+}
+
+// A caller's own cancellation must not be recorded as a server fault.
+func TestACancelledTurnDoesNotMarkTheServerDown(t *testing.T) {
+	blocked := &blockingSet{release: make(chan struct{})}
+	defer close(blocked.release)
+	h := newToolsetHealth()
+	sel := &selectingToolset{
+		static:   []adktool.Tool{&stubTool{name: "web_search"}},
+		sets:     []namedSet{{name: "k8s-mcp", set: blocked}},
+		health:   h,
+		inflight: newListing(),
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = sel.Tools(&askingCtx{StrictContextMock: agent.StrictContextMock{Ctx: ctx}})
+	}()
+	for i := 0; i < 500 && blocked.calls.Load() == 0; i++ {
+		time.Sleep(time.Millisecond)
+	}
+	cancel()
+	<-done
+
+	if snap, ok := h.snapshot()["k8s-mcp"]; ok && !snap.Up {
+		t.Errorf("an abandoned turn marked the server down: %+v", snap)
+	}
+}
+
+// Discovery has to have a deadline of its own.
+//
+// Dropping the transport's request timeout was right for tool execution — a
+// wide log query legitimately takes a minute — but nothing then bounded the
+// handshake and the list that precede any call. A host that connects,
+// completes TLS and never answers left the turn hanging with no deadline at
+// all, and every merged waiter behind it.
+func TestDiscoveryHasItsOwnDeadline(t *testing.T) {
+	l := newListing()
+	var deadline time.Duration
+	_, err := l.do(context.Background(), "mute-mcp", func(run context.Context) ([]adktool.Tool, error) {
+		d, ok := run.Deadline()
+		if !ok {
+			return nil, errors.New("no deadline on the discovery context")
+		}
+		deadline = time.Until(d)
+		return nil, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if deadline <= 0 || deadline > discoverTimeout+time.Second {
+		t.Errorf("discovery deadline = %v, want about %v", deadline, discoverTimeout)
 	}
 }

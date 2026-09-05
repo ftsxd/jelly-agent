@@ -7,6 +7,7 @@ import AgentTimeline from '../components/AgentTimeline.vue'
 import { api, streamChat } from '../api'
 import { renderMarkdown } from '../markdown'
 import { applyFrame, emptyTimeline, finalAnswer } from '../timeline'
+import { latestOnly } from '../latest'
 
 const PROVIDER_KEY = 'jelly.provider' // remembers the last-used provider
 const AGENT_KEY = 'jelly.agent' // remembers the last-used agent (multi-agent)
@@ -77,19 +78,22 @@ async function loadHistorySessions() {
 // turn's calls and its results as two separate arrays — so the pairing was
 // already gone by the time it arrived, and every historical tool rendered as
 // a pending call next to an orphan result.
+// Only the newest pick wins; see latest.js for why a `busy` guard did not.
+const openGate = latestOnly()
+
 async function openHistorySession(id) {
-  if (!id || busy.value) return
+  if (!id) return
   error.value = ''
-  try {
-    const detail = await api.sessionTimeline(id)
-    // A slower response for an earlier pick must not replace a later one.
-    if (sessionId.value && sessionId.value !== id && busy.value) return
+  const r = await openGate.run(async (signal) => {
+    const mine = openGate.current()
+    const detail = await api.sessionTimeline(id, signal)
+    if (!openGate.owns(mine)) return null
     sessionId.value = detail.id
     messages.value = replayMessages(detail.frames || [])
     await scrollDown()
-  } catch (e) {
-    error.value = e.message
-  }
+    return detail
+  })
+  if (r.owned && r.error) error.value = r.error.message
 }
 
 // replayMessages splits a session's frames into the alternating user/agent

@@ -6,6 +6,7 @@ import { api } from '../api'
 import { absTime, relTime } from '../time'
 import AgentTimeline from '../components/AgentTimeline.vue'
 import { emptyTimeline, reduceFrames } from '../timeline'
+import { latestOnly } from '../latest'
 
 const PAGE = 50 // sessions per page
 
@@ -123,39 +124,36 @@ async function removeChecked() {
 // Replay reads /timeline rather than re-deriving a shape from the transcript,
 // so the two views cannot drift: the frames are projected server-side by the
 // function the live path calls, and folded client-side by the function the
-// live path calls. That was the whole point of the frame vocabulary, and until
-// now this page was the half that never got connected — so a finished run
-// showed a flat event list while the same run, live, showed steps.
+// live path calls.
 const timeline = ref(null)
+const openGate = latestOnly()
 
 async function open(id) {
   selected.value = id
   detailLoading.value = true
   detail.value = null
   timeline.value = null
-  // Two awaits, and the user can click another session during either. Without
-  // this check a slow response for A lands after B was opened and renders A's
-  // run under B's id — which is worse than a slow page, because nothing about
-  // it looks wrong.
-  const mine = () => selected.value === id
-  try {
-    const d = await api.session(id)
-    if (!mine()) return
+
+  const r = await openGate.run(async (signal) => {
+    const mine = openGate.current()
+    const d = await api.session(id, signal)
+    if (!openGate.owns(mine)) return null
     detail.value = d
     try {
-      const { frames } = await api.sessionTimeline(id)
-      if (!mine()) return
+      const { frames } = await api.sessionTimeline(id, signal)
+      if (!openGate.owns(mine)) return null
       timeline.value = reduceFrames(frames || [], emptyTimeline())
-    } catch {
+    } catch (e) {
+      if (e?.name === 'AbortError') return null
       // The transcript below still renders. A replay that cannot be projected
       // is a degraded view, not a broken page.
-      if (mine()) timeline.value = null
+      if (openGate.owns(mine)) timeline.value = null
     }
-  } catch (e) {
-    if (mine()) error.value = e.message
-  } finally {
-    if (mine()) detailLoading.value = false
-  }
+    return d
+  })
+  if (!r.owned) return
+  if (r.error) error.value = r.error.message
+  detailLoading.value = false
 }
 
 async function remove(s) {

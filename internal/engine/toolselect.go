@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"context"
 	"log/slog"
 	"slices"
 	"strings"
@@ -66,18 +67,28 @@ func (s *selectingToolset) Tools(ctx agent.ReadonlyContext) ([]adktool.Tool, err
 		if s.health != nil && s.health.skip(set.name) {
 			continue
 		}
-		fetch := func() ([]adktool.Tool, error) { return set.tools(ctx) }
+		// The merged fetch runs on its own lifetime, so it is handed a
+		// substituted context rather than this caller's — see listing.do.
+		fetch := func(run context.Context) ([]adktool.Tool, error) {
+			return set.tools(withDeadline(ctx, run))
+		}
 		var (
 			got []adktool.Tool
 			err error
 		)
 		if s.inflight != nil {
 			// One dial per server per moment, however many turns are asking.
-			got, err = s.inflight.do(set.name, fetch)
+			got, err = s.inflight.do(ctx, set.name, fetch)
 		} else {
-			got, err = fetch()
+			got, err = fetch(orBackground(ctx))
 		}
 		if err != nil {
+			// This caller giving up is not the server failing. Blaming it here
+			// took a healthy server down for a minute because some other
+			// conversation was abandoned mid-turn.
+			if ctx != nil && ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
 			// Loud, because the model will now answer without these tools and
 			// may say it cannot do something it normally can. That is a
 			// degraded answer and the operator has to be able to see why.
