@@ -280,9 +280,14 @@ func (s *Server) handleSessionTimeline(w http.ResponseWriter, r *http.Request) {
 	if frames == nil {
 		frames = []map[string]any{} // a JSON array, never null
 	}
+	// The key is "frames" because the values are frames. It shipped as
+	// "events", the browser destructured "frames", and the replay timeline
+	// silently rendered nothing — an empty array folds to a timeline with no
+	// steps, and a component that hides itself when it has no steps looks
+	// exactly like a feature nobody wired up.
 	writeJSON(w, http.StatusOK, map[string]any{
 		"id": resp.Session.ID(), "v": frameVersion,
-		"events": frames, "usage": usage,
+		"frames": frames, "usage": usage,
 	})
 }
 

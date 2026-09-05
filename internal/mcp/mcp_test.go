@@ -2,6 +2,8 @@ package mcp
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -112,4 +114,75 @@ func pythonPath(t *testing.T) string {
 	}
 	t.Skip("no python3 available")
 	return ""
+}
+
+// Connecting is bounded; the exchange is not.
+//
+// These two get conflated easily and the consequences are opposite. A host
+// that is gone fails at dial, and waiting thirty seconds for that on every
+// turn — the tool list is fetched once per user message — is pure loss. A tool
+// that takes a minute to answer is doing its job: a log query over a wide
+// window is exactly that, and cutting it at the transport turns a slow success
+// into a failure the model then reports as "工具调用失败".
+//
+// The zero values are the decision, so they are asserted as such. What bounds
+// a call is the tool's declared timeout in the gateway, where the caller can
+// see and set it, and the invocation's context, which ends when the user goes
+// away.
+func TestTheTransportBoundsConnectingNotTheExchange(t *testing.T) {
+	tr := transport()
+	if tr.DialContext == nil {
+		t.Fatal("no dial deadline; a dead host would cost the default thirty seconds every turn")
+	}
+	if tr.TLSHandshakeTimeout != dialTimeout {
+		t.Errorf("TLS handshake timeout = %v, want %v", tr.TLSHandshakeTimeout, dialTimeout)
+	}
+	if tr.ResponseHeaderTimeout != 0 {
+		t.Errorf("ResponseHeaderTimeout = %v; a slow tool would be cut mid-answer and reported as a failure",
+			tr.ResponseHeaderTimeout)
+	}
+	if c := httpClient(nil); c.Timeout != 0 {
+		t.Errorf("client Timeout = %v; the same problem one level up", c.Timeout)
+	}
+	if c := httpClient(map[string]string{"X-Token": "t"}); c.Timeout != 0 {
+		t.Errorf("client Timeout with headers = %v", c.Timeout)
+	}
+	// Pooling and proxy settings have to survive, which is why the transport
+	// is cloned from the default rather than built from scratch.
+	if tr.MaxIdleConns == 0 || tr.Proxy == nil {
+		t.Error("the transport was built from scratch; proxy and pooling settings were lost")
+	}
+}
+
+// A slow-but-alive server must complete, not be cut.
+func TestASlowServerIsNotCutOff(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		time.Sleep(250 * time.Millisecond) // long enough that any per-request cap would show
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer srv.Close()
+
+	resp, err := httpClient(map[string]string{"X-Token": "t"}).Get(srv.URL)
+	if err != nil {
+		t.Fatalf("a server that took 250ms was cut off: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("status = %d", resp.StatusCode)
+	}
+}
+
+// A host that is not there must fail at the dial deadline rather than at the
+// operating system's, which is what made every turn thirty seconds slower.
+func TestAnUnreachableHostFailsAtTheDialDeadline(t *testing.T) {
+	// TEST-NET-1 (RFC 5737): reserved for documentation, never routed.
+	start := time.Now()
+	_, err := httpClient(nil).Get("http://192.0.2.1:443/mcp")
+	if err == nil {
+		t.Fatal("a reserved, unroutable address answered")
+	}
+	if took := time.Since(start); took > dialTimeout+3*time.Second {
+		t.Errorf("dial took %v, want it bounded near %v", took, dialTimeout)
+	}
 }

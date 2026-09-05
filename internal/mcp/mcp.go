@@ -152,14 +152,26 @@ func transport() *http.Transport {
 		return &http.Transport{DialContext: (&net.Dialer{Timeout: dialTimeout}).DialContext}
 	}
 	t := base.Clone()
+	// Connecting is bounded; the exchange is not.
+	//
+	// These two get conflated easily and the consequences are opposite. A
+	// host that is gone fails at dial, and waiting thirty seconds for that on
+	// every turn is pure loss. A tool that takes a minute to answer is doing
+	// its job — a log query over a wide window is exactly that — and cutting
+	// it at the transport turns a slow success into a failure the model then
+	// reports as "工具调用失败".
+	//
+	// So no ResponseHeaderTimeout and no client-level Timeout. What bounds a
+	// call is the tool's own declared timeout in the gateway, which is where
+	// the caller can see and set it, and the invocation's context, which ends
+	// when the user goes away.
 	t.DialContext = (&net.Dialer{Timeout: dialTimeout, KeepAlive: 30 * time.Second}).DialContext
 	t.TLSHandshakeTimeout = dialTimeout
-	t.ResponseHeaderTimeout = 30 * time.Second
 	return t
 }
 
 func httpClient(headers map[string]string) *http.Client {
-	c := &http.Client{Timeout: 60 * time.Second, Transport: transport()}
+	c := &http.Client{Transport: transport()}
 	if len(headers) > 0 {
 		c.Transport = &headerRoundTripper{headers: headers, base: c.Transport}
 	}

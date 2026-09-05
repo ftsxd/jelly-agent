@@ -39,8 +39,11 @@ type selectingToolset struct {
 	// health remembers which servers are not answering, so an unreachable one
 	// is skipped instead of costing a dial timeout on every turn.
 	health *toolsetHealth
-	cfg    selector.Config
-	report func(selector.Result)
+	// inflight collapses concurrent fetches of the same server's tool list, so
+	// a burst of turns costs one dial rather than one each.
+	inflight *listing
+	cfg      selector.Config
+	report   func(selector.Result)
 	// admit keeps the set stable across a session's turns. Shared across
 	// builds, because a toolset instance lives for one request while the
 	// prompt cache it protects lives for the conversation. See admit.go.
@@ -63,7 +66,17 @@ func (s *selectingToolset) Tools(ctx agent.ReadonlyContext) ([]adktool.Tool, err
 		if s.health != nil && s.health.skip(set.name) {
 			continue
 		}
-		got, err := set.tools(ctx)
+		fetch := func() ([]adktool.Tool, error) { return set.tools(ctx) }
+		var (
+			got []adktool.Tool
+			err error
+		)
+		if s.inflight != nil {
+			// One dial per server per moment, however many turns are asking.
+			got, err = s.inflight.do(set.name, fetch)
+		} else {
+			got, err = fetch()
+		}
 		if err != nil {
 			// Loud, because the model will now answer without these tools and
 			// may say it cannot do something it normally can. That is a

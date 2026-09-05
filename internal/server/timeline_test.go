@@ -551,18 +551,32 @@ func TestTimelineEndpointSurvivesPersistence(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d: %s", w.Code, w.Body.String())
 	}
+	// The tag is the contract with the browser, not a local convenience: this
+	// endpoint shipped sending "events" while web/src consumed "frames", so
+	// the replay timeline folded an empty array and rendered nothing at all.
+	// A test that reads whatever the handler happens to send cannot catch
+	// that, which is why the name is asserted below as well.
 	var got struct {
-		Events []map[string]any `json:"events"`
+		Frames []map[string]any `json:"frames"`
 		Usage  map[string]any   `json:"usage"`
 	}
 	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
 		t.Fatal(err)
 	}
 
+	// Asserted by name, because the browser destructures it by name.
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(w.Body.Bytes(), &raw); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := raw["frames"]; !ok {
+		t.Fatalf("no \"frames\" key; web/src/views reads that one. Keys: %v", keysOf(raw))
+	}
+
 	// The three fields that had to survive the database.
-	calls := only(got.Events, frameToolCall)
+	calls := only(got.Frames, frameToolCall)
 	if len(calls) != 2 {
-		t.Fatalf("tool calls = %d, want 2: %v", len(calls), typesOf(got.Events))
+		t.Fatalf("tool calls = %d, want 2: %v", len(calls), typesOf(got.Frames))
 	}
 	for _, c := range calls {
 		if c["call_id"] == "" || c["call_id"] == nil {
@@ -572,8 +586,8 @@ func TestTimelineEndpointSurvivesPersistence(t *testing.T) {
 			t.Errorf("branch = %v, want root.k8s", c["branch"])
 		}
 	}
-	if n := count(got.Events, frameAgentTransfer); n != 1 {
-		t.Errorf("agent_transfer frames = %d, want 1 — Actions did not survive: %v", n, typesOf(got.Events))
+	if n := count(got.Frames, frameAgentTransfer); n != 1 {
+		t.Errorf("agent_transfer frames = %d, want 1 — Actions did not survive: %v", n, typesOf(got.Frames))
 	}
 
 	// And the ids still match up on the way back out, which is the point of
@@ -582,7 +596,7 @@ func TestTimelineEndpointSurvivesPersistence(t *testing.T) {
 	for _, c := range calls {
 		ids[c["call_id"]] = true
 	}
-	for _, r := range only(got.Events, frameToolResult) {
+	for _, r := range only(got.Frames, frameToolResult) {
 		if !ids[r["call_id"]] {
 			t.Errorf("result id %v matches no call after a round trip", r["call_id"])
 		}
@@ -718,4 +732,13 @@ func TestCacheReportingSurvivesProjection(t *testing.T) {
 			t.Errorf("total prompt = %v, want 4695 across both rounds", totals["prompt"])
 		}
 	})
+}
+
+func keysOf(m map[string]json.RawMessage) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	slices.Sort(out)
+	return out
 }

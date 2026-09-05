@@ -133,20 +133,28 @@ async function open(id) {
   detailLoading.value = true
   detail.value = null
   timeline.value = null
+  // Two awaits, and the user can click another session during either. Without
+  // this check a slow response for A lands after B was opened and renders A's
+  // run under B's id — which is worse than a slow page, because nothing about
+  // it looks wrong.
+  const mine = () => selected.value === id
   try {
-    detail.value = await api.session(id)
+    const d = await api.session(id)
+    if (!mine()) return
+    detail.value = d
     try {
       const { frames } = await api.sessionTimeline(id)
+      if (!mine()) return
       timeline.value = reduceFrames(frames || [], emptyTimeline())
     } catch {
       // The transcript below still renders. A replay that cannot be projected
       // is a degraded view, not a broken page.
-      timeline.value = null
+      if (mine()) timeline.value = null
     }
   } catch (e) {
-    error.value = e.message
+    if (mine()) error.value = e.message
   } finally {
-    detailLoading.value = false
+    if (mine()) detailLoading.value = false
   }
 }
 

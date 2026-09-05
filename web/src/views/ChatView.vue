@@ -82,8 +82,10 @@ async function openHistorySession(id) {
   error.value = ''
   try {
     const detail = await api.sessionTimeline(id)
+    // A slower response for an earlier pick must not replace a later one.
+    if (sessionId.value && sessionId.value !== id && busy.value) return
     sessionId.value = detail.id
-    messages.value = replayMessages(detail.events || [])
+    messages.value = replayMessages(detail.frames || [])
     await scrollDown()
   } catch (e) {
     error.value = e.message

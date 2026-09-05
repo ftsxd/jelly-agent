@@ -69,6 +69,9 @@ func (h *toolsetHealth) snapshot() map[string]ServerHealth {
 	for name, at := range h.seen {
 		e := ServerHealth{Name: name, Up: true, CheckedAt: at}
 		if until, down := h.down[name]; down {
+			// Still down until a probe says otherwise, whether or not the
+			// cooldown has run out. A past retry time reads as "due to be
+			// retried", which is exactly the state.
 			e.Up, e.RetryAt, e.FailedAt = false, until, at
 			if err := h.last[name]; err != nil {
 				e.Error = err.Error()
@@ -80,18 +83,16 @@ func (h *toolsetHealth) snapshot() map[string]ServerHealth {
 }
 
 // skip reports whether this server is still in its cooldown.
+//
+// An expired cooldown means "try again", not "it is back". The failure record
+// stays until a probe actually succeeds — clearing it here made the console
+// report 正常 for a server that had merely been down long enough, before
+// anything had spoken to it. A liveness claim has to come from a live answer.
 func (h *toolsetHealth) skip(name string) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	until, ok := h.down[name]
-	if !ok {
-		return false
-	}
-	if time.Now().After(until) {
-		delete(h.down, name)
-		return false
-	}
-	return true
+	return ok && time.Now().Before(until)
 }
 
 // fail starts (or extends) a server's cooldown, keeping why.
@@ -110,6 +111,50 @@ func (h *toolsetHealth) ok(name string) {
 	delete(h.down, name)
 	delete(h.last, name)
 	h.seen[name] = time.Now()
+}
+
+// listing collapses concurrent tool-list fetches for one server.
+//
+// The cooldown only helps once a failure has been recorded. Before that — the
+// first turn after a host goes away, or several conversations in flight at
+// once — every one of them dials it in parallel and every one waits. They are
+// asking the same question of the same server at the same moment, so one
+// answer serves all of them.
+//
+// Deliberately not a cache: the result is shared only for the duration of one
+// in-flight call. Holding it any longer would freeze a tool list that is meant
+// to be re-read per turn.
+type listing struct {
+	mu    sync.Mutex
+	calls map[string]*listingCall
+}
+
+type listingCall struct {
+	done  chan struct{}
+	tools []adktool.Tool
+	err   error
+}
+
+func newListing() *listing { return &listing{calls: map[string]*listingCall{}} }
+
+func (l *listing) do(name string, fn func() ([]adktool.Tool, error)) ([]adktool.Tool, error) {
+	l.mu.Lock()
+	if c, running := l.calls[name]; running {
+		l.mu.Unlock()
+		<-c.done
+		return c.tools, c.err
+	}
+	c := &listingCall{done: make(chan struct{})}
+	l.calls[name] = c
+	l.mu.Unlock()
+
+	c.tools, c.err = fn()
+
+	l.mu.Lock()
+	delete(l.calls, name)
+	l.mu.Unlock()
+	close(c.done)
+	return c.tools, c.err
 }
 
 // namedSet pairs a bound toolset with the server it came from, so a failure

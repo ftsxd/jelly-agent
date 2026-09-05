@@ -124,6 +124,10 @@ type Engine struct {
 	healthOnce sync.Once
 	health     *toolsetHealth
 
+	// listing collapses concurrent tool-list fetches per server.
+	listingOnce sync.Once
+	listing     *listing
+
 	// recordStore durably keeps tool deliveries so a shortened result can be
 	// read back.
 	recordsOnce sync.Once
@@ -447,6 +451,12 @@ func (e *Engine) resultBudget() *resultBudget {
 func (e *Engine) toolsetHealth() *toolsetHealth {
 	e.healthOnce.Do(func() { e.health = newToolsetHealth() })
 	return e.health
+}
+
+// toolListing returns the process-wide in-flight tool-list collapser.
+func (e *Engine) toolListing() *listing {
+	e.listingOnce.Do(func() { e.listing = newListing() })
+	return e.listing
 }
 
 // MCPHealth reports what is known about each MCP server's liveness.
@@ -1142,12 +1152,13 @@ func (e *Engine) buildNode(name, description, provider, instruction string, tool
 	// the budget is global, and ADK only re-consults toolsets. See
 	// selectingToolset.
 	sel := &selectingToolset{
-		static: tools,
-		sets:   bound,
-		cfg:    selector.Config{MaxTools: e.maxTools()},
-		report: logSelection,
-		admit:  e.admissions(),
-		health: e.toolsetHealth(),
+		static:   tools,
+		sets:     bound,
+		cfg:      selector.Config{MaxTools: e.maxTools()},
+		report:   logSelection,
+		admit:    e.admissions(),
+		health:   e.toolsetHealth(),
+		inflight: e.toolListing(),
 	}
 
 	beforeTool, afterTool := e.toolCallbacks()

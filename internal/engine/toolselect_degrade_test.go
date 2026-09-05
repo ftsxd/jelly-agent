@@ -3,6 +3,8 @@ package engine
 import (
 	"errors"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -169,5 +171,120 @@ func TestHealthSnapshotSeparatesDownFromUnknown(t *testing.T) {
 	}
 	if up.CheckedAt.IsZero() {
 		t.Error("a healthy server has no checked-at, so the console cannot say how fresh that is")
+	}
+}
+
+// An expired cooldown means "try again", not "it is back".
+//
+// Clearing the failure on expiry made the console report 正常 for a server
+// that had merely been down long enough — before anything had spoken to it. A
+// liveness claim has to come from a live answer.
+func TestAnExpiredCooldownDoesNotClaimRecovery(t *testing.T) {
+	h := newToolsetHealth()
+	h.fail("n9e-mcp", errors.New("i/o timeout"))
+
+	// Expire it the way time would.
+	h.mu.Lock()
+	h.down["n9e-mcp"] = time.Now().Add(-time.Second)
+	h.mu.Unlock()
+
+	if h.skip("n9e-mcp") {
+		t.Error("an expired cooldown still skips, so the server is never retried")
+	}
+	if snap := h.snapshot()["n9e-mcp"]; snap.Up {
+		t.Error("a server reported up on an expired cooldown alone; nothing had spoken to it")
+	}
+
+	// Only a successful probe clears it.
+	h.ok("n9e-mcp")
+	if snap := h.snapshot()["n9e-mcp"]; !snap.Up || snap.Error != "" {
+		t.Errorf("after a successful probe: %+v", snap)
+	}
+}
+
+// Concurrent turns asking the same server for its tool list must cost one
+// dial, not one each. The cooldown only helps once a failure is recorded;
+// before that — the first turn after a host goes away, or several
+// conversations in flight — every one of them waits on its own dial.
+func TestConcurrentTurnsShareOneToolListing(t *testing.T) {
+	var calls atomic.Int64
+	release := make(chan struct{})
+	l := newListing()
+
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, _ = l.do("n9e-mcp", func() ([]adktool.Tool, error) {
+				calls.Add(1)
+				<-release // hold every caller inside the one in-flight fetch
+				return nil, errors.New("i/o timeout")
+			})
+		}()
+	}
+	// Let them pile up on the single call, then let it finish.
+	for i := 0; i < 200 && calls.Load() == 0; i++ {
+		time.Sleep(time.Millisecond)
+	}
+	close(release)
+	wg.Wait()
+
+	if n := calls.Load(); n != 1 {
+		t.Errorf("eight concurrent turns dialled %d times, want 1", n)
+	}
+
+	// And it is not a cache: the next round fetches again.
+	_, _ = l.do("n9e-mcp", func() ([]adktool.Tool, error) { calls.Add(1); return nil, nil })
+	if n := calls.Load(); n != 2 {
+		t.Errorf("a later call reused a finished result (%d calls); the tool list must be re-read per turn", n)
+	}
+}
+
+// blockingSet holds every caller inside one Tools() call, so concurrent turns
+// can be observed piling up on the same fetch.
+type blockingSet struct {
+	calls   atomic.Int64
+	release chan struct{}
+}
+
+func (b *blockingSet) Name() string { return "mcp_tool_set" }
+func (b *blockingSet) Tools(agent.ReadonlyContext) ([]adktool.Tool, error) {
+	b.calls.Add(1)
+	<-b.release
+	return nil, errors.New("i/o timeout")
+}
+func (b *blockingSet) Close() error { return nil }
+
+// The collapsing has to be wired into the path that actually runs, not just
+// available. Tested through selectingToolset.Tools because that is what a turn
+// calls; a test of the helper alone stays green when the call site drops it.
+func TestConcurrentTurnsShareOneDialThroughTheToolset(t *testing.T) {
+	blocked := &blockingSet{release: make(chan struct{})}
+	sel := &selectingToolset{
+		static:   []adktool.Tool{&stubTool{name: "web_search"}},
+		sets:     []namedSet{{name: "n9e-mcp", set: blocked}},
+		health:   newToolsetHealth(),
+		inflight: newListing(),
+	}
+
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, err := sel.Tools(nil); err != nil {
+				t.Errorf("a dead server aborted a turn: %v", err)
+			}
+		}()
+	}
+	for i := 0; i < 500 && blocked.calls.Load() == 0; i++ {
+		time.Sleep(time.Millisecond)
+	}
+	close(blocked.release)
+	wg.Wait()
+
+	if n := blocked.calls.Load(); n != 1 {
+		t.Errorf("eight concurrent turns dialled %d times, want 1", n)
 	}
 }
