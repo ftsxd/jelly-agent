@@ -16,7 +16,10 @@
 import { computed, ref } from 'vue'
 import Icon from './Icon.vue'
 import { summarize, timelineSteps } from '../timeline'
-import { evidenceId, fmtArgs, fmtTokens, isTruncated, prettyJSON, resultSummary, stepLabel } from '../format'
+import {
+  cacheShare, evidenceId, fmtArgs, fmtBytes, fmtTokens, isRetrievable, isTruncated,
+  isWithheld, overviewOf, prettyJSON, resultSummary, stepLabel,
+} from '../format'
 
 const props = defineProps({
   /** A timeline state from timeline.js. */
@@ -83,7 +86,15 @@ function statusIcon(step) {
         <button v-if="thoughtCount" class="tl-btn" @click="thoughtsOpen = !thoughtsOpen">
           {{ thoughtsOpen ? '收起' : '展开' }}思考（{{ thoughtCount }}）
         </button>
-        <span v-if="stats.usage.total" class="tl-tok mono">{{ fmtTokens(stats.usage.total) }} tok</span>
+        <span v-if="stats.usage.total" class="tl-tok mono">
+          {{ fmtTokens(stats.usage.total) }} tok
+          <!-- Only when a provider actually reported caching. An absent figure
+               is not a zero hit rate, and showing it as one would send someone
+               tuning a cache they cannot even see. -->
+          <span v-if="cacheShare(stats.usage) !== null" class="tl-cache" title="本轮 prompt 中命中缓存的比例。缓存输入约为未缓存的 1/30 价格。">
+            · 缓存 {{ cacheShare(stats.usage) }}%
+          </span>
+        </span>
       </span>
     </div>
 
@@ -125,11 +136,24 @@ function statusIcon(step) {
 
             <div v-if="s.kind === 'tool'" class="tl-res" :class="s.status">
               {{ resultSummary(s) }}
+              <!-- Withheld and truncated are different things and need
+                   different labels: truncation means this tool's own ceiling
+                   was hit, while withholding means the round had no room. The
+                   old single label pointed at max_result_bytes, which has
+                   nothing to do with the second. -->
               <span
-                v-if="isTruncated(s)"
+                v-if="isWithheld(s)"
+                class="tl-flag"
+                title="本轮剩余上下文预算不足，完整返回没有进入上下文；它已保存，可以按证据号搜索或分段读取"
+              >未进上下文</span>
+              <span
+                v-else-if="isTruncated(s)"
                 class="tl-flag"
                 title="网关按 max_result_bytes 截断了返回，模型没有拿到完整结果"
               >已截断</span>
+              <span v-if="overviewOf(s)" class="tl-scale mono">
+                {{ fmtBytes(overviewOf(s).bytes) }} / {{ overviewOf(s).lines }} 行
+              </span>
             </div>
             <div v-else-if="s.kind === 'error'" class="tl-res failed">{{ s.text }}</div>
             <div v-else-if="s.kind === 'text'" class="tl-res">{{ s.text }}</div>
@@ -142,7 +166,10 @@ function statusIcon(step) {
             <div v-if="s.kind === 'tool' && open.has(s.id)" class="tl-detail">
               <div v-if="evidenceId(s)" class="tl-ev mono">
                 证据 {{ evidenceId(s) }}
-                <span v-if="isTruncated(s)" class="tl-flag" title="网关按 max_result_bytes 截断了返回，模型没有拿到完整结果">已截断</span>
+                <span v-if="isRetrievable(s)" class="tl-ok-flag" title="完整返回已落库，可用 search_result / read_result 取回">可取回</span>
+                <span v-else class="tl-flag" title="这次返回未能落库，被省略的部分找不回来">未落库</span>
+                <span v-if="isWithheld(s)" class="tl-flag" title="本轮剩余上下文预算不足，完整返回没有进入上下文">未进上下文</span>
+                <span v-else-if="isTruncated(s)" class="tl-flag" title="网关按 max_result_bytes 截断了返回">已截断</span>
               </div>
               <div class="tl-kv">
                 <span class="tl-kv-k">参数</span>
@@ -317,6 +344,22 @@ function statusIcon(step) {
   background: var(--warning-tint);
   color: var(--warning);
   font-size: 10px;
+}
+.tl-ok-flag {
+  flex-shrink: 0;
+  padding: 0 4px;
+  border-radius: 4px;
+  background: var(--accent-tint);
+  color: var(--accent);
+  font-size: 10px;
+}
+.tl-scale {
+  margin-left: var(--sp-1);
+  font-size: 10px;
+  color: var(--text-muted);
+}
+.tl-cache {
+  color: var(--accent);
 }
 
 .tl-res {

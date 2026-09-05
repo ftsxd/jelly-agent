@@ -32,7 +32,11 @@ export function emptyTimeline() {
      * is how often the model had to be asked again.
      */
     llmCalls: 0,
-    usage: { prompt: 0, completion: 0, total: 0 },
+    // cached is null until a provider reports it, and that is not the same
+    // as zero: a provider that says nothing about caching and one that says
+    // "nothing was cached" call for opposite responses. Rendering both as 0%
+    // would send someone tuning a cache that was never observable.
+    usage: { prompt: 0, completion: 0, total: 0, cached: null },
     /** Set once the run reports it finished. */
     done: false,
     error: '',
@@ -141,6 +145,11 @@ export function applyFrame(state, frame) {
       state.usage.prompt += frame.prompt || 0
       state.usage.completion += frame.completion || 0
       state.usage.total += frame.total || 0
+      // Present only on rounds the provider reported for; an absent key must
+      // stay absent rather than becoming a zero.
+      if (typeof frame.cached === 'number') {
+        state.usage.cached = (state.usage.cached || 0) + frame.cached
+      }
       break
     }
 

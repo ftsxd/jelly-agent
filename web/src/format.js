@@ -58,6 +58,54 @@ export function isTruncated(step) {
   return !!(step?.response && typeof step.response === 'object' && step.response.truncated)
 }
 
+/**
+ * True when the payload was kept out of the prompt whole, rather than cut.
+ *
+ * A different thing from truncation and it needs a different label: truncation
+ * means the ceiling on this tool's result was hit, while this means the round
+ * had no room left. Showing both as "已截断" pointed the reader at
+ * max_result_bytes, which has nothing to do with it.
+ */
+export function isWithheld(step) {
+  const r = step?.response
+  return !!(r && typeof r === 'object' && r.overview && typeof r.overview.note === 'string')
+}
+
+/** Scale of the result the tool produced, whether or not it reached the prompt. */
+export function overviewOf(step) {
+  const ov = step?.response?.overview
+  if (!ov || typeof ov !== 'object') return null
+  const bytes = typeof ov.bytes === 'number' ? ov.bytes : 0
+  const lines = typeof ov.lines === 'number' ? ov.lines : 0
+  if (!bytes && !lines) return null
+  return { bytes, lines }
+}
+
+/** True when the full result can still be fetched by its handle. */
+export function isRetrievable(step) {
+  return step?.response?.retrievable === true
+}
+
+/** Human-readable byte size. */
+export function fmtBytes(n) {
+  if (!Number.isFinite(n) || n <= 0) return ''
+  if (n < 1024) return `${n} B`
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`
+  return `${(n / 1024 / 1024).toFixed(1)} MB`
+}
+
+/**
+ * Cache hit share, or null when the provider did not report one.
+ *
+ * Null and zero are different answers — see timeline.js — so this returns null
+ * rather than 0 when there is nothing to report, and the caller renders
+ * nothing rather than "0%".
+ */
+export function cacheShare(usage) {
+  if (!usage || typeof usage.cached !== 'number' || !usage.prompt) return null
+  return Math.round((usage.cached / usage.prompt) * 100)
+}
+
 /** Full payload, pretty-printed, for the expanded view. */
 export function prettyJSON(value) {
   if (value === null || value === undefined) return ''

@@ -230,7 +230,17 @@ describe('tokens', () => {
       f.llmTurn('i1', 100, 10, 110),
       f.done({ prompt: 250, completion: 30, total: 280 }),
     ])
-    expect(st.usage).toEqual({ prompt: 250, completion: 30, total: 280 })
+    // cached stays null: done carried no cache figure, and null is how "the
+    // provider did not report" is distinguished from "nothing was cached".
+    expect(st.usage).toEqual({ prompt: 250, completion: 30, total: 280, cached: null })
+  })
+
+  it('done 带上缓存量时也一并接受', () => {
+    const st = reduceFrames([
+      f.llmTurn('i1', 100, 10, 110),
+      f.done({ prompt: 35979, completion: 2069, total: 38048, cached: 11264 }),
+    ])
+    expect(st.usage.cached).toBe(11264)
   })
 
   it('survives a done without usage', () => {
@@ -326,5 +336,45 @@ describe('llm call count', () => {
     ])
     expect(summarize(st).llmCalls).toBe(3)
     expect(st.rounds.size).toBe(1)
+  })
+})
+
+// The cache figure has to survive the reducer without a missing value turning
+// into a zero on the way. Both are numbers by the time they reach a template,
+// and only null can be rendered as "we cannot see the cache".
+describe('缓存指标', () => {
+  it('未上报的轮次不会把 cached 变成 0', () => {
+    const s = reduceFrames([
+      { type: 'llm_turn', round: 'r1', turn: 1, prompt: 4595, completion: 4, total: 4599 },
+    ])
+    expect(s.usage.cached).toBe(null)
+  })
+
+  it('上报的 0 命中会被保留为 0', () => {
+    const s = reduceFrames([
+      { type: 'llm_turn', round: 'r1', turn: 1, prompt: 4595, completion: 4, total: 4599, cached: 0 },
+    ])
+    expect(s.usage.cached).toBe(0)
+  })
+
+  it('多轮的命中量累加', () => {
+    const s = reduceFrames([
+      { type: 'llm_turn', round: 'r1', turn: 1, prompt: 4595, completion: 4, total: 4599, cached: 0 },
+      { type: 'llm_turn', round: 'r1', turn: 2, prompt: 6027, completion: 463, total: 6490, cached: 4864 },
+      { type: 'llm_turn', round: 'r1', turn: 3, prompt: 25084, completion: 1528, total: 26612, cached: 6400 },
+    ])
+    expect(s.usage.cached).toBe(11264)
+    expect(s.usage.prompt).toBe(35706)
+  })
+
+  // Mixed is the realistic case on a provider change: the total covers only
+  // the rounds that reported, and must still be a number so the console shows
+  // something rather than nothing.
+  it('部分轮次有上报时，只累加有上报的', () => {
+    const s = reduceFrames([
+      { type: 'llm_turn', round: 'r1', turn: 1, prompt: 100, completion: 4, total: 104 },
+      { type: 'llm_turn', round: 'r1', turn: 2, prompt: 4595, completion: 4, total: 4599, cached: 4480 },
+    ])
+    expect(s.usage.cached).toBe(4480)
   })
 })
