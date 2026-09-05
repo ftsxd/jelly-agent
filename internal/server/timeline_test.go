@@ -414,7 +414,7 @@ func TestStreamTurnWritesRealSSEFrames(t *testing.T) {
 		yielded{ev: event(at(10), "model", []*genai.Part{callPart("c1", "get_logs", map[string]any{"ns": "prod"})}, usage(90, 8, 98))},
 		yielded{ev: event(at(60), "user", []*genai.Part{respPart("c1", "get_logs", map[string]any{"lines": 3})})},
 		yielded{ev: event(at(80), "model", []*genai.Part{textPart("没有异常。")}, usage(120, 12, 132))},
-	))
+	), nil)
 	if err != nil {
 		t.Fatalf("streamTurn: %v", err)
 	}
@@ -452,7 +452,7 @@ func TestStreamTurnReportsErrors(t *testing.T) {
 		yielded{ev: event(at(0), "model", []*genai.Part{callPart("c1", "get_logs", nil)})},
 		yielded{err: errors.New("provider timed out")},
 		yielded{ev: event(at(10), "model", []*genai.Part{textPart("never")})},
-	))
+	), nil)
 	if err == nil {
 		t.Fatal("streamTurn swallowed the run error")
 	}

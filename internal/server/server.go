@@ -32,6 +32,11 @@ type Server struct {
 	bots     botManager // running messaging-platform bots (DingTalk, …)
 	auth     *authManager
 	schedule scheduler
+
+	// runReg knows which runs are in flight, which is the one thing about a
+	// task that cannot be read off its stored events. See runs.go.
+	runsOnce sync.Once
+	runReg   *runRegistry
 }
 
 // New builds a server over the given engine. staticFS is the embedded frontend
@@ -117,6 +122,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/sessions/{id}", s.handleSessionDetail)
 	mux.HandleFunc("GET /api/sessions/{id}/timeline", s.handleSessionTimeline)
 	mux.HandleFunc("GET /api/sessions/{id}/results/{call}", s.handleToolResult)
+	mux.HandleFunc("GET /api/sessions/{id}/results/{call}/search", s.handleToolResultSearch)
+	mux.HandleFunc("GET /api/tasks", s.handleTasks)
+	mux.HandleFunc("GET /api/tasks/{session}/{round}", s.handleTask)
 	mux.HandleFunc("POST /api/sessions/delete", s.handleDeleteSessions)
 	mux.HandleFunc("DELETE /api/sessions/{id}", s.handleDeleteSession)
 	mux.HandleFunc("GET /api/skills", s.handleListSkills)

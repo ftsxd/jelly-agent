@@ -1203,6 +1203,16 @@ func (e *Engine) buildNode(name, description, provider, instruction string, tool
 // about. Call it before the first NewSessionService.
 func (e *Engine) SetSessionDBPath(path string) { e.sessionDBPath = path }
 
+// SessionDBPath is where the session store lives, for the handlers that query
+// it directly rather than through the ADK service.
+//
+// Empty means the shared default, which is what the session package resolves
+// for itself — so an empty return is a valid argument, not a missing one. It
+// is exported because two handlers were passing "" unconditionally and thereby
+// ignoring the override entirely: harmless in a deployment, where the override
+// is unset, and wrong everywhere else.
+func (e *Engine) SessionDBPath() string { return e.sessionDBPath }
+
 // NewSessionService opens the persistent SQLite session store. The CLI and web
 // server share one store, so history is consistent across both front ends.
 func (e *Engine) NewSessionService() (adksession.Service, error) {

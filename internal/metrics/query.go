@@ -141,3 +141,80 @@ func percentile(sorted []int, p float64) int {
 	}
 	return sorted[rank-1]
 }
+
+// CallRow is one recorded tool call, as it happened.
+//
+// Distinct from the aggregate above: Summary answers "how is this tool doing
+// across the fleet", this answers "what did this particular run do". The
+// duration is the reason it exists — it is measured at the gateway and stored
+// here, and it is the only place it survives. The event stream deliberately
+// carries no elapsed time, because ADK merges parallel tool responses into one
+// event reusing the first one's timestamp, so a frame-to-frame delta is not a
+// duration and reporting it as one would be worse than reporting nothing.
+type CallRow struct {
+	At          time.Time `json:"at"`
+	CallID      string    `json:"call_id"`
+	Agent       string    `json:"agent,omitempty"`
+	Tool        string    `json:"tool"`
+	DurationMS  int       `json:"duration_ms"`
+	OK          bool      `json:"ok"`
+	ErrKind     string    `json:"err_kind,omitempty"`
+	Err         string    `json:"err,omitempty"`
+	ResultBytes int       `json:"result_bytes"`
+	EvidenceID  string    `json:"evidence_id,omitempty"`
+	Retrievable bool      `json:"retrievable"`
+}
+
+// ByInvocation returns the calls of one run, oldest first.
+//
+// invocationID may be empty, which returns the whole session — useful for a
+// session that predates invocation ids being recorded.
+//
+// Uses idx_tool_calls_session, which has existed since the table was created
+// and has had no reader until now.
+func (r *Recorder) ByInvocation(sessionID, invocationID string) ([]CallRow, error) {
+	if r == nil || r.db == nil || sessionID == "" {
+		return nil, nil
+	}
+	where := `WHERE session_id = ?`
+	args := []any{sessionID}
+	if invocationID != "" {
+		where += ` AND invocation_id = ?`
+		args = append(args, invocationID)
+	}
+
+	rows, err := r.db.Query(`
+		SELECT at, call_id, agent, tool, duration_ms, ok, err_kind, err,
+		       result_bytes, evidence_id, retrievable
+		FROM tool_calls `+where+` ORDER BY id ASC`, args...)
+	if err != nil {
+		return nil, fmt.Errorf("metrics: calls of %s: %w", sessionID, err)
+	}
+	defer rows.Close()
+
+	var out []CallRow
+	for rows.Next() {
+		var (
+			c        CallRow
+			at       string
+			ok, retr int
+		)
+		if err := rows.Scan(&at, &c.CallID, &c.Agent, &c.Tool, &c.DurationMS, &ok,
+			&c.ErrKind, &c.Err, &c.ResultBytes, &c.EvidenceID, &retr); err != nil {
+			return nil, fmt.Errorf("metrics: scan call: %w", err)
+		}
+		c.At, _ = time.Parse(time.RFC3339Nano, at)
+		c.OK, c.Retrievable = ok != 0, retr != 0
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
+// ByInvocation passes through to the recorder, so callers holding a Tracker
+// (which is what the engine hands out) do not need the recorder as well.
+func (t *Tracker) ByInvocation(sessionID, invocationID string) ([]CallRow, error) {
+	if t == nil || t.rec == nil {
+		return nil, nil
+	}
+	return t.rec.ByInvocation(sessionID, invocationID)
+}

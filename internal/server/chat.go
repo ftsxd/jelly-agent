@@ -100,11 +100,35 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 		"session_id": sessionID, "v": frameVersion, "ts": time.Now().UnixMilli(),
 	})
 
+	// Marking the run in flight, so the task centre can show it as running.
+	//
+	// The invocation id — which is the task's identity — does not exist until
+	// the first event arrives, so registration is deferred to the callback
+	// rather than done up front against an id we would have to invent.
+	var finish func(string)
+	defer func() {
+		if finish != nil {
+			// Reached on every path, including a panic and a client that hung
+			// up: an entry left behind would show a task as running forever.
+			finish(TaskCancelled)
+		}
+	}()
+
 	msg := genai.NewContentFromText(req.Message, genai.RoleUser)
 	st, err := streamTurn(sse, r2.Run(ctx, engine.UserID, sessionID, msg,
-		agent.RunConfig{StreamingMode: agent.StreamingModeSSE}))
+		agent.RunConfig{StreamingMode: agent.StreamingModeSSE}),
+		func(round string) {
+			end := s.runs().start(sessionID, round)
+			finish = func(status string) { finish = nil; end(status) }
+		})
 	if err != nil {
+		if finish != nil {
+			finish(TaskFailed)
+		}
 		return // the error frame is already out
+	}
+	if finish != nil {
+		finish(TaskCompleted)
 	}
 
 	// Index the just-finished turn into L2 so future searches see it.
@@ -121,14 +145,25 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 // handler so that a test can drive the whole projection from constructed
 // events — no provider, no model, no socket. Without that seam the streaming
 // path is expensive enough to test that nobody would.
-func streamTurn(out sink, seq iter.Seq2[*adksession.Event, error]) (*turnState, error) {
+// onRound, when non-nil, is called once with the invocation id the moment it
+// is first seen. That id is the task's identity, and it does not exist until
+// the agent produces its first event — so a caller that wants to register the
+// run cannot do it before this.
+func streamTurn(out sink, seq iter.Seq2[*adksession.Event, error], onRound func(string)) (*turnState, error) {
 	st := newTurnState()
+	round := ""
 	for ev, err := range seq {
 		if err != nil {
 			out.frame(frameError, map[string]any{
 				"message": err.Error(), "ts": time.Now().UnixMilli(),
 			})
 			return st, err
+		}
+		if ev != nil && round == "" && ev.InvocationID != "" {
+			round = ev.InvocationID
+			if onRound != nil {
+				onRound(round)
+			}
 		}
 		project(ev, out, st)
 	}
@@ -150,6 +185,32 @@ func (s *Server) resolveSession(ctx context.Context, svc adksession.Service, id 
 		return "", fmt.Errorf("create session: %w", err)
 	}
 	return fresh, nil
+}
+
+// ensureSession creates the named session if it is not there, keeping the name.
+//
+// Different from resolveSession, and the difference matters. A browser asking
+// for an unknown session should get a new conversation rather than an error —
+// renaming is the right answer there. A scheduled task or a chat bot is asking
+// for a session whose name IS the identity: "schedule-nightly" is how its runs
+// are recognised later. Renaming it to a "web-…" id would work exactly once
+// and lose the one thing the caller needed.
+func ensureSession(ctx context.Context, svc adksession.Service, id string) error {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return fmt.Errorf("session id 不能为空")
+	}
+	if resp, err := svc.Get(ctx, &adksession.GetRequest{
+		AppName: engine.AppName, UserID: engine.UserID, SessionID: id,
+	}); err == nil && resp.Session != nil {
+		return nil
+	}
+	if _, err := svc.Create(ctx, &adksession.CreateRequest{
+		AppName: engine.AppName, UserID: engine.UserID, SessionID: id,
+	}); err != nil {
+		return fmt.Errorf("create session %q: %w", id, err)
+	}
+	return nil
 }
 
 // indexSession ingests the named session into L2 search. No-op when search is

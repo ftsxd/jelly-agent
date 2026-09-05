@@ -181,10 +181,13 @@ func (s *Server) runSchedule(ctx context.Context, t config.ScheduleTask) {
 	if t.Skill != "" {
 		prompt = "必须先调用 use_skill 加载技能 \"" + t.Skill + "\"，再严格执行。\n\n" + prompt
 	}
-	var out string
-	var err error
+	var (
+		out string
+		ref runRef
+		err error
+	)
 	for attempt := 0; attempt <= t.RetryCount; attempt++ {
-		out, err = s.runScheduledAgent(ctx, t, prompt)
+		out, ref, err = s.runScheduledAgent(ctx, t, prompt)
 		if err == nil || ctx.Err() != nil {
 			break
 		}
@@ -201,13 +204,21 @@ func (s *Server) runSchedule(ctx context.Context, t config.ScheduleTask) {
 		}
 	}
 	if err != nil {
-		_ = schedule.Record(t.Name, started, "failed", out, err.Error())
+		_ = schedule.Record(t.Name, started, "failed", out, err.Error(), ref.session, ref.invocation)
 		slog.Error("周期任务失败", "task", t.Name, logging.Err(err))
 		return
 	}
-	_ = schedule.Record(t.Name, started, "succeeded", out, "")
+	_ = schedule.Record(t.Name, started, "succeeded", out, "", ref.session, ref.invocation)
 }
-func (s *Server) runScheduledAgent(ctx context.Context, t config.ScheduleTask, prompt string) (string, error) {
+
+// runRef is where a scheduled run's events landed, so its row can be joined to
+// the steps and results it produced.
+type runRef struct {
+	session    string
+	invocation string
+}
+
+func (s *Server) runScheduledAgent(ctx context.Context, t config.ScheduleTask, prompt string) (string, runRef, error) {
 	eng := s.engine()
 	name := t.Agent
 	if name == "" && eng.HasAgents() {
@@ -222,25 +233,49 @@ func (s *Server) runScheduledAgent(ctx context.Context, t config.ScheduleTask, p
 		a, _, _, search, err = eng.BuildAgent(t.Provider)
 	}
 	if err != nil {
-		return "", err
+		return "", runRef{}, err
 	}
 	if search != nil {
 		defer search.Close()
 	}
 	r, svc, err := eng.NewRunner(a, search)
 	if err != nil {
-		return "", err
+		return "", runRef{}, err
 	}
+
+	// ensureSession, not resolveSession.
+	//
+	// This used to call resolveSession and discard its return. resolveSession
+	// renames an unknown session to a fresh "web-…" id and returns that, so a
+	// task running for the first time created a throwaway session and then ran
+	// against "schedule-<name>", which still did not exist — and the runner has
+	// no AutoCreateSession, so every attempt failed. A scheduled task could
+	// never succeed on a clean database, and each attempt left an orphan
+	// session behind.
+	//
+	// Renaming would be wrong here even with the return value used: the name
+	// IS the identity. "schedule-<name>" is how these runs are recognised as
+	// inspections later.
 	id := "schedule-" + t.Name
-	if _, err := s.resolveSession(ctx, svc, id); err != nil {
-		return "", err
+	if err := ensureSession(ctx, svc, id); err != nil {
+		return "", runRef{}, err
 	}
+	ref := runRef{session: id}
+
 	var b strings.Builder
 	for ev, err := range r.Run(ctx, engine.UserID, id, genai.NewContentFromText(prompt, genai.RoleUser), agent.RunConfig{StreamingMode: agent.StreamingModeSSE}) {
 		if err != nil {
-			return b.String(), err
+			return b.String(), ref, err
 		}
-		if ev != nil && ev.Content != nil && ev.Partial {
+		if ev == nil {
+			continue
+		}
+		// One invocation per run, so the first event carrying one names it.
+		// It is what ties this row to the task centre's view of the run.
+		if ref.invocation == "" && ev.InvocationID != "" {
+			ref.invocation = ev.InvocationID
+		}
+		if ev.Content != nil && ev.Partial {
 			for _, p := range ev.Content.Parts {
 				if p != nil && !p.Thought {
 					b.WriteString(p.Text)
@@ -248,7 +283,7 @@ func (s *Server) runScheduledAgent(ctx context.Context, t config.ScheduleTask, p
 			}
 		}
 	}
-	return b.String(), nil
+	return b.String(), ref, nil
 }
 func validSchedule(t config.ScheduleTask) error {
 	if !validScheduleName.MatchString(strings.TrimSpace(t.Name)) {

@@ -17,6 +17,7 @@ package server
 import (
 	"errors"
 	"net/http"
+	"strings"
 
 	"github.com/jelly-agent/jelly-agent/internal/engine"
 	"github.com/jelly-agent/jelly-agent/internal/record"
@@ -48,6 +49,17 @@ func (s *Server) handleToolResult(w http.ResponseWriter, r *http.Request) {
 		queryInt(r, "offset", 0, 0, 1<<30),
 		queryInt(r, "limit", record.DefaultWindow, 1, record.MaxWindow),
 	)
+	// Expired and missing are different answers and need different words.
+	//
+	// "Not found" tells the reader to look again — a wrong id, another
+	// session, a call whose delivery never landed. "Expired" tells them the
+	// bytes are gone and the only way to get them is to run the tool again.
+	// Collapsing the two sent people hunting for something that no longer
+	// exists; before this, expiry fell through to a 500 with a raw error.
+	if errors.Is(err, record.ErrExpired) {
+		writeErr(w, http.StatusGone, "结果已过期，请重新查询")
+		return
+	}
 	if errors.Is(err, record.ErrNotFound) {
 		writeErr(w, http.StatusNotFound, "该调用没有可重读的完整结果")
 		return
@@ -74,4 +86,57 @@ func (s *Server) handleToolResult(w http.ResponseWriter, r *http.Request) {
 		// be read as "complete".
 		"upstream_truncated": string(chunk.Upstream),
 	})
+}
+
+// handleToolResultSearch searches one stored delivery.
+//
+// The console needs this for the same reason the model does: a result too
+// large to display is not too large to search, and paging through megabytes to
+// find one line is the behaviour both are meant to avoid. It is the same
+// Store.Search the search_result tool uses, so the two cannot disagree about
+// what a match is or how many there were.
+func (s *Server) handleToolResultSearch(w http.ResponseWriter, r *http.Request) {
+	sessionID, callID := r.PathValue("id"), r.PathValue("call")
+	pattern := r.URL.Query().Get("q")
+	if strings.TrimSpace(pattern) == "" {
+		writeErr(w, http.StatusBadRequest, "q 不能为空")
+		return
+	}
+	store, err := s.engine().Records()
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	// The store searches by handle, the console addresses by call id — so the
+	// call is resolved to its handle first, in the same scoped read the
+	// display path uses.
+	chunk, err := store.Read(r.Context(), record.Scope{
+		AppName: engine.AppName, UserID: engine.UserID, SessionID: sessionID,
+	}, callID, 0, 1)
+	if errors.Is(err, record.ErrExpired) {
+		writeErr(w, http.StatusGone, "结果已过期，请重新查询")
+		return
+	}
+	if errors.Is(err, record.ErrNotFound) {
+		writeErr(w, http.StatusNotFound, "该调用没有可重读的完整结果")
+		return
+	}
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	res, err := store.Search(r.Context(), record.Scope{
+		AppName: engine.AppName, UserID: engine.UserID, SessionID: sessionID,
+	}, chunk.Label, pattern, record.SearchOpts{
+		Limit:   queryInt(r, "limit", record.DefaultHits, 1, record.MaxHits),
+		Context: queryInt(r, "context", 1, 0, 20),
+	})
+	if err != nil {
+		// A pattern the caller wrote wrongly is theirs to fix, and they can
+		// only fix it if told what was wrong with it.
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
 }

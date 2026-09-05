@@ -139,7 +139,7 @@ type sessionDTO struct {
 func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 	limit := queryInt(r, "limit", 50, 1, 200)
 	offset := queryInt(r, "offset", 0, 0, 1<<30)
-	rows, total, err := jellysession.ListPage("", engine.AppName, engine.UserID, limit, offset)
+	rows, total, err := jellysession.ListPage(s.engine().SessionDBPath(), engine.AppName, engine.UserID, limit, offset)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return

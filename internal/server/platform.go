@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"google.golang.org/adk/agent"
-	adksession "google.golang.org/adk/session"
 	"google.golang.org/genai"
 
 	"github.com/jelly-agent/jelly-agent/internal/config"
@@ -189,10 +188,11 @@ func (s *Server) runTurnStream(ctx context.Context, provider string, mcpNames []
 		return "", err
 	}
 
-	if resp, err := svc.Get(ctx, &adksession.GetRequest{AppName: engine.AppName, UserID: engine.UserID, SessionID: sessionID}); err != nil || resp.Session == nil {
-		if _, err := svc.Create(ctx, &adksession.CreateRequest{AppName: engine.AppName, UserID: engine.UserID, SessionID: sessionID}); err != nil {
-			return "", fmt.Errorf("create session: %w", err)
-		}
+	// Same shape as the scheduler's: the session name is the identity of the
+	// chat this bot is answering, so it is created under that name rather than
+	// renamed. One implementation now, in chat.go.
+	if err := ensureSession(ctx, svc, sessionID); err != nil {
+		return "", err
 	}
 
 	msg := genai.NewContentFromText(text, genai.RoleUser)
