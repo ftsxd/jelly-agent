@@ -313,3 +313,41 @@ func countLabel(t Task, label string) int {
 	}
 	return n
 }
+
+// The store's own readers get their own label.
+//
+// Both declare KindText, so without this their step reads "调用工具" — which
+// says nothing about the one thing that is distinctive about it, namely that
+// this step fetched what an earlier one had already produced. And they have to
+// share a step: "searched it, then read around the hit" is one move, not two
+// unrelated phases.
+func TestReaderCallsFormTheirOwnStep(t *testing.T) {
+	k := kinds(map[string]ops.EvidenceKind{
+		"get_service_logs": "",
+		"read_result":      ops.KindText,
+		"search_result":    ops.KindText,
+	})
+	frames := []map[string]any{
+		fr(frameUserMessage, "text", "统计超时次数", "ts", int64(1)),
+		call("r1", "c1", "get_service_logs", 10),
+		result("r1", "c1", true, 20, map[string]any{"summary": "日志", "evidence_id": "e1", "retrievable": true}),
+		call("r1", "c2", "search_result", 30),
+		result("r1", "c2", true, 40, map[string]any{"summary": "命中 1622 处"}),
+		call("r1", "c3", "read_result", 50),
+		result("r1", "c3", true, 60, map[string]any{"summary": "一段"}),
+		fr(frameText, "round", "r1", "text", "一共 1622 次。", "ts", int64(70)),
+	}
+	got := foldTasks("web-1", frames, k)[0]
+	if len(got.Steps) != 3 {
+		t.Fatalf("steps = %v, want 取日志 / 读取已存结果 / 形成结论", labels(got))
+	}
+	if got.Steps[0].Label != "get_service_logs" {
+		t.Errorf("first = %q", got.Steps[0].Label)
+	}
+	if got.Steps[1].Label != "读取已存结果" || got.Steps[1].Calls != 2 {
+		t.Errorf("reader step = %+v; the two readers must share one step", got.Steps[1])
+	}
+	if got.Steps[2].Label != "形成结论" {
+		t.Errorf("last = %q", got.Steps[2].Label)
+	}
+}

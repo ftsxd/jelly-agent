@@ -64,6 +64,41 @@ export const api = {
   // inject?", which the per-turn token figure cannot.
   prompt: (provider = '') => jget(`/api/prompt${provider ? `?provider=${encodeURIComponent(provider)}` : ''}`),
   sessionTimeline: (id, signal) => jget(`/api/sessions/${encodeURIComponent(id)}/timeline`, signal),
+
+  // The task centre. A task is one invocation, so its id is the session and
+  // the round joined — the same pair every backend table is keyed by.
+  tasks: (params = {}, signal) => {
+    const q = new URLSearchParams()
+    for (const [k, v] of Object.entries(params)) if (v !== '' && v != null) q.set(k, v)
+    const s = q.toString()
+    return jget(`/api/tasks${s ? `?${s}` : ''}`, signal)
+  },
+  task: (session, round, signal) =>
+    jget(`/api/tasks/${encodeURIComponent(session)}/${encodeURIComponent(round)}`, signal),
+
+  // Reading a stored tool result, a window at a time. The endpoint has existed
+  // since the delivery store was built and had no client until now, which is
+  // why the console could show that a result was retrievable but not retrieve
+  // it.
+  readResult: (session, call, { offset = 0, limit } = {}, signal) => {
+    const q = new URLSearchParams({ offset: String(offset) })
+    if (limit) q.set('limit', String(limit))
+    return jget(
+      `/api/sessions/${encodeURIComponent(session)}/results/${encodeURIComponent(call)}?${q}`,
+      signal,
+    )
+  },
+  // Searching one instead of paging through it — the same Store.Search the
+  // model's search_result tool uses, so the two report the same counts.
+  searchResult: (session, call, q, { limit, context } = {}, signal) => {
+    const p = new URLSearchParams({ q })
+    if (limit) p.set('limit', String(limit))
+    if (context != null) p.set('context', String(context))
+    return jget(
+      `/api/sessions/${encodeURIComponent(session)}/results/${encodeURIComponent(call)}/search?${p}`,
+      signal,
+    )
+  },
   deleteSession: (id) => jdelete(`/api/sessions/${encodeURIComponent(id)}`),
   deleteSessions: (ids) => jpost('/api/sessions/delete', { ids }),
   skills: () => jget('/api/skills'),

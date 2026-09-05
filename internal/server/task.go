@@ -233,14 +233,17 @@ func foldTasks(sessionID string, frames []map[string]any, kindOf func(tool strin
 			// the tools declare no kind — every MCP tool today — the tool
 			// itself is the grouping, so "three calls to get_logs" is one step
 			// and switching tools starts another.
-			same := b.cur != nil && b.cur.Status != "" &&
-				((kind != "" && b.cur.Kind == string(kind)) ||
-					(kind == "" && b.cur.Kind == "" && b.cur.Label == name))
+			label := stepLabel(kind, name)
+			// Grouping follows the label, not the kind alone: the store's own
+			// readers share a label and must share a step, or "searched then
+			// read the same result" shows as two unrelated phases.
+			same := b.cur != nil && b.cur.Status != "" && b.cur.Label == label &&
+				(kind == "" || b.cur.Kind == string(kind))
 			if !same {
 				b.cur = &Step{
 					ID: "t" + strconv.Itoa(len(b.steps)+1), Index: len(b.steps),
 					Kind: string(kind), Status: TaskRunning, Agent: agent, StartedAt: ts,
-					Label: stepLabel(kind, name),
+					Label: label,
 				}
 				b.steps = append(b.steps, b.cur)
 			}
@@ -362,7 +365,19 @@ func readResponse(t *StepTool, resp map[string]any) {
 	}
 }
 
+// readers are the delivery store's own tools. They fetch what an earlier step
+// already produced rather than producing anything, and both declare KindText —
+// so without this they label their step "调用工具", which says nothing about
+// the one thing that is actually distinctive about it.
+//
+// Still derived, not invented: it is a fact about which tools ran, not a guess
+// at what the model meant by running them.
+var readers = map[string]bool{"read_result": true, "search_result": true}
+
 func stepLabel(kind ops.EvidenceKind, tool string) string {
+	if readers[tool] {
+		return "读取已存结果"
+	}
 	if l, ok := kindLabels[kind]; ok && kind != "" {
 		return l
 	}
