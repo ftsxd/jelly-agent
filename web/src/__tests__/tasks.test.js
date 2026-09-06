@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   anyLive, artifactState, artifactsOfStep, emptyReason, isLive, needsAttention,
-  selectionStore, statusOf, stepOfArtifact, typeLabel,
+  selectionStore, statusOf, stepOfArtifact, stepSummary, toggleStep, typeLabel,
 } from '../tasks'
 
 describe('statusOf', () => {
@@ -73,23 +73,36 @@ describe('liveness', () => {
 
 // Switching away and back must return to where you were, or comparing two runs
 // means starting over on every switch.
+//
+// It holds no reactive state on purpose. The first version kept the current
+// selection in a Map that the component read through a computed — and a plain
+// Map is not reactive, so clicking a step did nothing at all. The component
+// owns the refs; this owns only the memory.
 describe('selectionStore', () => {
   it('keeps a selection per task', () => {
     const sel = selectionStore()
-    sel.setStep('a/1', 't2')
-    sel.setArtifact('a/1', 'e3')
-    sel.setStep('b/1', 't1')
+    sel.set('a/1', { step: 's2', artifact: 'e3' })
+    sel.set('b/1', { step: 's1' })
 
-    expect(sel.get('a/1')).toEqual({ step: 't2', artifact: 'e3' })
-    expect(sel.get('b/1')).toEqual({ step: 't1', artifact: '' })
+    expect(sel.get('a/1')).toEqual({ step: 's2', artifact: 'e3' })
+    expect(sel.get('b/1')).toEqual({ step: 's1', artifact: '' })
     expect(sel.get('never-opened')).toEqual({ step: '', artifact: '' })
   })
 
   it('forgets a task that is gone', () => {
     const sel = selectionStore()
-    sel.setStep('a/1', 't2')
+    sel.set('a/1', { step: 's2' })
     sel.forget('a/1')
     expect(sel.get('a/1')).toEqual({ step: '', artifact: '' })
+  })
+})
+
+// Clicking the open step closes it; clicking another opens that one.
+describe('toggleStep', () => {
+  it('toggles', () => {
+    expect(toggleStep('s1', 's1')).toBe('')
+    expect(toggleStep('s1', 's2')).toBe('s2')
+    expect(toggleStep('', 's1')).toBe('s1')
   })
 })
 
@@ -137,10 +150,14 @@ describe('artifactState', () => {
     expect(st.note).toContain('可搜索')
   })
 
-  it('a product that never reached the store cannot be read back', () => {
+  // retrievable is the store's answer, not the old event's. Deriving it from
+  // what the model was told marked every result recorded before that flag
+  // existed as unsaved, while its bytes sat in the database readable.
+  it('a product that is not in the store cannot be read back, and says why', () => {
     const st = artifactState({ complete: false, retrievable: false })
     expect(st.readable).toBe(false)
-    expect(st.badge).toBe('未落库')
+    expect(st.badge).toBe('未保存')
+    expect(st.note).toContain('摘要')
   })
 
   it('a complete product needs no explanation', () => {
@@ -150,8 +167,10 @@ describe('artifactState', () => {
     expect(st.note).toBe('')
   })
 
-  it('the final report is always readable', () => {
-    expect(artifactState({ kind: 'report', complete: true }).readable).toBe(true)
+  // The reply is no longer an artifact at all — it has its own place in the
+  // task, so it cannot be confused with a tool product.
+  it('an ordinary stored product is readable', () => {
+    expect(artifactState({ complete: true, retrievable: true }).readable).toBe(true)
   })
 
   it('survives nothing at all', () => {
@@ -166,7 +185,20 @@ describe('emptyReason', () => {
     expect(emptyReason(null, [])).toContain('选择左侧任务')
     expect(emptyReason({ status: 'running' }, [])).toContain('进行中')
     expect(emptyReason({ status: 'failed' }, [])).toContain('失败')
-    expect(emptyReason({ status: 'completed' }, [])).toContain('没有产生')
+    expect(emptyReason({ status: 'completed' }, [])).toContain('步骤详情')
     expect(emptyReason({ status: 'completed' }, [{ label: 'e1' }])).toBe('')
+  })
+})
+
+
+// The collapsed step row says what happened, preferring the model's own words
+// over a description invented here.
+describe('stepSummary', () => {
+  it('prefers the narration, then the error, then the count', () => {
+    expect(stepSummary({ note: '现在拉近 24h 的曲线', calls: 2 })).toBe('现在拉近 24h 的曲线')
+    expect(stepSummary({ error: 'i/o timeout', calls: 1 })).toBe('i/o timeout')
+    expect(stepSummary({ calls: 3 })).toBe('3 次工具调用')
+    expect(stepSummary({})).toBe('')
+    expect(stepSummary(null)).toBe('')
   })
 })

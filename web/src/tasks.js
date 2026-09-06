@@ -75,9 +75,12 @@ export function anyLive(tasks) {
 /**
  * Per-task selection, so switching away and back returns to where you were.
  *
- * Keyed by task id rather than held as a single pair, because the page has one
- * selection per task and losing it on every switch is the difference between
- * comparing two runs and starting over each time.
+ * Returns plain values and takes plain values. It deliberately holds no
+ * reactive state: the first version kept the current selection in a Map and
+ * had the component read it through a computed, which never re-ran because a
+ * plain Map is not reactive — so clicking a step did nothing at all. The
+ * component owns the refs; this owns only the memory of what each task had
+ * selected.
  */
 export function selectionStore() {
   const byTask = new Map()
@@ -85,18 +88,24 @@ export function selectionStore() {
     get(taskID) {
       return byTask.get(taskID) || { step: '', artifact: '' }
     },
-    setStep(taskID, step) {
-      const cur = byTask.get(taskID) || { step: '', artifact: '' }
-      byTask.set(taskID, { ...cur, step })
-    },
-    setArtifact(taskID, artifact) {
-      const cur = byTask.get(taskID) || { step: '', artifact: '' }
-      byTask.set(taskID, { ...cur, artifact })
+    set(taskID, sel) {
+      byTask.set(taskID, { step: sel.step || '', artifact: sel.artifact || '' })
     },
     forget(taskID) {
       byTask.delete(taskID)
     },
   }
+}
+
+/**
+ * Which step a click should select, given what is selected now.
+ *
+ * Clicking the open step closes it; clicking another opens that one. Pulled
+ * out because it is the kind of two-line rule that silently inverts during a
+ * refactor and has no test if it lives in a template.
+ */
+export function toggleStep(current, stepID) {
+  return current === stepID ? '' : stepID
 }
 
 /**
@@ -119,22 +128,26 @@ export function stepOfArtifact(steps, artifact) {
 /**
  * artifactState describes what can be done with one product.
  *
- * Three separate facts, because they mean different things and one of them is
- * routinely mistaken for another: complete says the model got all of it,
- * retrievable says the rest can still be fetched, expired says it is gone.
- * A truncated-but-retrievable result is normal and fine; an expired one is
- * not, and must not render as an empty preview.
+ * Three separate facts that are routinely mistaken for one another: complete
+ * says the model got all of it, retrievable says the bytes are still in the
+ * store, expired says retention dropped them. A truncated-but-retrievable
+ * result is normal; an expired one is not, and must not render as an empty
+ * preview.
+ *
+ * retrievable is answered by the store, not by what the model was told at the
+ * time. Deriving it from the old event marked every result recorded before
+ * that flag existed as "未落库" while its bytes sat in the database, readable.
  */
 export function artifactState(a) {
   if (!a) return { readable: false, note: '' }
   if (a.expired) {
     return { readable: false, tone: 'bad', badge: '已过期', note: '结果已过期，请重新查询' }
   }
-  if (a.kind === 'report') {
-    return { readable: true, tone: 'ok', badge: '报告', note: '' }
-  }
   if (!a.retrievable) {
-    return { readable: false, tone: 'warn', badge: '未落库', note: '这次返回未能保存，被省略的部分找不回来' }
+    return {
+      readable: false, tone: 'warn', badge: '未保存',
+      note: '这次返回没有留在结果存储里，只能看到调用当时记录的摘要',
+    }
   }
   if (!a.complete) {
     return { readable: true, tone: 'warn', badge: '部分进入上下文', note: '完整内容已保存，可搜索或分段读取' }
@@ -154,7 +167,24 @@ export function emptyReason(task, artifacts) {
   if ((artifacts || []).length > 0) return ''
   if (isLive(task)) return '任务进行中，还没有产物'
   if (task.status === 'failed') return '任务失败，没有产生产物'
-  return '这个任务没有产生可保存的结果'
+  // Not "nothing happened": every tool result is kept, but only the ones worth
+  // opening on their own are listed here. The small ones are in their step.
+  return '这个任务的结果都很小，直接在步骤详情里查看'
+}
+
+/**
+ * stepSummary is the one-line account of a step for the collapsed row.
+ *
+ * Prefers the model's own narration, because it said what it was doing at the
+ * time. Falls back to counting the calls rather than inventing a description
+ * of them.
+ */
+export function stepSummary(step) {
+  if (!step) return ''
+  if (step.note) return step.note
+  if (step.error) return step.error
+  if (step.calls) return `${step.calls} 次工具调用`
+  return ''
 }
 
 /** Human byte size, mirroring format.js so the two never disagree. */

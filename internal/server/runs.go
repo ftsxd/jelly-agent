@@ -17,6 +17,8 @@ package server
 import (
 	"sync"
 	"time"
+
+	"github.com/jelly-agent/jelly-agent/internal/task"
 )
 
 // maxTrackedRuns bounds the bookkeeping. The map only holds in-flight runs, so
@@ -51,7 +53,7 @@ func newRunRegistry() *runRegistry {
 // this package guessing from a nil error — a stream that ended because the
 // browser went away is cancelled, not completed, and only the caller knows.
 func (r *runRegistry) start(session, round string) func(status string) {
-	id := TaskID(session, round)
+	id := task.ID(session, round)
 	r.mu.Lock()
 	if len(r.running) >= maxTrackedRuns {
 		r.evictLocked()

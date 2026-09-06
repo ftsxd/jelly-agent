@@ -64,6 +64,12 @@ onMounted(async () => {
   if (typeof route.query.session === 'string') await openHistorySession(route.query.session)
 })
 
+// The task this conversation is continuing, if the user came from one.
+const continuingTask = ref(typeof route.query.task === 'string' ? route.query.task : '')
+watch(() => route.query.task, (id) => {
+  continuingTask.value = typeof id === 'string' ? id : ''
+})
+
 watch(() => route.query.session, async (id) => {
   if (typeof id === 'string' && id && id !== sessionId.value) await openHistorySession(id)
 })
@@ -176,10 +182,19 @@ async function send() {
   abort = new AbortController()
   try {
     await streamChat(
-      { message: text, sessionId: sessionId.value, provider: provider.value, agent: agentName.value },
+      {
+        message: text, sessionId: sessionId.value, provider: provider.value,
+        agent: agentName.value,
+        // Set when the user arrived from a task and is continuing it. Cleared
+        // after the turn: the next question is a new goal unless they say so,
+        // and silently attaching everything after would let one task swallow
+        // the rest of the conversation.
+        taskId: continuingTask.value,
+      },
       (ev) => handleFrame(live, ev),
       abort.signal,
     )
+    continuingTask.value = ''
   } catch (e) {
     if (e.name !== 'AbortError') error.value = e.message
   } finally {

@@ -143,11 +143,16 @@ export const api = {
 // streamChat POSTs a message and parses the SSE response. onEvent receives each
 // decoded event ({type, ...}). Returns a promise that resolves when the stream
 // closes. Pass an AbortSignal to cancel mid-stream.
-export async function streamChat({ message, sessionId, provider, agent }, onEvent, signal) {
+export async function streamChat({ message, sessionId, provider, agent, taskId }, onEvent, signal) {
   const res = await fetch('/api/chat/stream', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ message, session_id: sessionId || '', provider: provider || '', agent: agent || '' }),
+    body: JSON.stringify({
+      message, session_id: sessionId || '', provider: provider || '', agent: agent || '',
+      // Carried so a follow-up joins the task it continues instead of opening
+      // a second one that tells half the story.
+      task_id: taskId || '',
+    }),
     signal,
   })
   if (!res.ok) {

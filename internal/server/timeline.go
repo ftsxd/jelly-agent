@@ -209,6 +209,21 @@ func projectFinal(ev *adksession.Event, out sink, st *turnState, ts int64) {
 		st.turn++
 	}
 
+	// Whether this event also asked for a tool decides what its prose is.
+	//
+	// A model turn that says something and then calls a tool is narrating
+	// what it is about to do — "找到数据源了，现在拉近 24h 的曲线". A turn
+	// that says something and calls nothing has finished. The two look
+	// identical once they are separate text frames, and telling them apart by
+	// position later is guesswork; the event knows, so the event says.
+	calls := false
+	for _, p := range ev.Content.Parts {
+		if p != nil && p.FunctionCall != nil {
+			calls = true
+			break
+		}
+	}
+
 	for _, p := range ev.Content.Parts {
 		if p == nil {
 			continue
@@ -231,6 +246,11 @@ func projectFinal(ev *adksession.Event, out sink, st *turnState, ts int64) {
 			out.frame(frameText, map[string]any{
 				"text": p.Text, "agent": ev.Author, "branch": ev.Branch,
 				"round": st.invocation, "turn": st.turn, "ts": ts,
+				// final says nothing followed this in the same turn. It is
+				// what separates the answer from the running commentary, and
+				// it is why the task view can quote the reply the user
+				// actually received rather than the last thing written down.
+				"final": !calls,
 			})
 		}
 	}

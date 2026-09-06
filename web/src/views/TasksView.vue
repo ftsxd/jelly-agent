@@ -22,16 +22,18 @@ import Icon from '../components/Icon.vue'
 import { api } from '../api'
 import { latestOnly } from '../latest'
 import { absTime, relTime } from '../time'
-import { fmtBytes } from '../format'
+import { fmtBytes, prettyJSON } from '../format'
 import {
   anyLive, artifactState, artifactsOfStep, emptyReason, isLive,
-  needsAttention, selectionStore, statusOf, stepOfArtifact, typeLabel,
+  needsAttention, selectionStore, statusOf, stepOfArtifact, stepSummary,
+  toggleStep, typeLabel,
 } from '../tasks'
 
 const router = useRouter()
 
 const tasks = ref([])
 const total = ref(0)
+const skippedChat = ref(0)
 const loading = ref(true)
 const error = ref('')
 const filterType = ref('')
@@ -40,30 +42,36 @@ const filterStatus = ref('')
 const selectedID = ref('')
 const detail = ref(null)
 const artifacts = ref([])
+const results = ref({})
 const detailLoading = ref(false)
 
+// The current selection lives in refs, not in the store.
+//
+// The first version kept it in a plain Map and read it through a computed,
+// which never re-ran — a Map is not reactive — so clicking a step did nothing
+// at all. The store now only remembers what each task had picked, so switching
+// away and back returns to it.
+const stepID = ref('')
+const artifactID = ref('')
 const sel = selectionStore()
 const openGate = latestOnly()
 
-// Preview state, per artifact. Nothing is fetched until asked for: a task's
-// products can be megabytes each, and loading them to draw a list is the
-// mistake the delivery budget exists to prevent, made in the browser.
-const preview = ref(null)      // { label, text, total, offset, hasMore, expired, error }
+const preview = ref(null)
 const previewLoading = ref(false)
 const query = ref('')
 const hits = ref(null)
 
-const selectedStep = computed(() => {
-  const s = sel.get(selectedID.value).step
-  return (detail.value?.steps || []).find((x) => x.id === s) || null
-})
-const selectedArtifact = computed(() => {
-  const a = sel.get(selectedID.value).artifact
-  return artifacts.value.find((x) => x.label === a) || null
-})
-const highlighted = computed(() => {
-  const st = selectedStep.value
-  return st ? artifactsOfStep(artifacts.value, st.id).map((a) => a.label) : []
+const steps = computed(() => detail.value?.steps || [])
+const selectedStep = computed(() => steps.value.find((s) => s.id === stepID.value) || null)
+const selectedArtifact = computed(() => artifacts.value.find((a) => a.label === artifactID.value) || null)
+const highlighted = computed(() =>
+  selectedStep.value ? artifactsOfStep(artifacts.value, selectedStep.value.id).map((a) => a.label) : [],
+)
+
+// Remember the selection whenever it moves, so returning to a task returns to
+// where the reader was.
+watch([stepID, artifactID], () => {
+  if (selectedID.value) sel.set(selectedID.value, { step: stepID.value, artifact: artifactID.value })
 })
 
 async function load() {
@@ -72,6 +80,7 @@ async function load() {
     const r = await api.tasks({ type: filterType.value, status: filterStatus.value, limit: 100 })
     tasks.value = r.tasks || []
     total.value = r.total || 0
+    skippedChat.value = r.skipped_chat || 0
     error.value = ''
   } catch (e) {
     error.value = e.message
@@ -85,9 +94,14 @@ async function open(id) {
   detailLoading.value = true
   detail.value = null
   artifacts.value = []
+  results.value = {}
   preview.value = null
   hits.value = null
   query.value = ''
+
+  const remembered = sel.get(id)
+  stepID.value = remembered.step
+  artifactID.value = remembered.artifact
 
   const [session, round] = splitID(id)
   const r = await openGate.run(async (signal) => {
@@ -96,6 +110,7 @@ async function open(id) {
     if (!openGate.owns(mine)) return null
     detail.value = got.task
     artifacts.value = got.artifacts || []
+    results.value = got.results || {}
     return got
   })
   if (!r.owned) return
@@ -103,9 +118,8 @@ async function open(id) {
   detailLoading.value = false
 }
 
-// Refreshing only the detail, for a task that is still moving. Kept apart from
-// open() so a poll does not clear the selection or the open preview under the
-// reader's hands.
+// Refreshing a running task's detail without clearing the selection or the
+// open preview under the reader's hands.
 async function refreshDetail() {
   if (!selectedID.value || !isLive(detail.value)) return
   const [session, round] = splitID(selectedID.value)
@@ -114,6 +128,7 @@ async function refreshDetail() {
     if (selectedID.value !== `${session}/${round}`) return
     detail.value = got.task
     artifacts.value = got.artifacts || []
+    results.value = got.results || {}
   } catch { /* a poll that fails is not worth a banner */ }
 }
 
@@ -123,26 +138,35 @@ function splitID(id) {
 }
 
 function pickStep(step) {
-  sel.setStep(selectedID.value, selectedStep.value?.id === step.id ? '' : step.id)
+  stepID.value = toggleStep(stepID.value, step.id)
 }
 
 async function pickArtifact(a) {
-  sel.setArtifact(selectedID.value, a.label)
+  artifactID.value = a.label
   preview.value = null
   hits.value = null
   query.value = ''
-  // A step is selected alongside, so clicking a product also answers "where
-  // did this come from".
-  const from = stepOfArtifact(detail.value?.steps, a)
-  if (from) sel.setStep(selectedID.value, from.id)
+  const from = stepOfArtifact(steps.value, a)
+  if (from) stepID.value = from.id
+  if (artifactState(a).readable) await readMore(a, 0)
+}
 
-  const st = artifactState(a)
-  if (!st.readable) return
-  if (a.kind === 'report') {
-    preview.value = { label: a.label, text: a.text || '', total: (a.text || '').length, offset: 0, hasMore: false }
+// Reading one tool call's result from inside a step, for the results that are
+// too small to be listed as products of the run but are exactly what someone
+// clicking that step wants to see.
+async function openCallResult(tool) {
+  const ref_ = results.value[tool.call_id]
+  if (!ref_) return
+  artifactID.value = ref_.label
+  preview.value = null
+  hits.value = null
+  if (!ref_.retrievable) {
+    preview.value = { label: ref_.label, text: '', note: ref_.expired
+      ? '结果已过期，请重新查询'
+      : '这次返回没有留在结果存储里，只能看到调用当时记录的摘要' }
     return
   }
-  await readMore(a, 0)
+  await readMore({ label: ref_.label, call_id: tool.call_id }, 0)
 }
 
 async function readMore(a, offset) {
@@ -159,8 +183,9 @@ async function readMore(a, offset) {
       upstream: r.upstream_truncated || '',
     }
   } catch (e) {
-    // An expired reference is answered with 410 and its own words; anything
-    // else is reported as itself rather than as an empty preview.
+    // 410 carries its own words for expiry, 404 for a reference that never
+    // existed. Either way the message is shown as itself, never as an empty
+    // preview that reads like "the tool returned nothing".
     preview.value = { label: a.label, text: '', error: e.message }
   } finally {
     previewLoading.value = false
@@ -168,11 +193,12 @@ async function readMore(a, offset) {
 }
 
 async function runSearch() {
-  const a = selectedArtifact.value
-  if (!a || !query.value.trim()) return
+  const a = selectedArtifact.value || { call_id: results.value[stepID.value]?.call_id }
+  const callID = a?.call_id
+  if (!callID || !query.value.trim()) return
   const [session] = splitID(selectedID.value)
   try {
-    hits.value = await api.searchResult(session, a.call_id, query.value.trim(), { context: 1 })
+    hits.value = await api.searchResult(session, callID, query.value.trim(), { context: 1 })
   } catch (e) {
     hits.value = { error: e.message }
   }
@@ -182,8 +208,8 @@ async function runSearch() {
 //
 // The only push channel this server has is the chat stream, which is a POST
 // that runs a turn — a page cannot subscribe to somebody else's. Polling is
-// the mechanism already in use here (MessagingView does the same), so this
-// reuses it rather than introducing a third. An idle board sends nothing.
+// the mechanism already in use here, so this reuses it rather than adding a
+// third. An idle board sends nothing.
 let timer = null
 function retime() {
   if (timer) clearInterval(timer)
@@ -198,8 +224,10 @@ watch([tasks, detail], retime, { deep: false })
 onMounted(async () => { await load(); retime() })
 onUnmounted(() => timer && clearInterval(timer))
 
+// Continuing a task carries its id, so the follow-up joins this task instead
+// of opening a second one that tells half the story.
 function continueChat(id) {
-  router.push({ path: '/chat', query: { session: splitID(id)[0] } })
+  router.push({ path: '/chat', query: { session: splitID(id)[0], task: id } })
 }
 </script>
 
@@ -238,6 +266,12 @@ function continueChat(id) {
         <div v-else-if="!tasks.length" class="empty">
           <Icon name="spark" :size="28" />
           <span class="muted">还没有任务。到「对话」问一句，或让周期任务跑一次。</span>
+          <span v-if="skippedChat" class="muted tiny">
+            另有 {{ skippedChat }} 次普通对话没有列入——它们没有执行任何操作，在「会话」页查看
+          </span>
+        </div>
+        <div v-else-if="skippedChat" class="hint-bar muted tiny">
+          {{ skippedChat }} 次普通对话未列入（没有工具调用，也没有产物）
         </div>
 
         <div
@@ -334,45 +368,60 @@ function continueChat(id) {
                   <Icon :name="statusOf(s.status).icon" :size="11" />
                   {{ statusOf(s.status).label }}
                 </span>
-                <span v-if="s.calls" class="muted tiny">{{ s.calls }} 次调用</span>
+                <span v-if="stepSummary(s)" class="step-sum muted tiny">{{ stepSummary(s) }}</span>
               </li>
             </ol>
             <div v-else class="empty small"><span class="muted">这个任务没有执行步骤</span></div>
 
+            <!-- 点击步骤后的真实执行详情 -->
             <div v-if="selectedStep" class="step-detail">
-              <div v-if="selectedStep.progress" class="sd-progress">{{ selectedStep.progress }}</div>
+              <div class="sd-head">
+                <span class="sd-name">{{ selectedStep.label }}</span>
+                <span class="badge" :class="'tone-' + statusOf(selectedStep.status).tone">
+                  <Icon :name="statusOf(selectedStep.status).icon" :size="11" />
+                  {{ statusOf(selectedStep.status).label }}
+                </span>
+              </div>
+              <div v-if="selectedStep.note" class="sd-note">{{ selectedStep.note }}</div>
               <div v-if="selectedStep.error" class="error-bar">
                 <Icon name="alert" :size="14" /> {{ selectedStep.error }}
               </div>
               <div class="sd-row muted tiny">
-                <span v-if="selectedStep.started_at">
-                  开始 {{ absTime(Math.floor(selectedStep.started_at / 1000)) }}
-                </span>
-                <span v-if="selectedStep.ended_at">
-                  结束 {{ absTime(Math.floor(selectedStep.ended_at / 1000)) }}
-                </span>
+                <span v-if="selectedStep.started_at">开始 {{ absTime(Math.floor(selectedStep.started_at / 1000)) }}</span>
+                <span v-if="selectedStep.ended_at">结束 {{ absTime(Math.floor(selectedStep.ended_at / 1000)) }}</span>
                 <span v-if="selectedStep.agent">Agent {{ selectedStep.agent }}</span>
+                <span v-if="selectedStep.calls">{{ selectedStep.calls }} 次工具调用</span>
               </div>
-              <table v-if="(selectedStep.tools || []).length" class="tools">
-                <thead>
-                  <tr><th>工具</th><th>结果</th><th>耗时</th><th>证据</th></tr>
-                </thead>
-                <tbody>
-                  <tr v-for="(tl, i) in selectedStep.tools" :key="i">
-                    <td class="mono">{{ tl.name }}</td>
-                    <td>
-                      <span v-if="tl.pending" class="muted">执行中…</span>
-                      <span v-else-if="tl.ok" class="ok-text"><Icon name="check" :size="11" /> 成功</span>
-                      <span v-else class="bad-text"><Icon name="alert" :size="11" /> {{ tl.error || '失败' }}</span>
-                    </td>
-                    <td class="mono">{{ tl.duration_ms ? tl.duration_ms + ' ms' : '—' }}</td>
-                    <td class="mono">
-                      {{ tl.evidence_id || '—' }}
-                      <span v-if="tl.bytes" class="muted tiny">{{ fmtBytes(tl.bytes) }}</span>
-                    </td>
-                  </tr>
-                </tbody>
-              </table>
+
+              <!-- 每次调用：名称、状态、耗时、脱敏后的参数、结果概况、证据 -->
+              <div v-for="(tl, i) in selectedStep.tools" :key="i" class="call">
+                <div class="call-head">
+                  <span class="mono call-name">{{ tl.name }}</span>
+                  <span v-if="tl.pending" class="muted tiny">执行中…</span>
+                  <span v-else-if="tl.ok" class="ok-text tiny"><Icon name="check" :size="11" /> 成功</span>
+                  <span v-else class="bad-text tiny"><Icon name="alert" :size="11" /> 失败</span>
+                  <span v-if="tl.duration_ms" class="mono muted tiny">{{ tl.duration_ms }} ms</span>
+                  <span class="call-sp" />
+                  <button
+                    v-if="results[tl.call_id]"
+                    class="btn btn-sm"
+                    @click="openCallResult(tl)"
+                  >查看结果</button>
+                </div>
+                <div v-if="tl.args" class="call-args mono">{{ prettyJSON(tl.args) }}</div>
+                <div v-if="tl.error" class="error-bar">{{ tl.error }}</div>
+                <div v-else-if="tl.summary" class="call-sum">{{ tl.summary }}</div>
+                <div class="call-meta muted tiny">
+                  <span v-if="tl.evidence_id" class="mono">证据 {{ tl.evidence_id }}</span>
+                  <span v-if="tl.bytes">{{ fmtBytes(tl.bytes) }}</span>
+                  <span v-if="tl.lines">{{ tl.lines }} 行</span>
+                  <span v-if="tl.withheld" class="warn-text">未进上下文</span>
+                  <span v-else-if="tl.truncated" class="warn-text">已截断</span>
+                  <span v-if="results[tl.call_id]?.expired" class="bad-text">已过期</span>
+                  <span v-else-if="results[tl.call_id]?.retrievable" class="ok-text">可重读</span>
+                  <span v-else class="muted">未保存</span>
+                </div>
+              </div>
             </div>
           </div>
 
@@ -412,8 +461,8 @@ function continueChat(id) {
               <div v-if="artifactState(a).note" class="art-note">{{ artifactState(a).note }}</div>
             </div>
 
-            <div v-if="selectedArtifact && artifactState(selectedArtifact).readable" class="art-view">
-              <div v-if="selectedArtifact.kind !== 'report'" class="art-search">
+            <div v-if="preview || previewLoading" class="art-view">
+              <div class="art-search">
                 <Icon name="search" :size="14" />
                 <input
                   v-model="query"
@@ -435,6 +484,7 @@ function continueChat(id) {
               </div>
 
               <div v-if="preview?.error" class="error-bar"><Icon name="alert" :size="14" /> {{ preview.error }}</div>
+              <div v-else-if="preview?.note" class="notice-bar"><Icon name="alert" :size="14" /> {{ preview.note }}</div>
               <template v-else-if="preview">
                 <pre class="art-body mono">{{ preview.text }}</pre>
                 <div class="art-foot muted tiny">
@@ -445,11 +495,25 @@ function continueChat(id) {
               </template>
               <div v-else-if="previewLoading" class="empty small"><span class="spinner" /></div>
             </div>
-            <div v-else-if="selectedArtifact" class="art-view">
-              <div class="error-bar">
+            <div v-else-if="selectedArtifact && !artifactState(selectedArtifact).readable" class="art-view">
+              <div class="notice-bar">
                 <Icon name="alert" :size="14" /> {{ artifactState(selectedArtifact).note }}
               </div>
+              <div v-if="selectedArtifact.summary" class="art-body mono">{{ selectedArtifact.summary }}</div>
             </div>
+          </div>
+          <!-- 最终回复：用户真正收到的那条，逐字保留 -->
+          <div class="block">
+            <div class="block-head">
+              <span class="block-title">最终回复</span>
+              <span v-if="detail.reply" class="muted tiny">用户实际看到的回答</span>
+            </div>
+            <div v-if="detail.reply" class="reply">{{ detail.reply }}</div>
+            <div v-else-if="detail.status === 'failed'" class="error-bar">
+              <Icon name="alert" :size="14" />
+              {{ detail.error || '任务失败，没有产生最终回复' }}
+            </div>
+            <div v-else class="empty small"><span class="muted">这个任务还没有最终回复</span></div>
           </div>
         </template>
       </section>
@@ -556,6 +620,31 @@ function continueChat(id) {
 .hit-n { display: inline-block; min-width: 52px; color: var(--text-muted); }
 
 .empty.small { padding: var(--sp-4); }
+.hint-bar { padding: var(--sp-2) var(--sp-3); }
+.sd-head { display: flex; align-items: center; gap: var(--sp-2); }
+.sd-name { font-size: 13px; font-weight: 600; }
+.sd-note { font-size: 13px; color: var(--text-dim); }
+.step-sum { display: -webkit-box; -webkit-line-clamp: 2; line-clamp: 2;
+            -webkit-box-orient: vertical; overflow: hidden; }
+.call { display: flex; flex-direction: column; gap: 4px; padding: var(--sp-2) 0;
+        border-top: 1px solid var(--hairline); }
+.call-head { display: flex; align-items: center; gap: var(--sp-2); }
+.call-name { font-size: 12px; }
+.call-sp { flex: 1; }
+.call-args { font-size: 11px; color: var(--text-muted); background: var(--surface);
+             padding: var(--sp-2); border-radius: var(--radius-sm);
+             max-height: 120px; overflow: auto; white-space: pre-wrap;
+             word-break: break-word; margin: 0; }
+.call-sum { font-size: 12px; color: var(--text-dim); }
+.call-meta { display: flex; gap: var(--sp-3); flex-wrap: wrap; }
+.warn-text { color: var(--warning); }
+.notice-bar { display: flex; align-items: center; gap: var(--sp-2);
+              padding: var(--sp-2) var(--sp-3); background: var(--warning-tint);
+              color: var(--warning); border-radius: var(--radius-sm); font-size: 13px; }
+.reply { font-size: 14px; line-height: 1.7; white-space: pre-wrap;
+         word-break: break-word; padding: var(--sp-3);
+         border: 1px solid var(--hairline); border-radius: var(--radius-sm);
+         background: var(--surface); }
 .error-bar { display: flex; align-items: center; gap: var(--sp-2);
              padding: var(--sp-2) var(--sp-3); background: var(--danger-tint);
              color: var(--danger); border-radius: var(--radius-sm); font-size: 13px; }

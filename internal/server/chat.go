@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"iter"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -16,7 +17,9 @@ import (
 	"google.golang.org/genai"
 
 	"github.com/jelly-agent/jelly-agent/internal/engine"
+	"github.com/jelly-agent/jelly-agent/internal/logging"
 	"github.com/jelly-agent/jelly-agent/internal/memory"
+	"github.com/jelly-agent/jelly-agent/internal/task"
 )
 
 // chatRequest is the body of POST /api/chat/stream.
@@ -25,6 +28,11 @@ type chatRequest struct {
 	SessionID string `json:"session_id,omitempty"` // empty = start a new session
 	Provider  string `json:"provider,omitempty"`   // empty = default provider
 	Agent     string `json:"agent,omitempty"`      // named multi-agent root; empty = default/legacy
+	// TaskID attaches this run to an existing task instead of opening a new
+	// one. The task centre sends it when the user answers a question, supplies
+	// a threshold or asks for more — the goal did not change, so the work
+	// should not split into two entries that each tell half the story.
+	TaskID string `json:"task_id,omitempty"`
 }
 
 // sessionSeq disambiguates web session ids created within the same nanosecond.
@@ -120,6 +128,15 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 		func(round string) {
 			end := s.runs().start(sessionID, round)
 			finish = func(status string) { finish = nil; end(status) }
+			if req.TaskID != "" {
+				// Recorded as soon as the run has an identity. A failure here
+				// costs the run its place in an existing task, which is worth
+				// a log and not worth failing a turn the user is watching.
+				if err := task.Link(eng.SessionDBPath(), req.TaskID, sessionID, round); err != nil {
+					slog.Warn("任务归属未能记录，本次运行会显示为独立任务",
+						"task", req.TaskID, "session", sessionID, logging.Err(err))
+				}
+			}
 		})
 	if err != nil {
 		if finish != nil {
