@@ -15,7 +15,7 @@ const form = reactive({ name: '', transport: 'stdio', command: '', argsText: '',
 // per-server live test state, keyed by name: {loading, tools, error}
 const tests = reactive({})
 
-onMounted(load)
+onMounted(() => { load(); loadDecls() })
 
 async function load() {
   loading.value = true
@@ -81,6 +81,51 @@ function fmtTime(iso) {
     return new Date(iso).toLocaleTimeString('zh-CN', { hour12: false })
   } catch {
     return iso
+  }
+}
+
+// Tool declarations. The registry has always been able to read these from a
+// file; what was missing was a place to put one that anyone would find, and a
+// way to write it without a text editor.
+const decls = ref({})
+const kinds = ref([])
+const effects = ref([])
+const declDir = ref('')
+const declFile = ref('')
+const declError = ref('')
+
+async function loadDecls() {
+  try {
+    const r = await api.toolMetadata()
+    const byKey = {}
+    for (const d of r.tools || []) byKey[`${d.server || ''}/${d.name}`] = d
+    decls.value = byKey
+    kinds.value = r.kinds || []
+    effects.value = r.effects || []
+    declDir.value = r.dir || ''
+    declFile.value = r.file || ''
+    declError.value = ''
+  } catch (e) {
+    declError.value = e.message
+  }
+}
+
+function declOf(server, name) {
+  return decls.value[`${server}/${name}`] || { produces: '', side_effect: '', source: '' }
+}
+
+async function saveDecl(server, name, patch) {
+  const cur = declOf(server, name)
+  try {
+    await api.saveToolMetadata({
+      name, server,
+      produces: patch.produces !== undefined ? patch.produces : cur.produces || '',
+      side_effect: patch.side_effect !== undefined ? patch.side_effect : cur.side_effect || '',
+    })
+    declError.value = ''
+    await loadDecls()
+  } catch (e) {
+    declError.value = e.message
   }
 }
 
@@ -353,10 +398,41 @@ async function testForm() {
               <div class="tool-tags">
                 <span class="badge badge-accent">{{ tests[s.name].tools.length }} 个工具</span>
                 <span v-if="s.tools?.length" class="badge">白名单 {{ s.tools.length }} 个</span>
-                <span v-for="t in tests[s.name].tools" :key="t.name" class="badge mono"
-                  :class="{ 'badge-dim': s.tools?.length && !s.tools.includes(t.name) }"
-                  :title="s.tools?.length && !s.tools.includes(t.name) ? '未列入白名单，不会加载：' + (t.description || '') : t.description">{{ t.name }}</span>
               </div>
+
+              <!-- 工具用途：MCP 只报名字和描述，不报"这个工具产出什么"。
+                   而选择器按它打分、网关按它定上限、任务中心按它归并步骤——
+                   不声明就只能显示"执行工具"。这里声明，写进元数据目录。 -->
+              <table class="decls">
+                <thead>
+                  <tr><th>工具</th><th>产出</th><th>副作用</th><th></th></tr>
+                </thead>
+                <tbody>
+                  <tr v-for="t in tests[s.name].tools" :key="t.name"
+                      :class="{ dimmed: s.tools?.length && !s.tools.includes(t.name) }">
+                    <td class="mono" :title="t.description">{{ t.name }}</td>
+                    <td>
+                      <select class="input sel" :value="declOf(s.name, t.name).produces"
+                              :aria-label="t.name + ' 产出什么'"
+                              @change="saveDecl(s.name, t.name, { produces: $event.target.value })">
+                        <option value="">未声明</option>
+                        <option v-for="k in kinds" :key="k.value" :value="k.value">{{ k.label }}</option>
+                      </select>
+                    </td>
+                    <td>
+                      <select class="input sel" :value="declOf(s.name, t.name).side_effect"
+                              :aria-label="t.name + ' 的副作用'"
+                              @change="saveDecl(s.name, t.name, { side_effect: $event.target.value })">
+                        <option value="">未声明</option>
+                        <option v-for="e in effects" :key="e.value" :value="e.value">{{ e.label }}</option>
+                      </select>
+                    </td>
+                    <td class="mono tiny muted">{{ declOf(s.name, t.name).source === 'console' ? '已声明' : '' }}</td>
+                  </tr>
+                </tbody>
+              </table>
+              <div v-if="declError" class="error-bar"><Icon name="alert" :size="14" /> {{ declError }}</div>
+              <div v-else-if="declDir" class="muted tiny">保存到 {{ declDir }}/{{ declFile }}，可手工编辑</div>
             </div>
           </div>
         </div>
@@ -369,6 +445,14 @@ async function testForm() {
 .srv.down {
   border-color: var(--danger-border, var(--danger));
 }
+.decls { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: var(--sp-2); }
+.decls th { text-align: left; font-weight: 500; color: var(--text-muted);
+            padding: 4px 8px 4px 0; border-bottom: 1px solid var(--hairline); }
+.decls td { padding: 3px 8px 3px 0; border-bottom: 1px solid var(--hairline); vertical-align: middle; }
+.decls tr.dimmed { opacity: 0.5; }
+.decls .sel { width: auto; min-width: 116px; padding: 2px var(--sp-2); height: 28px; }
+.tiny { font-size: 11px; }
+
 .badge-bad {
   background: var(--danger-tint);
   color: var(--danger);

@@ -113,6 +113,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/tools", s.handleTools)
 	mux.HandleFunc("POST /api/tools/test", s.handleToolTest)
 	mux.HandleFunc("POST /api/tools/fetch", s.handleToolFetch)
+	mux.HandleFunc("GET /api/tools/metadata", s.handleToolMetadata)
+	mux.HandleFunc("POST /api/tools/metadata", s.handleSaveToolMetadata)
 	mux.HandleFunc("GET /api/mcp", s.handleListMCP)
 	mux.HandleFunc("POST /api/mcp", s.handleSaveMCP)
 	mux.HandleFunc("POST /api/mcp/test", s.handleTestMCP)

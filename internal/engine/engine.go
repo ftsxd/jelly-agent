@@ -256,21 +256,15 @@ func (e *Engine) toolRegistry() (*toolreg.Store, *gateway.Gateway) {
 		e.toolStore = toolreg.NewStore()
 
 		sources := []toolreg.Source{jellytool.BuiltinMetadata()}
-		if dir := e.cfg.Tools.MetadataDir; dir != "" {
+		// Always consulted, because the directory now has a default: the
+		// declarations are how an MCP tool says what it produces, and a layer
+		// reachable only by setting a path nobody knows about is a layer
+		// nobody uses. A missing directory is not an error — it means nothing
+		// has been declared yet.
+		if dir := e.ToolMetadataDir(); dir != "" {
 			sources = append(sources, toolreg.NewFileSource(dir))
 		}
-		metas, err := toolreg.Merge(context.Background(), sources...)
-		if err != nil {
-			slog.Error("工具元数据加载失败，仅使用内置默认值", logging.Err(err))
-			metas, _ = jellytool.BuiltinMetadata().Load(context.Background())
-		}
-		reg, conflicts := toolreg.Build(metas)
-		for _, c := range conflicts {
-			// Named on both sides, unlike ADK's own "duplicate tool" — the
-			// point of catching this here is that someone can act on it.
-			slog.Error("工具注册冲突，该条目未生效", "detail", c.Error())
-		}
-		e.toolStore.Swap(reg)
+		e.toolStore.Swap(buildRegistry(sources))
 
 		if e.contextUnguarded() {
 			slog.Warn("上下文无任何上限保护：history.max_tokens 为 0 关闭了压缩，而 tools.max_result_bytes 为 0 不限制单次返回。"+
@@ -292,7 +286,7 @@ func (e *Engine) toolRegistry() (*toolreg.Store, *gateway.Gateway) {
 		// somewhere for a human to answer — ADK's RequestConfirmation into a
 		// DingTalk card — which is its own change, not a smaller constant.
 		e.gw = gateway.New(gateway.Config{
-			Registry: gateway.Snapshot(reg),
+			Registry: gateway.Live(e.toolStore),
 			Policy: gateway.Policy{
 				MaxSideEffect:         e.sideEffectCeiling(),
 				AllowApprovalRequired: true,
@@ -668,6 +662,15 @@ func (e *Engine) Undeclared() map[string][]string {
 
 // ToolRegistry exposes the current registry snapshot, for the API's pre-save
 // conflict check and for health output.
+// ToolGateway is the gateway every tool call goes through.
+//
+// Exported for the console, which needs to be able to check that a change it
+// made is one the gateway will act on — not merely one the page can draw.
+func (e *Engine) ToolGateway() *gateway.Gateway {
+	_, gw := e.toolRegistry()
+	return gw
+}
+
 func (e *Engine) ToolRegistry() *toolreg.Registry {
 	store, _ := e.toolRegistry()
 	return store.Load()
@@ -1202,6 +1205,51 @@ func (e *Engine) buildNode(name, description, provider, instruction string, tool
 // so the suite's results depend on what that developer happens to have chatted
 // about. Call it before the first NewSessionService.
 func (e *Engine) SetSessionDBPath(path string) { e.sessionDBPath = path }
+
+// buildRegistry merges the metadata sources into a registry.
+//
+// A metadata problem is logged and tolerated: an unparsable overlay leaves the
+// built-in defaults in place, because refusing to start over a malformed
+// description would be a worse outcome than running with fewer wrapped tools.
+func buildRegistry(sources []toolreg.Source) *toolreg.Registry {
+	metas, err := toolreg.Merge(context.Background(), sources...)
+	if err != nil {
+		slog.Error("工具元数据加载失败，仅使用内置默认值", logging.Err(err))
+		metas, _ = jellytool.BuiltinMetadata().Load(context.Background())
+	}
+	reg, conflicts := toolreg.Build(metas)
+	for _, c := range conflicts {
+		// Named on both sides, unlike ADK's own "duplicate tool" — the point
+		// of catching this here is that someone can act on it.
+		slog.Error("工具注册冲突，该条目未生效", "detail", c.Error())
+	}
+	return reg
+}
+
+// ReloadToolMetadata re-reads the declarations and swaps the registry.
+//
+// Deliberately not a config reload. Rebuilding the engine cancels its MCP
+// context, which terminates every stdio subprocess and drops every open
+// session — an acceptable price for changing a provider, an absurd one for
+// saying that a tool returns metrics. The registry was always a swappable
+// store; this is what it was for.
+func (e *Engine) ReloadToolMetadata() {
+	store, _ := e.toolRegistry() // ensure it exists before swapping into it
+	sources := []toolreg.Source{jellytool.BuiltinMetadata()}
+	if dir := e.ToolMetadataDir(); dir != "" {
+		sources = append(sources, toolreg.NewFileSource(dir))
+	}
+	store.Swap(buildRegistry(sources))
+}
+
+// ToolMetadataDir is where this deployment's tool declarations live.
+//
+// Resolved rather than read straight off the config, so the default applies
+// and every caller — the loader, the console, the writer — agrees on one
+// location.
+func (e *Engine) ToolMetadataDir() string {
+	return config.ToolMetadataDir(e.cfg, e.cfg.SourcePath)
+}
 
 // SessionDBPath is where the session store lives, for the handlers that query
 // it directly rather than through the ADK service.

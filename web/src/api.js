@@ -51,6 +51,10 @@ export const api = {
   saveProvider: (p) => jpost('/api/providers', p),
   deleteProvider: (name) => jdelete(`/api/providers/${encodeURIComponent(name)}`),
   tools: () => jget('/api/tools'),
+  // What each tool is declared to be. The registry could always read these
+  // from a file; this is the console's way in.
+  toolMetadata: () => jget('/api/tools/metadata'),
+  saveToolMetadata: (decl) => jpost('/api/tools/metadata', decl),
   testTool: (query, max) => jpost('/api/tools/test', { query, max }),
   fetchUrl: (url, maxChars) => jpost('/api/tools/fetch', { url, max_chars: maxChars }),
   history: () => jget('/api/history'),

@@ -548,6 +548,14 @@ func (g *Gateway) ExecuteAs(ctx context.Context, meta CallMeta, ic *ops.Incident
 	return Result{Call: call, Evidence: ev}, nil
 }
 
+// Metadata is what the gateway believes a tool to be, right now.
+//
+// Exported so a caller can check that a declaration actually reached the
+// policy. It is the same lookup Execute does, which is the point: asking any
+// other source would answer a question about the display rather than about
+// what would happen to a call.
+func (g *Gateway) Metadata(name string) (ops.ToolMetadata, bool) { return g.lookup(name) }
+
 func (g *Gateway) lookup(name string) (ops.ToolMetadata, bool) {
 	if g.reg != nil {
 		if m, ok := g.reg.Lookup(name); ok {
@@ -971,6 +979,26 @@ func defaultSummary(raw map[string]any) string {
 
 // Snapshot adapts a registry snapshot to the interfaces this package reads.
 func Snapshot(r *toolreg.Registry) KeyedRegistry { return registrySnapshot{r} }
+
+// Live reads the store on every lookup, so a swapped registry takes effect
+// without rebuilding the gateway.
+//
+// Snapshot freezes the registry it was handed, which is right for a binder
+// built per request and wrong for the gateway, which is built once per engine.
+// With a frozen view, declaring a tool read-only from the console changed
+// what the task view said about it and not what the policy did — two answers
+// to one question, and the quieter one was the one that mattered.
+func Live(s *toolreg.Store) KeyedRegistry { return liveRegistry{s} }
+
+type liveRegistry struct{ s *toolreg.Store }
+
+func (l liveRegistry) Lookup(name string) (ops.ToolMetadata, bool) {
+	return l.s.Load().Lookup(name)
+}
+
+func (l liveRegistry) ByKey(key string) (ops.ToolMetadata, bool) {
+	return l.s.Load().ByKey(key)
+}
 
 type registrySnapshot struct{ r *toolreg.Registry }
 

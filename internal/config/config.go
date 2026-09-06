@@ -66,6 +66,11 @@ type Tools struct {
 	// MetadataDir holds YAML files describing tools: the name the model sees,
 	// which arguments the host injects, how a result is reduced. One file per
 	// backend keeps diffs reviewable. Empty means built-in defaults only.
+	// Empty resolves to a "tools" directory beside config.yaml — see
+	// ToolMetadataDir. It used to mean "built-in defaults only", which made
+	// the whole metadata layer opt-in through a path nobody had a reason to
+	// know about: declaring what an MCP tool produces required editing a file
+	// AND pointing at it, so in practice nobody declared anything.
 	MetadataDir string `mapstructure:"metadata_dir" yaml:"metadata_dir,omitempty"`
 
 	// MaxTools caps how many tool schemas reach the model on a turn. Every
@@ -562,4 +567,28 @@ func envOr(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// ToolMetadataDir resolves where tool declarations live.
+//
+// Beside the config file by default, because that is where the rest of this
+// deployment's decisions already are, and because a default is what turns an
+// existing capability into one people can actually reach. An explicit setting
+// still wins.
+//
+// configPath is the file the running config came from; when there is none
+// (env-only), the shared state directory is used, which is where everything
+// else without a home already goes.
+func ToolMetadataDir(c *Config, configPath string) string {
+	if c != nil && strings.TrimSpace(c.Tools.MetadataDir) != "" {
+		return c.Tools.MetadataDir
+	}
+	if configPath != "" && configPath != "(env)" {
+		return filepath.Join(filepath.Dir(configPath), "tools")
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".jelly-agent", "tools")
 }
