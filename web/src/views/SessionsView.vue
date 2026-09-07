@@ -103,18 +103,29 @@ async function removeChecked() {
   if (!confirm(`确认删除选中的 ${checked.value.length} 个会话？此操作不可恢复。`)) return
   deleting.value = true
   error.value = ''
+  const ids = [...checked.value]
+  let failure = ''
   try {
-    const ids = [...checked.value]
     await api.deleteSessions(ids)
+  } catch (e) {
+    failure = e.message
+  } finally {
+    // Refreshed whether or not it reported success. A failure here is usually
+    // about what could not be cleaned up afterwards — the sessions themselves
+    // are already gone — and leaving the list showing them means the error
+    // banner sits above rows that 404 when clicked.
     if (selected.value && ids.includes(selected.value)) {
       selected.value = null
       detail.value = null
     }
     checked.value = []
     await load()
-  } catch (e) {
-    error.value = e.message
-  } finally {
+    // Restored after the refresh, not before it: load() clears the banner on
+    // its way in, so setting it in the catch published the failure and then
+    // wiped it a moment later. The rows going away would have been the only
+    // thing left on screen — which reads as a clean delete, and the whole
+    // point of this message is that it was not one.
+    if (failure) error.value = failure
     deleting.value = false
   }
 }
@@ -158,16 +169,21 @@ async function open(id) {
 
 async function remove(s) {
   if (!confirm(`确认删除会话「${s.id}」？此操作不可恢复。`)) return
+  let failure = ''
   try {
     await api.deleteSession(s.id)
+  } catch (e) {
+    failure = e.message
+  } finally {
+    // See removeChecked: the session is gone even when the response is not
+    // ok, and the refresh that proves it must not take the message with it.
     if (selected.value === s.id) {
       selected.value = null
       detail.value = null
     }
     checked.value = checked.value.filter((id) => id !== s.id)
     await load()
-  } catch (e) {
-    error.value = e.message
+    if (failure) error.value = failure
   }
 }
 

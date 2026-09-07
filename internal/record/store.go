@@ -374,8 +374,18 @@ func (s *Store) ReadLabel(ctx context.Context, sc Scope, label string, offset, l
 
 // Read returns a window of one delivery, addressed by the tool call it
 // answered. Used by the console, which knows call ids from the timeline.
-func (s *Store) Read(ctx context.Context, sc Scope, callID string, offset, limit int) (Chunk, error) {
-	return s.read(ctx, sc, `call_id=?`, callID, offset, limit)
+//
+// The invocation is required, and that is not tidiness: the primary key is
+// (app, user, session, invocation, call), so a call id alone can match more
+// than one row in a session — two runs of the same conversation routinely
+// number their calls from zero. Reading on the call id alone returned an
+// arbitrary one of them, which showed one run's evidence under another run's
+// call. Prefer ReadLabel, whose key is unique per session by construction.
+func (s *Store) Read(ctx context.Context, sc Scope, invocationID, callID string, offset, limit int) (Chunk, error) {
+	if invocationID == "" || callID == "" {
+		return Chunk{}, ErrNotFound
+	}
+	return s.readBy(ctx, sc, `invocation_id=? AND call_id=?`, []any{invocationID, callID}, offset, limit)
 }
 
 // read is the shared body. The scope is part of the WHERE clause rather than
@@ -387,6 +397,10 @@ func (s *Store) Read(ctx context.Context, sc Scope, callID string, offset, limit
 // too large for a prompt, and a caller that wants it must say how much it
 // wants. A limit of zero or less takes the default window.
 func (s *Store) read(ctx context.Context, sc Scope, cond string, key any, offset, limit int) (Chunk, error) {
+	return s.readBy(ctx, sc, cond, []any{key}, offset, limit)
+}
+
+func (s *Store) readBy(ctx context.Context, sc Scope, cond string, keys []any, offset, limit int) (Chunk, error) {
 	if s == nil || s.db == nil {
 		return Chunk{}, errors.New("record: store not open")
 	}
@@ -411,13 +425,13 @@ func (s *Store) read(ctx context.Context, sc Scope, cond string, key any, offset
 		SELECT call_id,tool,server,at,seq,upstream,bytes,sha256,expired_at,payload
 		FROM tool_results
 		WHERE app_name=? AND user_id=? AND session_id=? AND `+cond,
-		sc.AppName, sc.UserID, sc.SessionID, key,
+		append([]any{sc.AppName, sc.UserID, sc.SessionID}, keys...)...,
 	).Scan(&c.CallID, &c.Tool, &c.Server, &at, &seq, &c.Upstream, &c.Total, &c.SHA256, &expired, &buf)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Chunk{}, ErrNotFound
 	}
 	if err != nil {
-		return Chunk{}, fmt.Errorf("record: read %s/%v: %w", sc.SessionID, key, err)
+		return Chunk{}, fmt.Errorf("record: read %s/%v: %w", sc.SessionID, keys, err)
 	}
 	if expired != "" {
 		// Reported before anything is decoded: the payload is gone, and

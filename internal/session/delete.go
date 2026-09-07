@@ -36,6 +36,15 @@ func DeleteSessions(dbPath, appName, userID string, ids []string) (int, error) {
 			appName, userID, id,
 		); err != nil {
 			tx.Rollback()
+			// A store whose schema has not been created yet holds no
+			// sessions, so there is nothing to delete and nothing went
+			// wrong. This became reachable once the handlers started
+			// honouring the configured path instead of silently deleting
+			// from the shared default: a fresh deployment's first delete
+			// used to answer 500 with a SQL error in it.
+			if isMissingTable(err) {
+				return deleted, nil
+			}
 			return deleted, fmt.Errorf("delete events for %q: %w", id, err)
 		}
 		res, err := tx.Exec(
@@ -44,6 +53,9 @@ func DeleteSessions(dbPath, appName, userID string, ids []string) (int, error) {
 		)
 		if err != nil {
 			tx.Rollback()
+			if isMissingTable(err) {
+				return deleted, nil
+			}
 			return deleted, fmt.Errorf("delete session %q: %w", id, err)
 		}
 		if n, _ := res.RowsAffected(); n > 0 {
@@ -73,11 +85,23 @@ func PurgeOrphanEvents(dbPath string) (int, error) {
 		  AND s.user_id = events.user_id
 		  AND s.id = events.session_id)`)
 	if err != nil {
-		if strings.Contains(err.Error(), "no such table") {
+		if isMissingTable(err) {
 			return 0, nil // fresh DB, nothing to purge
 		}
 		return 0, fmt.Errorf("purge orphan events: %w", err)
 	}
 	n, _ := res.RowsAffected()
 	return int(n), nil
+}
+
+// isMissingTable reports the one SQL failure that means "this store is empty"
+// rather than "this store is broken".
+//
+// The session schema is created by the ADK service on first use, so every path
+// that reaches the file directly can arrive before it exists. Matching on the
+// message is what the driver leaves available; the alternative — creating the
+// schema from here — would put a second definition of ADK's tables in this
+// repository.
+func isMissingTable(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "no such table")
 }

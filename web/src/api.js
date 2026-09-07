@@ -84,22 +84,27 @@ export const api = {
   // since the delivery store was built and had no client until now, which is
   // why the console could show that a result was retrievable but not retrieve
   // it.
-  readResult: (session, call, { offset = 0, limit } = {}, signal) => {
+  //
+  // Addressed by the delivery's handle (e7), not by the call id. A call id is
+  // unique within one run; a task that folds a follow-up run holds two runs
+  // whose first calls are both c1, and reading by call id served whichever the
+  // database happened to return.
+  readResult: (session, ref, { offset = 0, limit } = {}, signal) => {
     const q = new URLSearchParams({ offset: String(offset) })
     if (limit) q.set('limit', String(limit))
     return jget(
-      `/api/sessions/${encodeURIComponent(session)}/results/${encodeURIComponent(call)}?${q}`,
+      `/api/sessions/${encodeURIComponent(session)}/results/${encodeURIComponent(ref)}?${q}`,
       signal,
     )
   },
   // Searching one instead of paging through it — the same Store.Search the
   // model's search_result tool uses, so the two report the same counts.
-  searchResult: (session, call, q, { limit, context } = {}, signal) => {
+  searchResult: (session, ref, q, { limit, context } = {}, signal) => {
     const p = new URLSearchParams({ q })
     if (limit) p.set('limit', String(limit))
     if (context != null) p.set('context', String(context))
     return jget(
-      `/api/sessions/${encodeURIComponent(session)}/results/${encodeURIComponent(call)}/search?${p}`,
+      `/api/sessions/${encodeURIComponent(session)}/results/${encodeURIComponent(ref)}/search?${p}`,
       signal,
     )
   },

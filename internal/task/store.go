@@ -62,6 +62,9 @@ func Link(dbPath, taskID, sessionID, invocationID string) error {
 	if taskID == "" || sessionID == "" || invocationID == "" {
 		return fmt.Errorf("task: link needs a task, a session and an invocation")
 	}
+	if err := Owns(taskID, sessionID); err != nil {
+		return err
+	}
 	db, err := open(dbPath)
 	if err != nil {
 		return err
@@ -71,6 +74,21 @@ func Link(dbPath, taskID, sessionID, invocationID string) error {
 		VALUES(?,?,?,?) ON CONFLICT(session_id, invocation_id) DO NOTHING`,
 		taskID, sessionID, invocationID, time.Now().UTC().Format(time.RFC3339Nano))
 	return err
+}
+
+// Owns rejects a task id that belongs to a different conversation.
+//
+// A task id begins with the session that opened it, so this is a property of
+// the id and not a lookup. It is checked because the id arrives from the
+// client: a run could otherwise claim membership of any task in any session,
+// and the board would then show that other session's task wearing this run's
+// steps and title. Runs are folded per session, so nothing downstream could
+// have made sense of it either.
+func Owns(taskID, sessionID string) error {
+	if owner, _ := Split(taskID); owner != sessionID {
+		return fmt.Errorf("task: 任务 %q 属于会话 %q，不能把 %q 的运行挂上去", taskID, owner, sessionID)
+	}
+	return nil
 }
 
 // OfSession maps a session's runs to the tasks they were attached to.
@@ -125,9 +143,59 @@ func open(dbPath string) (*sql.DB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("task: open db: %w", err)
 	}
+	// The same settings every other opener on this file uses, and for the same
+	// reason: this database is shared with the session store, the delivery
+	// store and the metrics recorder, all of which are writing while a turn
+	// runs. Without WAL a reader blocks the writer; without a busy timeout a
+	// brief write lock fails the call outright, and the call here is the one
+	// that records which task a run belongs to — losing it silently splits a
+	// continuation off into a task of its own. One connection, because a
+	// second one would queue behind the first for no gain on a file this
+	// small.
+	db.SetMaxOpenConns(1)
+	for _, pragma := range []string{
+		`PRAGMA journal_mode=WAL`,
+		`PRAGMA busy_timeout=5000`,
+		`PRAGMA synchronous=NORMAL`,
+	} {
+		if _, err := db.Exec(pragma); err != nil {
+			db.Close()
+			return nil, fmt.Errorf("task: %s: %w", pragma, err)
+		}
+	}
 	if _, err := db.Exec(schema); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("task: create table: %w", err)
 	}
 	return db, nil
+}
+
+// DeleteSessions drops the task memberships of the given sessions.
+//
+// Called when the sessions are deleted. A membership row names a session, an
+// invocation and the task they belonged to, so it outlives the conversation it
+// describes unless it goes with it.
+func DeleteSessions(dbPath string, ids []string) (int, error) {
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	db, err := open(dbPath)
+	if err != nil {
+		return 0, err
+	}
+	defer db.Close()
+	n := 0
+	for _, id := range ids {
+		if id == "" {
+			continue
+		}
+		res, err := db.Exec(`DELETE FROM task_runs WHERE session_id = ?`, id)
+		if err != nil {
+			return n, fmt.Errorf("task: delete runs of %s: %w", id, err)
+		}
+		if c, _ := res.RowsAffected(); c > 0 {
+			n += int(c)
+		}
+	}
+	return n, nil
 }

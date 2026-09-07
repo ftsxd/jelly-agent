@@ -2,10 +2,13 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	adkmemory "google.golang.org/adk/memory"
 	adksession "google.golang.org/adk/session"
@@ -13,8 +16,11 @@ import (
 
 	"github.com/jelly-agent/jelly-agent/internal/config"
 	"github.com/jelly-agent/jelly-agent/internal/engine"
+	"github.com/jelly-agent/jelly-agent/internal/logging"
 	"github.com/jelly-agent/jelly-agent/internal/memory"
+	"github.com/jelly-agent/jelly-agent/internal/record"
 	jellysession "github.com/jelly-agent/jelly-agent/internal/session"
+	"github.com/jelly-agent/jelly-agent/internal/task"
 	jellytool "github.com/jelly-agent/jelly-agent/internal/tool"
 )
 
@@ -193,7 +199,7 @@ func sessionPreview(ctx context.Context, svc adksession.Service, id string) stri
 // handleSessionIDs returns every session id (newest first) for the "select all
 // across pages" action, so batch delete can target the full set without paging.
 func (s *Server) handleSessionIDs(w http.ResponseWriter, _ *http.Request) {
-	ids, err := jellysession.AllIDs("", engine.AppName, engine.UserID)
+	ids, err := jellysession.AllIDs(s.engine().SessionDBPath(), engine.AppName, engine.UserID)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -327,18 +333,102 @@ func (s *Server) handleSessionDetail(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// purgeTimeout bounds the clean-up that follows a delete. Generous, because it
+// is four small deletes against a local file and finishing matters more than
+// finishing quickly; bounded, because it no longer has a request to end it.
+const purgeTimeout = 30 * time.Second
+
 // handleDeleteSession removes one persisted session (and its events) from the
 // store. Deleting a missing session is treated as success (idempotent).
+//
+// The path is threaded, not left empty. Reading and deleting used to disagree:
+// the list came from the configured database and the delete went to the
+// default one, so a deployment with its own database could not delete anything
+// it could see — and if the default database happened to hold a session with
+// the same id, that one went instead.
 func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	if _, err := jellysession.DeleteSessions("", engine.AppName, engine.UserID, []string{id}); err != nil {
+	if _, err := jellysession.DeleteSessions(s.engine().SessionDBPath(), engine.AppName, engine.UserID, []string{id}); err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	// Also drop the session's L2 search-index rows, else load_memory could still
-	// surface the deleted conversation.
-	_, _ = memory.PurgeSessions("", []string{id})
+	if err := s.purgeSessionTraces(r.Context(), []string{id}); err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// purgeSessionTraces removes everything else a deleted session left behind.
+//
+// Deleting the conversation used to mean deleting the conversation: the events
+// and the search index. But a turn writes to four places, and the other two
+// are the ones with the contents in them — tool_results holds the raw payload
+// of every call, byte for byte, and tool_calls holds what was called with what
+// shape of arguments. Both are addressed by session id, and the delivery
+// endpoint is addressed by a handle, so anyone holding an old handle could
+// still read a conversation the user had deleted. task_runs goes too: it names
+// a session, an invocation and the task they belonged to.
+//
+// Every store is attempted, and every failure is both logged and returned.
+//
+// Returned, because the caller asked for the conversation to be gone and a
+// delete that answers ok while the raw payloads are still readable is the one
+// answer nobody can act on. The first version logged and reported success:
+// the operator would have had to be watching the log at the moment they
+// clicked to learn that the thing they deleted was still there.
+//
+// Attempted in full rather than stopped at the first failure, because three
+// stores emptied out of four is better than one, and because the message
+// should name everything that is still holding data rather than the first
+// thing that went wrong.
+func (s *Server) purgeSessionTraces(ctx context.Context, ids []string) error {
+	// Detached from the request, deliberately.
+	//
+	// The sessions are already gone by the time this runs, and nothing here
+	// can be undone. Tying it to the request meant a browser that navigated
+	// away or hit stop cancelled the purge halfway — leaving the raw payloads
+	// of a deleted conversation readable, with nobody to tell, because the
+	// response could no longer be written either. A caller who left still
+	// asked for this, and it has to finish.
+	//
+	// The values are kept (tracing, request ids); only the cancellation is
+	// dropped. The deadline is this work's own, so a wedged database cannot
+	// leak the goroutine instead.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), purgeTimeout)
+	defer cancel()
+
+	var errs []error
+	fail := func(what string, err error, args ...any) {
+		slog.Error("删除会话后清理"+what+"失败", append(args, logging.Err(err))...)
+		errs = append(errs, fmt.Errorf("%s未能清理: %w", what, err))
+	}
+
+	// L2 search index, else load_memory could still surface the conversation.
+	if _, err := memory.PurgeSessions(s.engine().SessionDBPath(), ids); err != nil {
+		fail("记忆索引", err, "sessions", len(ids))
+	}
+	store, err := s.engine().Records()
+	if err != nil {
+		fail("工具结果（存储打不开，原始返回内容仍可通过句柄读到）", err)
+	} else if store != nil {
+		for _, id := range ids {
+			if err := store.Delete(ctx, record.Scope{
+				AppName: engine.AppName, UserID: engine.UserID, SessionID: id,
+			}); err != nil {
+				fail("工具结果（原始返回内容仍可通过句柄读到）", err, "session", id)
+			}
+		}
+	}
+	if tr := s.engine().Metrics(); tr != nil {
+		if _, err := tr.DeleteSessions(ids); err != nil {
+			fail("调用记录", err, "sessions", len(ids))
+		}
+	}
+	if _, err := task.DeleteSessions(s.engine().SessionDBPath(), ids); err != nil {
+		fail("任务归属", err, "sessions", len(ids))
+	}
+	return errors.Join(errs...)
 }
 
 // handleDeleteSessions removes several sessions in one request (batch delete on
@@ -356,13 +446,19 @@ func (s *Server) handleDeleteSessions(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "ids 不能为空")
 		return
 	}
-	deleted, err := jellysession.DeleteSessions("", engine.AppName, engine.UserID, in.IDs)
+	deleted, err := jellysession.DeleteSessions(s.engine().SessionDBPath(), engine.AppName, engine.UserID, in.IDs)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, fmt.Sprintf("批量删除失败（已删除 %d 个）: %v", deleted, err))
 		return
 	}
-	// Also drop the sessions' L2 search-index rows (see handleDeleteSession).
-	_, _ = memory.PurgeSessions("", in.IDs)
+	if err := s.purgeSessionTraces(r.Context(), in.IDs); err != nil {
+		// The sessions themselves are gone, so the count still means
+		// something and goes back with the failure rather than instead of it.
+		writeJSON(w, http.StatusInternalServerError, map[string]any{
+			"error": err.Error(), "deleted": deleted,
+		})
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "deleted": deleted})
 }
 

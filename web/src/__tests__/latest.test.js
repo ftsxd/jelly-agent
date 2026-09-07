@@ -94,3 +94,63 @@ describe('latestOnly', () => {
     }
   })
 })
+
+describe('abandon', () => {
+  // The gate only invalidated when a new call started, so it covered "switch
+  // to another readable product" and nothing else. Switching to an expired
+  // one, or to another task, fetches nothing — and the previous request stayed
+  // the owner, landing later under a heading that was no longer its own.
+  it('disowns an in-flight call without starting one', async () => {
+    const gate = latestOnly()
+    let release
+    const held = new Promise((r) => { release = r })
+
+    const first = gate.run(async () => { await held; return 'e1 的内容' })
+    gate.abandon()
+    release('e1 的内容')
+
+    const got = await first
+    expect(got.owned).toBe(false)
+    expect(got.value).toBeUndefined()
+  })
+
+  it('aborts the request it disowns', async () => {
+    const gate = latestOnly()
+    let seen = null
+    const first = gate.run((signal) => new Promise((resolve) => {
+      seen = signal
+      signal?.addEventListener('abort', () => resolve('never used'))
+    }))
+    gate.abandon()
+    expect(seen?.aborted).toBe(true)
+    expect((await first).owned).toBe(false)
+  })
+
+  // And it does not poison the next one: abandoning is about what is in
+  // flight, not about closing the gate.
+  it('leaves the next call owned', async () => {
+    const gate = latestOnly()
+    gate.abandon()
+    const got = await gate.run(async () => 'e2 的内容')
+    expect(got.owned).toBe(true)
+    expect(got.value).toBe('e2 的内容')
+  })
+})
+
+// The shape the task list needs: an abandoned request must not clear the
+// loading flag or write an error, because a newer one owns both.
+describe('an abandoned call touches nothing', () => {
+  it('reports neither a value nor an error when superseded', async () => {
+    const gate = latestOnly()
+    let failSlow
+    const slow = gate.run(() => new Promise((_, reject) => { failSlow = reject }))
+    const fast = await gate.run(async () => ({ tasks: [1, 2] }))
+    failSlow(new Error('慢的那个失败了'))
+
+    const stale = await slow
+    expect(stale.owned).toBe(false)
+    expect(stale.error).toBeUndefined()
+    expect(fast.owned).toBe(true)
+    expect(fast.value.tasks).toEqual([1, 2])
+  })
+})

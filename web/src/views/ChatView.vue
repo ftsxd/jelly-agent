@@ -8,6 +8,7 @@ import { api, streamChat } from '../api'
 import { renderMarkdown } from '../markdown'
 import { applyFrame, emptyTimeline, finalAnswer } from '../timeline'
 import { latestOnly } from '../latest'
+import { taskOfSession } from '../tasks'
 
 const PROVIDER_KEY = 'jelly.provider' // remembers the last-used provider
 const AGENT_KEY = 'jelly.agent' // remembers the last-used agent (multi-agent)
@@ -65,10 +66,16 @@ onMounted(async () => {
 })
 
 // The task this conversation is continuing, if the user came from one.
+//
+// Held as what the route said; what actually goes out is taskOfSession of it,
+// so an attachment that belongs to another conversation is simply not sent
+// rather than sent and refused. The ref outlives a session switch — the
+// attachment must not.
 const continuingTask = ref(typeof route.query.task === 'string' ? route.query.task : '')
 watch(() => route.query.task, (id) => {
   continuingTask.value = typeof id === 'string' ? id : ''
 })
+const activeTask = computed(() => taskOfSession(continuingTask.value, sessionId.value))
 
 watch(() => route.query.session, async (id) => {
   if (typeof id === 'string' && id && id !== sessionId.value) await openHistorySession(id)
@@ -151,6 +158,7 @@ function newChat() {
   if (busy.value) return
   messages.value = []
   sessionId.value = ''
+  continuingTask.value = ''
   error.value = ''
   router.replace({ query: {} })
 }
@@ -189,15 +197,19 @@ async function send() {
         // after the turn: the next question is a new goal unless they say so,
         // and silently attaching everything after would let one task swallow
         // the rest of the conversation.
-        taskId: continuingTask.value,
+        taskId: activeTask.value,
       },
       (ev) => handleFrame(live, ev),
       abort.signal,
     )
-    continuingTask.value = ''
   } catch (e) {
     if (e.name !== 'AbortError') error.value = e.message
   } finally {
+    // Cleared however the turn ended. It is an attachment the user made once,
+    // by arriving from a task; carrying it into the next question would let
+    // one task swallow the rest of the conversation, and carrying it past a
+    // failure would repeat the failure.
+    continuingTask.value = ''
     busy.value = false
     abort = null
     scrollDown()

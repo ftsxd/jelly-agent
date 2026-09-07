@@ -210,36 +210,90 @@ func TestAnExpiredCooldownDoesNotClaimRecovery(t *testing.T) {
 func TestConcurrentTurnsShareOneToolListing(t *testing.T) {
 	var calls atomic.Int64
 	release := make(chan struct{})
+	started := make(chan struct{})
 	l := newListing()
 
-	var wg sync.WaitGroup
-	for i := 0; i < 8; i++ {
+	fetch := func(context.Context) ([]adktool.Tool, error) {
+		calls.Add(1)
+		close(started)
+		<-release // hold the fetch open while the others arrive
+		return nil, errors.New("i/o timeout")
+	}
+	leader := make(chan struct{})
+	go func() { defer close(leader); _, _ = l.do(context.Background(), "n9e-mcp", fetch) }()
+	<-started // the shared call is registered and running
+
+	// The others arrive while the fetch is still held open, and the fetch is
+	// released only once they are all inside it.
+	//
+	// The old version released as soon as the first dial was counted, which is
+	// before the followers necessarily got there: one that arrived after the
+	// shared call had finished dialled again — legitimately, since the call
+	// was over — and the count read that as the collapsing having failed. The
+	// test was asserting a timing coincidence.
+	var arrived, wg sync.WaitGroup
+	for range 8 {
+		arrived.Add(1)
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			arrived.Done()
 			_, _ = l.do(context.Background(), "n9e-mcp", func(context.Context) ([]adktool.Tool, error) {
 				calls.Add(1)
-				<-release // hold every caller inside the one in-flight fetch
-				return nil, errors.New("i/o timeout")
+				return nil, errors.New("a follower dialled on its own")
 			})
 		}()
 	}
-	// Let them pile up on the single call, then let it finish.
-	for i := 0; i < 200 && calls.Load() == 0; i++ {
-		time.Sleep(time.Millisecond)
-	}
+	arrived.Wait()
+	// Nothing can finish while release is open, so this only has to be long
+	// enough for eight goroutines to reach an uncontended map lookup.
+	time.Sleep(50 * time.Millisecond)
+
 	close(release)
 	wg.Wait()
+	<-leader
 
 	if n := calls.Load(); n != 1 {
 		t.Errorf("eight concurrent turns dialled %d times, want 1", n)
 	}
+}
 
-	// And it is not a cache: the next round fetches again.
-	_, _ = l.do(context.Background(), "n9e-mcp", func(context.Context) ([]adktool.Tool, error) { calls.Add(1); return nil, nil })
+// And it is not a cache: once the shared call is over, the next round dials
+// again, because the tool list is meant to be re-read per turn.
+func TestAFinishedListingIsNotReused(t *testing.T) {
+	var calls atomic.Int64
+	l := newListing()
+	fetch := func(context.Context) ([]adktool.Tool, error) {
+		calls.Add(1)
+		return nil, nil
+	}
+	if _, err := l.do(context.Background(), "n9e-mcp", fetch); err != nil {
+		t.Fatal(err)
+	}
+	// The slot is freed on the fetch's own goroutine, just after the answer is
+	// published, so a caller can return before it is gone.
+	waitForNoInFlight(t, l, "n9e-mcp")
+
+	if _, err := l.do(context.Background(), "n9e-mcp", fetch); err != nil {
+		t.Fatal(err)
+	}
 	if n := calls.Load(); n != 2 {
 		t.Errorf("a later call reused a finished result (%d calls); the tool list must be re-read per turn", n)
 	}
+}
+
+func waitForNoInFlight(t *testing.T, l *listing, name string) {
+	t.Helper()
+	for i := 0; i < 2000; i++ {
+		l.mu.Lock()
+		_, present := l.calls[name]
+		l.mu.Unlock()
+		if !present {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("in-flight call was never cleaned up")
 }
 
 // blockingSet holds every caller inside one Tools() call, so concurrent turns

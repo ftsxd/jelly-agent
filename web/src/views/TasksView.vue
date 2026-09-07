@@ -24,15 +24,22 @@ import { latestOnly } from '../latest'
 import { absTime, relTime } from '../time'
 import { fmtBytes, prettyJSON } from '../format'
 import {
-  anyLive, artifactState, artifactsOfStep, emptyReason, isLive,
-  needsAttention, selectionStore, statusOf, stepOfArtifact, stepSummary,
-  toggleStep, typeLabel,
+  anyLive, artifactState, artifactsOfStep, emptyReason, isLive, loadTaskList,
+  needsAttention, resultOf, selectionStore, statusOf, stepOfArtifact,
+  stepSummary, toggleStep, typeLabel,
 } from '../tasks'
 
 const router = useRouter()
 
 const tasks = ref([])
 const total = ref(0)
+// Whether that count is the number of tasks or a floor. The list reads back
+// through the sessions only as far as it needs to, and stops at a ceiling when
+// a filter matches nothing — saying "42" in that case would claim a search
+// that never finished.
+const totalExact = ref(true)
+const scanned = ref(0)
+const sessionsTotal = ref(0)
 const skippedChat = ref(0)
 const loading = ref(true)
 const error = ref('')
@@ -55,11 +62,29 @@ const stepID = ref('')
 const artifactID = ref('')
 const sel = selectionStore()
 const openGate = latestOnly()
+// The list is owned too. Filters are two selects and a poll fires every three
+// seconds, so a slow response for 全部 could land after a fast one for 失败 and
+// repopulate the board with rows the filter excludes — with the filter still
+// reading 失败, which makes it look like the filter is broken rather than late.
+const listGate = latestOnly()
 
+// What is open in the product pane, addressed by its handle.
+//
+// A handle, not an artifact object: most tool results are too small to be
+// listed as products of the run, and opening one from its step used to leave
+// the pane's other controls — 继续读取 and 搜索 — looking at `selectedArtifact`,
+// which is null for exactly those. They searched the wrong thing or nothing.
 const preview = ref(null)
 const previewLoading = ref(false)
 const query = ref('')
 const hits = ref(null)
+// Both requests are owned: switching product while one is in flight must not
+// let the abandoned answer render under the new selection. Separate gates, so
+// starting a search does not cancel a 继续读取 that is still arriving.
+const readGate = latestOnly()
+const searchGate = latestOnly()
+// The handle the pane is showing, whether it came from the shelf or a step.
+const openRef = computed(() => preview.value?.ref || artifactID.value)
 
 const steps = computed(() => detail.value?.steps || [])
 const selectedStep = computed(() => steps.value.find((s) => s.id === stepID.value) || null)
@@ -74,19 +99,26 @@ watch([stepID, artifactID], () => {
   if (selectedID.value) sel.set(selectedID.value, { step: stepID.value, artifact: artifactID.value })
 })
 
+// The ordering rule lives in tasks.js so it can be tested; this supplies the
+// request and the three places its answer lands.
 async function load() {
-  loading.value = true
-  try {
-    const r = await api.tasks({ type: filterType.value, status: filterStatus.value, limit: 100 })
-    tasks.value = r.tasks || []
-    total.value = r.total || 0
-    skippedChat.value = r.skipped_chat || 0
-    error.value = ''
-  } catch (e) {
-    error.value = e.message
-  } finally {
-    loading.value = false
-  }
+  await loadTaskList(
+    listGate,
+    (signal) => api.tasks({ type: filterType.value, status: filterStatus.value, limit: 100 }, signal),
+    {
+      loading: (busy) => { loading.value = busy },
+      error: (message) => { error.value = message },
+      data: (r) => {
+        tasks.value = r.tasks || []
+        total.value = r.total || 0
+        totalExact.value = r.total_exact !== false
+        scanned.value = r.scanned_sessions || 0
+        sessionsTotal.value = r.sessions_total || 0
+        skippedChat.value = r.skipped_chat || 0
+        error.value = ''
+      },
+    },
+  )
 }
 
 async function open(id) {
@@ -95,9 +127,7 @@ async function open(id) {
   detail.value = null
   artifacts.value = []
   results.value = {}
-  preview.value = null
-  hits.value = null
-  query.value = ''
+  clearPreview()
 
   const remembered = sel.get(id)
   stepID.value = remembered.step
@@ -143,65 +173,83 @@ function pickStep(step) {
 
 async function pickArtifact(a) {
   artifactID.value = a.label
-  preview.value = null
-  hits.value = null
-  query.value = ''
+  clearPreview()
   const from = stepOfArtifact(steps.value, a)
   if (from) stepID.value = from.id
-  if (artifactState(a).readable) await readMore(a, 0)
+  if (!artifactState(a).readable) return
+  await readMore(a.label, 0)
+}
+
+// clearPreview empties the product pane and disowns anything still in flight.
+//
+// Both halves, always together. Emptying without disowning leaves the previous
+// request able to write into the pane it no longer belongs to; disowning
+// without emptying leaves the last product's bytes under the new selection's
+// heading. The paths that fetch nothing — an expired product, a result that
+// was never stored, switching task — are exactly the ones that used to do
+// neither.
+function clearPreview() {
+  readGate.abandon()
+  searchGate.abandon()
+  preview.value = null
+  previewLoading.value = false
+  hits.value = null
+  query.value = ''
 }
 
 // Reading one tool call's result from inside a step, for the results that are
 // too small to be listed as products of the run but are exactly what someone
 // clicking that step wants to see.
 async function openCallResult(tool) {
-  const ref_ = results.value[tool.call_id]
-  if (!ref_) return
-  artifactID.value = ref_.label
-  preview.value = null
-  hits.value = null
-  if (!ref_.retrievable) {
-    preview.value = { label: ref_.label, text: '', note: ref_.expired
-      ? '结果已过期，请重新查询'
-      : '这次返回没有留在结果存储里，只能看到调用当时记录的摘要' }
+  const found = resultOf(results.value, tool)
+  if (!found) return
+  artifactID.value = found.label
+  clearPreview()
+  if (!found.retrievable) {
+    preview.value = {
+      ref: found.label, text: '',
+      note: found.expired
+        ? '结果已过期，请重新查询'
+        : '这次返回没有留在结果存储里，只能看到调用当时记录的摘要',
+    }
     return
   }
-  await readMore({ label: ref_.label, call_id: tool.call_id }, 0)
+  await readMore(found.label, 0)
 }
 
-async function readMore(a, offset) {
+async function readMore(ref, offset) {
+  if (!ref) return
   previewLoading.value = true
   const [session] = splitID(selectedID.value)
-  try {
-    const r = await api.readResult(session, a.call_id, { offset })
-    preview.value = {
-      label: a.label,
-      text: (offset ? (preview.value?.text || '') : '') + (r.data || ''),
-      total: r.total || 0,
-      offset: r.next_offset || 0,
-      hasMore: !!r.has_more,
-      upstream: r.upstream_truncated || '',
-    }
-  } catch (e) {
+  const carry = offset ? (preview.value?.text || '') : ''
+  const r = await readGate.run((signal) => api.readResult(session, ref, { offset }, signal))
+  if (!r.owned) return // superseded: another product is open, leave it alone
+  previewLoading.value = false
+  if (r.error) {
     // 410 carries its own words for expiry, 404 for a reference that never
     // existed. Either way the message is shown as itself, never as an empty
     // preview that reads like "the tool returned nothing".
-    preview.value = { label: a.label, text: '', error: e.message }
-  } finally {
-    previewLoading.value = false
+    preview.value = { ref, text: '', error: r.error.message }
+    return
+  }
+  preview.value = {
+    ref,
+    text: carry + (r.value.data || ''),
+    total: r.value.total || 0,
+    offset: r.value.next_offset || 0,
+    hasMore: !!r.value.has_more,
+    upstream: r.value.upstream_truncated || '',
   }
 }
 
 async function runSearch() {
-  const a = selectedArtifact.value || { call_id: results.value[stepID.value]?.call_id }
-  const callID = a?.call_id
-  if (!callID || !query.value.trim()) return
+  const ref = openRef.value
+  const q = query.value.trim()
+  if (!ref || !q) return
   const [session] = splitID(selectedID.value)
-  try {
-    hits.value = await api.searchResult(session, callID, query.value.trim(), { context: 1 })
-  } catch (e) {
-    hits.value = { error: e.message }
-  }
+  const r = await searchGate.run((signal) => api.searchResult(session, ref, q, { context: 1 }, signal))
+  if (!r.owned || openRef.value !== ref) return
+  hits.value = r.error ? { error: r.error.message } : r.value
 }
 
 // Polling, only while something is running.
@@ -236,7 +284,12 @@ function continueChat(id) {
     <header class="topbar">
       <div class="topbar-l">
         <h1>任务</h1>
-        <span class="sub muted">{{ total }} 个任务 · 查询监控 / 日志分析 / 日常巡检</span>
+        <span class="sub muted">
+          {{ totalExact ? '' : '至少 ' }}{{ total }} 个任务 · 查询监控 / 日志分析 / 日常巡检
+          <template v-if="!totalExact">
+            · 已回溯 {{ scanned }}/{{ sessionsTotal }} 个会话，更早的请缩小筛选范围
+          </template>
+        </span>
       </div>
       <div class="topbar-r">
         <select v-model="filterType" class="input sel" aria-label="按类型筛选" @change="load">
@@ -403,7 +456,7 @@ function continueChat(id) {
                   <span v-if="tl.duration_ms" class="mono muted tiny">{{ tl.duration_ms }} ms</span>
                   <span class="call-sp" />
                   <button
-                    v-if="results[tl.call_id]"
+                    v-if="resultOf(results, tl)"
                     class="btn btn-sm"
                     @click="openCallResult(tl)"
                   >查看结果</button>
@@ -417,8 +470,8 @@ function continueChat(id) {
                   <span v-if="tl.lines">{{ tl.lines }} 行</span>
                   <span v-if="tl.withheld" class="warn-text">未进上下文</span>
                   <span v-else-if="tl.truncated" class="warn-text">已截断</span>
-                  <span v-if="results[tl.call_id]?.expired" class="bad-text">已过期</span>
-                  <span v-else-if="results[tl.call_id]?.retrievable" class="ok-text">可重读</span>
+                  <span v-if="resultOf(results, tl)?.expired" class="bad-text">已过期</span>
+                  <span v-else-if="resultOf(results, tl)?.retrievable" class="ok-text">可重读</span>
                   <span v-else class="muted">未保存</span>
                 </div>
               </div>
@@ -490,7 +543,7 @@ function continueChat(id) {
                 <div class="art-foot muted tiny">
                   已读 {{ fmtBytes(preview.offset || preview.total) }} / {{ fmtBytes(preview.total) }}
                   <button v-if="preview.hasMore" class="btn btn-sm" :disabled="previewLoading"
-                          @click="readMore(selectedArtifact, preview.offset)">继续读取</button>
+                          @click="readMore(preview.ref, preview.offset)">继续读取</button>
                 </div>
               </template>
               <div v-else-if="previewLoading" class="empty small"><span class="spinner" /></div>

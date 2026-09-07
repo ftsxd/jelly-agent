@@ -21,31 +21,42 @@ import (
 
 	"github.com/jelly-agent/jelly-agent/internal/engine"
 	"github.com/jelly-agent/jelly-agent/internal/record"
+	jellysession "github.com/jelly-agent/jelly-agent/internal/session"
 )
 
-// handleToolResult returns a window of one call's delivered result.
+// handleToolResult returns a window of one delivery, addressed by its handle.
+//
+// The handle, not the call id. A call id is unique within one run, not within
+// a session — two runs of the same conversation both number their first call
+// c1 — so addressing by it returned an arbitrary one of them, and the task
+// centre, which shows several runs of one task side by side, is exactly where
+// that surfaced. The handle (e7) is assigned by the store and is unique per
+// session by construction.
 //
 // The session is in the path and is the permission boundary: the lookup is
-// scoped by it in SQL rather than fetched and then compared, so a call id from
+// scoped by it in SQL rather than fetched and then compared, so a handle from
 // one conversation cannot reach another's payload. A record in another scope
 // and a record that never existed both answer 404 — distinguishing them would
 // tell a caller which sessions exist.
 func (s *Server) handleToolResult(w http.ResponseWriter, r *http.Request) {
 	sessionID := r.PathValue("id")
-	callID := r.PathValue("call")
-	if sessionID == "" || callID == "" {
-		writeErr(w, http.StatusBadRequest, "缺少 session 或 call id")
+	ref := r.PathValue("ref")
+	if sessionID == "" || ref == "" {
+		writeErr(w, http.StatusBadRequest, "缺少 session 或结果引用")
 		return
 	}
 
+	if !s.sessionStillThere(w, sessionID) {
+		return
+	}
 	store, err := s.engine().Records()
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	chunk, err := store.Read(r.Context(),
+	chunk, err := store.ReadLabel(r.Context(),
 		record.Scope{AppName: engine.AppName, UserID: engine.UserID, SessionID: sessionID},
-		callID,
+		ref,
 		queryInt(r, "offset", 0, 0, 1<<30),
 		queryInt(r, "limit", record.DefaultWindow, 1, record.MaxWindow),
 	)
@@ -61,7 +72,7 @@ func (s *Server) handleToolResult(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if errors.Is(err, record.ErrNotFound) {
-		writeErr(w, http.StatusNotFound, "该调用没有可重读的完整结果")
+		writeErr(w, http.StatusNotFound, "该引用没有可重读的完整结果")
 		return
 	}
 	if err != nil {
@@ -75,6 +86,7 @@ func (s *Server) handleToolResult(w http.ResponseWriter, r *http.Request) {
 		"server":      chunk.Server,
 		"at":          chunk.At,
 		"label":       chunk.Label,
+		"call_id":     chunk.CallID,
 		"total":       chunk.Total,
 		"offset":      chunk.Offset,
 		"data":        string(chunk.Data),
@@ -96,10 +108,13 @@ func (s *Server) handleToolResult(w http.ResponseWriter, r *http.Request) {
 // Store.Search the search_result tool uses, so the two cannot disagree about
 // what a match is or how many there were.
 func (s *Server) handleToolResultSearch(w http.ResponseWriter, r *http.Request) {
-	sessionID, callID := r.PathValue("id"), r.PathValue("call")
+	sessionID, ref := r.PathValue("id"), r.PathValue("ref")
 	pattern := r.URL.Query().Get("q")
 	if strings.TrimSpace(pattern) == "" {
 		writeErr(w, http.StatusBadRequest, "q 不能为空")
+		return
+	}
+	if !s.sessionStillThere(w, sessionID) {
 		return
 	}
 	store, err := s.engine().Records()
@@ -107,31 +122,24 @@ func (s *Server) handleToolResultSearch(w http.ResponseWriter, r *http.Request) 
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	// The store searches by handle, the console addresses by call id — so the
-	// call is resolved to its handle first, in the same scoped read the
-	// display path uses.
-	chunk, err := store.Read(r.Context(), record.Scope{
+	// Addressed by the same handle the read path takes, so the two cannot
+	// disagree about which delivery is being talked about. There used to be a
+	// call-id-to-handle resolution step here, which is where the ambiguity
+	// between two runs' identically numbered calls entered.
+	res, err := store.Search(r.Context(), record.Scope{
 		AppName: engine.AppName, UserID: engine.UserID, SessionID: sessionID,
-	}, callID, 0, 1)
+	}, ref, pattern, record.SearchOpts{
+		Limit:   queryInt(r, "limit", record.DefaultHits, 1, record.MaxHits),
+		Context: queryInt(r, "context", 1, 0, 20),
+	})
 	if errors.Is(err, record.ErrExpired) {
 		writeErr(w, http.StatusGone, "结果已过期，请重新查询")
 		return
 	}
 	if errors.Is(err, record.ErrNotFound) {
-		writeErr(w, http.StatusNotFound, "该调用没有可重读的完整结果")
+		writeErr(w, http.StatusNotFound, "该引用没有可重读的完整结果")
 		return
 	}
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-
-	res, err := store.Search(r.Context(), record.Scope{
-		AppName: engine.AppName, UserID: engine.UserID, SessionID: sessionID,
-	}, chunk.Label, pattern, record.SearchOpts{
-		Limit:   queryInt(r, "limit", record.DefaultHits, 1, record.MaxHits),
-		Context: queryInt(r, "context", 1, 0, 20),
-	})
 	if err != nil {
 		// A pattern the caller wrote wrongly is theirs to fix, and they can
 		// only fix it if told what was wrong with it.
@@ -139,4 +147,25 @@ func (s *Server) handleToolResultSearch(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	writeJSON(w, http.StatusOK, res)
+}
+
+// sessionStillThere refuses to serve a deleted conversation's deliveries.
+//
+// Deleting a session now removes its stored results too, so this is the second
+// lock on the same door. It is here because the first one is a delete that can
+// half succeed — and because these endpoints are addressed by a handle, which
+// someone may still be holding from before. A deleted session and a session
+// that never existed answer the same 404: telling them apart would tell a
+// caller which conversations used to be here.
+func (s *Server) sessionStillThere(w http.ResponseWriter, id string) bool {
+	ok, err := jellysession.Exists(s.engine().SessionDBPath(), engine.AppName, engine.UserID, id)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return false
+	}
+	if !ok {
+		writeErr(w, http.StatusNotFound, "会话不存在")
+		return false
+	}
+	return true
 }

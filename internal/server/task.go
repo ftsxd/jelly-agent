@@ -161,8 +161,12 @@ func referencesEvidence(args map[string]any) bool {
 
 // StepTool is one tool call inside a step.
 type StepTool struct {
-	Name       string         `json:"name"`
+	Name string `json:"name"`
+	// CallID identifies the call within its run, and only within its run: two
+	// runs of one task both number their first call c1. Round is what makes it
+	// unique, and every consumer that indexes by call must pair the two.
 	CallID     string         `json:"call_id"`
+	Round      string         `json:"round"`
 	Args       map[string]any `json:"args,omitempty"` // redacted; see redactArgs
 	OK         bool           `json:"ok"`
 	Pending    bool           `json:"pending"`
@@ -277,15 +281,22 @@ func foldTasks(sessionID string, frames []map[string]any, infoOf func(string) To
 		kinds  map[ops.EvidenceKind]int
 		tools  int
 		seen   map[string]bool // invocations folded into this task
+		// errs holds the model failures reported per run, in the order they
+		// happened, and answered says which runs went on to reply anyway.
+		//
+		// Kept apart and resolved at the end rather than applied on the spot,
+		// because a failure is only final if the run never answered. Applied
+		// on the spot, a model that was refused, retried and answered was
+		// shown as completed live and as failed on every reload — the same run
+		// telling two stories depending on which surface you looked at.
+		errs     []roundError
+		answered map[string]bool
 	}
 	order := []string{}
 	byTask := map[string]*building{}
 
 	taskFor := func(round string) *building {
-		id := linkOf[round]
-		if id == "" {
-			id = task.ID(sessionID, round)
-		}
+		id := taskIDFor(sessionID, round, linkOf)
 		b, ok := byTask[id]
 		if !ok {
 			s, inv := task.Split(id)
@@ -294,9 +305,10 @@ func foldTasks(sessionID string, frames []map[string]any, infoOf func(string) To
 					ID: id, SessionID: s, Round: inv,
 					Status: TaskCompleted, Type: TypeOther,
 				},
-				byCall: map[string]*Step{},
-				kinds:  map[ops.EvidenceKind]int{},
-				seen:   map[string]bool{},
+				byCall:   map[string]*Step{},
+				kinds:    map[ops.EvidenceKind]int{},
+				seen:     map[string]bool{},
+				answered: map[string]bool{},
 			}
 			byTask[id] = b
 			order = append(order, id)
@@ -323,19 +335,23 @@ func foldTasks(sessionID string, frames []map[string]any, infoOf func(string) To
 			pendingTitle, _ = f["text"].(string)
 			continue
 		case frameError:
-			for _, id := range order {
-				b := byTask[id]
-				if b.task.Status == TaskRunning || b.task.Status == TaskCompleted {
-					b.task.Status = TaskFailed
-					if msg, _ := f["message"].(string); msg != "" && b.task.Error == "" {
-						b.task.Error = msg
-					}
+			// The stream-level error — the transport gave out, and nothing
+			// after it is trustworthy — carries no round and fails what is
+			// open. A model-reported failure names its run, and goes through
+			// the ordinary path below so that it can open a task of its own:
+			// a question that was refused before any tool ran produced no
+			// other frame at all, so there was nothing for the failure to
+			// attach to and the run vanished from the board entirely.
+			if round == "" {
+				msg, _ := f["message"].(string)
+				for _, id := range order {
+					failTask(byTask[id].task, msg)
 				}
+				continue
 			}
-			continue
 		}
 		switch typ {
-		case frameToolCall, frameToolResult, frameText, frameThought, frameLLMTurn:
+		case frameToolCall, frameToolResult, frameText, frameThought, frameLLMTurn, frameError:
 		default:
 			continue
 		}
@@ -355,6 +371,10 @@ func foldTasks(sessionID string, frames []map[string]any, infoOf func(string) To
 		pendingTitle = ""
 
 		switch typ {
+		case frameError:
+			msg, _ := f["message"].(string)
+			b.errs = append(b.errs, roundError{round: round, msg: msg})
+
 		case frameToolCall:
 			name, _ := f["name"].(string)
 			args, _ := f["args"].(map[string]any)
@@ -379,10 +399,11 @@ func foldTasks(sessionID string, frames []map[string]any, infoOf func(string) To
 			b.cur.Calls++
 			b.tools++
 			b.cur.Tools = append(b.cur.Tools, StepTool{
-				Name: name, CallID: callID, Args: redactArgs(args), Pending: true,
+				Name: name, CallID: callID, Round: round,
+				Args: redactArgs(args), Pending: true,
 			})
 			if callID != "" {
-				b.byCall[callID] = b.cur
+				b.byCall[round+"/"+callID] = b.cur
 			}
 			if info.Kind != "" {
 				b.kinds[info.Kind]++
@@ -390,7 +411,7 @@ func foldTasks(sessionID string, frames []map[string]any, infoOf func(string) To
 
 		case frameToolResult:
 			callID, _ := f["call_id"].(string)
-			step := b.byCall[callID]
+			step := b.byCall[round+"/"+callID]
 			if step == nil {
 				step = b.cur
 			}
@@ -405,7 +426,10 @@ func foldTasks(sessionID string, frames []map[string]any, infoOf func(string) To
 			resp, _ := f["response"].(map[string]any)
 
 			for i := range step.Tools {
-				if step.Tools[i].CallID != callID {
+				// Both halves: a merged task holds several runs, and matching
+				// on the call id alone attached a follow-up run's result to
+				// the first run's call.
+				if step.Tools[i].CallID != callID || step.Tools[i].Round != round {
 					continue
 				}
 				t := &step.Tools[i]
@@ -460,6 +484,7 @@ func foldTasks(sessionID string, frames []map[string]any, infoOf func(string) To
 			// The task's reply is the latest one, because that is what the
 			// user last received.
 			b.task.Reply = text
+			b.answered[round] = true
 			b.cur = nil
 		}
 	}
@@ -472,6 +497,15 @@ func foldTasks(sessionID string, frames []map[string]any, infoOf func(string) To
 				s.Status = TaskCompleted
 			}
 			b.task.Steps = append(b.task.Steps, *s)
+		}
+		// A model failure stands only if that run never answered. This is the
+		// same rule the live stream applies, and it has to be the same rule:
+		// otherwise a recovered turn reads as completed while it is streaming
+		// and as failed the moment the page is reloaded.
+		for _, e := range b.errs {
+			if !b.answered[e.round] {
+				failTask(b.task, e.msg)
+			}
 		}
 		b.task.Type = taskType(b.task.SessionID, b.kinds)
 		if b.task.Title == "" {
@@ -497,18 +531,23 @@ func foldTasks(sessionID string, frames []map[string]any, infoOf func(string) To
 // the scheduler ran it, if it produced a stored result, or if it ended in a
 // state a person has to do something about. "你好" satisfies none of those and
 // is a conversation, which is a different thing the console already shows.
-func IsTask(t Task, hasRecords bool) bool {
+// hasRecords is a function, not a value, because answering it costs a query
+// against the delivery store — and every other test here is a field
+// comparison. Ordered so the cheap ones run first: it is consulted only for a
+// run that looks like conversation by every other measure, which is a small
+// fraction of them and the only case where the answer changes anything.
+func IsTask(t Task, hasRecords func() bool) bool {
 	if strings.HasPrefix(t.SessionID, schedulePrefix) {
-		return true
-	}
-	if hasRecords {
 		return true
 	}
 	switch t.Status {
 	case TaskFailed, TaskWaitingInput, TaskBlocked:
 		return true
 	}
-	return !t.Chat
+	if !t.Chat {
+		return true
+	}
+	return hasRecords != nil && hasRecords()
 }
 
 // readResponse lifts what the gateway already told the model into the step.
@@ -635,3 +674,28 @@ func frameInt64(m map[string]any, key string) int64 {
 func sortTasksNewestFirst(ts []Task) {
 	sort.SliceStable(ts, func(i, j int) bool { return ts[i].StartedAt > ts[j].StartedAt })
 }
+
+// taskIDFor is which task a run belongs to: the one it was joined to, or its
+// own. One definition, because a second one drifting from this is how a run
+// ends up folded into a task in one view and standing alone in another.
+func taskIDFor(sessionID, round string, linkOf map[string]string) string {
+	if id := linkOf[round]; id != "" {
+		return id
+	}
+	return task.ID(sessionID, round)
+}
+
+// failTask records a failure without displacing an earlier one. What stopped a
+// run explains the rest, so the first message is the one worth keeping.
+func failTask(t *Task, msg string) {
+	if t.Status == TaskRunning || t.Status == TaskCompleted {
+		t.Status = TaskFailed
+	}
+	if msg != "" && t.Error == "" {
+		t.Error = msg
+	}
+}
+
+// roundError is one run's model-reported failure, kept until the fold knows
+// whether that run went on to answer anyway.
+type roundError struct{ round, msg string }

@@ -70,7 +70,27 @@ func (s *selectingToolset) Tools(ctx agent.ReadonlyContext) ([]adktool.Tool, err
 		// The merged fetch runs on its own lifetime, so it is handed a
 		// substituted context rather than this caller's — see listing.do.
 		fetch := func(run context.Context) ([]adktool.Tool, error) {
-			return set.tools(withDeadline(ctx, run))
+			got, err := set.tools(withDeadline(ctx, run))
+			// The verdict is recorded here, on the fetch, rather than by
+			// whichever caller happens to receive it.
+			//
+			// It has to be in place before the in-flight slot is freed. A
+			// caller recorded it after that, so a turn arriving in between saw
+			// a server with no cooldown and no shared call — and dialled it
+			// again. Recording it here means the answer and the verdict become
+			// visible together.
+			//
+			// Cancellation cannot reach this: run is the shared context, not
+			// the caller's, so a caller walking away no longer marks a healthy
+			// server down.
+			if s.health != nil {
+				if err != nil {
+					s.health.fail(set.name, err)
+				} else {
+					s.health.ok(set.name)
+				}
+			}
+			return got, err
 		}
 		var (
 			got []adktool.Tool
@@ -94,13 +114,7 @@ func (s *selectingToolset) Tools(ctx agent.ReadonlyContext) ([]adktool.Tool, err
 			// degraded answer and the operator has to be able to see why.
 			slog.Error("MCP 服务器取工具列表失败，本轮跳过该服务器的工具（对话继续，但它提供的能力暂时不可用）",
 				"server", set.name, "cooldown", toolsetCooldown.String(), logging.Err(err))
-			if s.health != nil {
-				s.health.fail(set.name, err)
-			}
 			continue
-		}
-		if s.health != nil {
-			s.health.ok(set.name)
 		}
 		all = append(all, got...)
 	}

@@ -189,3 +189,68 @@ export function stepSummary(step) {
 
 /** Human byte size, mirroring format.js so the two never disagree. */
 export { fmtBytes } from './format'
+
+/**
+ * resultOf finds one tool call's stored result in the detail's index.
+ *
+ * The index is keyed by run and call together, because a call id is only
+ * unique inside its own run: a task that folded a follow-up holds two runs
+ * whose first calls are both c1. Keying by the call alone showed the earlier
+ * run's bytes under the later run's step, which looks like a correct answer
+ * to the wrong question — the worst kind of wrong to render.
+ */
+export function resultKey(round, callID) {
+  return `${round || ''}/${callID || ''}`
+}
+
+export function resultOf(results, tool) {
+  if (!results || !tool) return null
+  return results[resultKey(tool.round, tool.call_id)] || null
+}
+
+/**
+ * taskOfSession is the task attachment a turn may actually carry.
+ *
+ * A task id names the conversation that opened it, and the server refuses one
+ * from anywhere else. The chat view holds the attachment in a ref that
+ * outlives a session switch, so without this it kept sending a task id from
+ * the previous conversation — and because the attachment is only cleared after
+ * a turn succeeds, the rejection made it permanent: every message after that
+ * failed the same way, with nothing on screen explaining why.
+ *
+ * Answered from the ids themselves rather than by remembering to clear a ref
+ * in each of the several places a session can change.
+ */
+export function taskOfSession(taskID, sessionID) {
+  if (!taskID || !sessionID) return ''
+  return taskID.startsWith(`${sessionID}/`) ? taskID : ''
+}
+
+/**
+ * loadTaskList runs a guarded list fetch and applies it only if still owned.
+ *
+ * The rule itself is two lines, and it lives here rather than in the view for
+ * the reason every other rule in this file does: there is no component test
+ * harness, so a rule written inside a .vue file has no test — and a race guard
+ * nobody can test is a race guard that quietly stops working. A test of
+ * latestOnly on its own does not cover this: it stays green the day the view
+ * stops calling it.
+ *
+ * The sink is three callbacks rather than refs so the ordering can be observed
+ * from a test: what an abandoned response must not do is exactly "call any of
+ * these".
+ */
+export async function loadTaskList(gate, fetch, sink) {
+  sink.loading(true)
+  const r = await gate.run((signal) => fetch(signal))
+  // Superseded: a newer load owns the board, including its loading flag and
+  // its error. An abandoned request must not clear or set either.
+  if (!r.owned) return false
+  sink.loading(false)
+  if (r.error) {
+    sink.error(r.error.message)
+    return false
+  }
+  sink.data(r.value)
+  return true
+}

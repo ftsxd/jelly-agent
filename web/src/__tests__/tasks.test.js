@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest'
 import {
-  anyLive, artifactState, artifactsOfStep, emptyReason, isLive, needsAttention,
-  selectionStore, statusOf, stepOfArtifact, stepSummary, toggleStep, typeLabel,
+  anyLive, artifactState, artifactsOfStep, emptyReason, isLive, loadTaskList,
+  needsAttention, resultKey, resultOf, selectionStore, statusOf, stepOfArtifact,
+  stepSummary, taskOfSession, toggleStep, typeLabel,
 } from '../tasks'
+import { latestOnly } from '../latest'
 
 describe('statusOf', () => {
   it('names every status the backend produces', () => {
@@ -200,5 +202,108 @@ describe('stepSummary', () => {
     expect(stepSummary({ calls: 3 })).toBe('3 次工具调用')
     expect(stepSummary({})).toBe('')
     expect(stepSummary(null)).toBe('')
+  })
+})
+
+describe('resultOf', () => {
+  // The task centre folds a follow-up run into the task that opened it, so one
+  // detail holds several runs — and every run numbers its calls from the start.
+  const results = {
+    'inv-1/c1': { label: 'e1', call_id: 'c1', round: 'inv-1', retrievable: true },
+    'inv-2/c1': { label: 'e4', call_id: 'c1', round: 'inv-2', retrievable: true },
+  }
+
+  it('tells two runs\' identically numbered calls apart', () => {
+    expect(resultOf(results, { call_id: 'c1', round: 'inv-1' }).label).toBe('e1')
+    expect(resultOf(results, { call_id: 'c1', round: 'inv-2' }).label).toBe('e4')
+  })
+
+  it('has no answer for a call with no run, rather than a wrong one', () => {
+    expect(resultOf(results, { call_id: 'c1' })).toBeNull()
+    expect(resultOf(results, null)).toBeNull()
+    expect(resultOf(null, { call_id: 'c1', round: 'inv-1' })).toBeNull()
+  })
+
+  it('keys on both halves', () => {
+    expect(resultKey('inv-1', 'c1')).toBe('inv-1/c1')
+    expect(resultKey('inv-1', 'c1')).not.toBe(resultKey('inv-2', 'c1'))
+  })
+})
+
+describe('taskOfSession', () => {
+  // The chat view holds the attachment in a ref that outlives a session
+  // switch. The server refuses a task id from another conversation, and the
+  // ref was only cleared after a turn succeeded — so one switch made every
+  // following message fail the same way, with nothing on screen saying why.
+  it('drops an attachment that belongs to another conversation', () => {
+    expect(taskOfSession('web-a/inv-1', 'web-b')).toBe('')
+  })
+
+  it('keeps the one that belongs to this conversation', () => {
+    expect(taskOfSession('web-a/inv-1', 'web-a')).toBe('web-a/inv-1')
+  })
+
+  // A session id that is a prefix of another must not match: web-1 is not
+  // web-10, and ids are generated with a shared prefix.
+  it('matches on the whole session, not a prefix of it', () => {
+    expect(taskOfSession('web-10/inv-1', 'web-1')).toBe('')
+  })
+
+  it('has nothing to send before a session exists', () => {
+    expect(taskOfSession('web-a/inv-1', '')).toBe('')
+    expect(taskOfSession('', 'web-a')).toBe('')
+  })
+})
+
+describe('loadTaskList', () => {
+  // What the view actually calls. A test of latestOnly alone does not cover
+  // this: it stays green the day the view stops using the gate, which is the
+  // regression worth guarding — filters are two selects and a poll fires every
+  // three seconds, so a slow 全部 landing after a fast 失败 repopulates the
+  // board with rows the filter excludes while the filter still reads 失败.
+  const sinkOf = () => {
+    const seen = { loading: [], errors: [], data: [] }
+    return [seen, {
+      loading: (v) => seen.loading.push(v),
+      error: (m) => seen.errors.push(m),
+      data: (d) => seen.data.push(d),
+    }]
+  }
+
+  it('applies only the newest response', async () => {
+    const gate = latestOnly()
+    const [seen, sink] = sinkOf()
+
+    let finishSlow
+    const slow = loadTaskList(gate, () => new Promise((r) => { finishSlow = r }), sink)
+    await loadTaskList(gate, async () => ({ tasks: ['新的'] }), sink)
+    finishSlow({ tasks: ['旧的'] })
+    await slow
+
+    expect(seen.data).toEqual([{ tasks: ['新的'] }])
+  })
+
+  it('lets an abandoned failure touch neither the error nor the spinner', async () => {
+    const gate = latestOnly()
+    const [seen, sink] = sinkOf()
+
+    let failSlow
+    const slow = loadTaskList(gate, () => new Promise((_, reject) => { failSlow = reject }), sink)
+    await loadTaskList(gate, async () => ({ tasks: [] }), sink)
+    failSlow(new Error('旧请求失败了'))
+    await slow
+
+    expect(seen.errors).toEqual([])
+    // Two starts, one stop: the newest call owns the spinner and turned it off.
+    expect(seen.loading).toEqual([true, true, false])
+  })
+
+  it('reports a failure that is still the newest', async () => {
+    const gate = latestOnly()
+    const [seen, sink] = sinkOf()
+    await loadTaskList(gate, async () => { throw new Error('后端挂了') }, sink)
+    expect(seen.errors).toEqual(['后端挂了'])
+    expect(seen.data).toEqual([])
+    expect(seen.loading).toEqual([true, false])
   })
 })

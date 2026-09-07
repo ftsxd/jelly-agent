@@ -9,6 +9,8 @@ package server
 // can disagree with what actually happened.
 
 import (
+	"context"
+	"log/slog"
 	"net/http"
 	"sort"
 	"strings"
@@ -16,16 +18,29 @@ import (
 	adksession "google.golang.org/adk/session"
 
 	"github.com/jelly-agent/jelly-agent/internal/engine"
+	"github.com/jelly-agent/jelly-agent/internal/logging"
 	"github.com/jelly-agent/jelly-agent/internal/ops"
 	"github.com/jelly-agent/jelly-agent/internal/record"
 	jellysession "github.com/jelly-agent/jelly-agent/internal/session"
 	"github.com/jelly-agent/jelly-agent/internal/task"
 )
 
-// taskListScan bounds how many sessions a list request folds. Older tasks stay
-// reachable through their session; an unbounded scan would make the page
-// slower the longer the deployment has run.
-const taskListScan = 60
+// How far a list request reads back through the sessions.
+//
+// It reads in pages and stops as soon as it has enough tasks to answer, rather
+// than folding a fixed prefix and paging inside it. The difference showed as
+// soon as a filter was involved: a status the recent sessions did not contain
+// returned an empty page while matching tasks sat one session further back,
+// and asking for page two of anything returned nothing at all, because the
+// prefix rarely held two pages' worth.
+//
+// taskScanMax is the ceiling that keeps a filter matching nothing from walking
+// the whole history. Reaching it is reported rather than hidden: the answer
+// then says its total is a floor, in the same words the result search uses.
+const (
+	taskScanPage = 40
+	taskScanMax  = 600
+)
 
 // artifactMinBytes is the size at which a stored result is worth listing on
 // its own.
@@ -101,37 +116,39 @@ func (s *Server) tasksOf(r *http.Request, svc adksession.Service, id string, inf
 	return tasks, nil
 }
 
-// recordedRuns reports which of a session's runs left something in the store.
+// recordedRuns reports which runs of these sessions left something in the
+// store, for the admission test.
 //
-// It is one of the admission tests, and it is the one that catches a run whose
-// tools all failed after storing something, or whose events are older than the
-// flags the fold reads.
-func (s *Server) recordedRuns(r *http.Request, sessionID string) map[string]bool {
-	out := map[string]bool{}
-	store, err := s.engine().Records()
+// One query for the whole page rather than one per session. It is the only
+// expensive test in that rule, and the scan reads back hundreds of sessions —
+// asked one at a time it was the page's dominant cost, and the answer is a
+// single distinct-select over an index either way.
+//
+// A failure is an empty answer rather than an error: this decides whether a
+// run whose tools all failed still counts as work, and losing the whole list
+// because that probe could not be made would be a worse outcome than
+// occasionally filing such a run as conversation.
+func (s *Server) recordedRuns(ctx context.Context, sessionIDs []string) map[string]map[string]bool {
+	probe := s.recordsProbe
+	if probe == nil {
+		store, err := s.engine().Records()
+		if err != nil || store == nil {
+			return nil
+		}
+		probe = store.RecordedRuns
+	}
+	got, err := probe(ctx, engine.AppName, engine.UserID, sessionIDs)
 	if err != nil {
-		return out
+		slog.Warn("任务列表无法确认哪些运行留下了产物，本次按没有产物处理", logging.Err(err))
+		return nil
 	}
-	items, err := store.List(r.Context(), record.Scope{
-		AppName: engine.AppName, UserID: engine.UserID, SessionID: sessionID,
-	}, record.ListOpts{Limit: record.MaxListLimit})
-	if err != nil {
-		return out
-	}
-	for _, it := range items {
-		out[it.InvocationID] = true
-	}
-	return out
+	return got
 }
 
-// handleTasks lists the tasks of recent sessions.
+// handleTasks lists tasks, reading back through the sessions until it has
+// enough of them to answer.
 func (s *Server) handleTasks(w http.ResponseWriter, r *http.Request) {
 	svc, err := s.engine().NewSessionService()
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	metas, _, err := jellysession.ListPage(s.engine().SessionDBPath(), engine.AppName, engine.UserID, taskListScan, 0)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -140,47 +157,113 @@ func (s *Server) handleTasks(w http.ResponseWriter, r *http.Request) {
 	infoOf := s.toolInfoResolver()
 	wantStatus := strings.TrimSpace(r.URL.Query().Get("status"))
 	wantType := strings.TrimSpace(r.URL.Query().Get("type"))
+	limit := queryInt(r, "limit", 50, 1, 200)
+	offset := queryInt(r, "offset", 0, 0, 1<<20)
+	// One past the page, so "is there more" is answered by having found it
+	// rather than by guessing from a count that was itself truncated.
+	need := offset + limit + 1
 
-	all, skippedChat := make([]Task, 0, len(metas)), 0
-	for _, m := range metas {
-		tasks, err := s.tasksOf(r, svc, m.ID, infoOf)
+	var (
+		// Never nil: the page iterates this, and JSON null is not iterable.
+		all           = []Task{}
+		skippedChat   int
+		scanned       int
+		sessionsTotal int
+		exhausted     bool
+	)
+	for scanned < taskScanMax {
+		metas, count, err := jellysession.ListPage(
+			s.engine().SessionDBPath(), engine.AppName, engine.UserID, taskScanPage, scanned)
 		if err != nil {
-			continue // a session that vanished mid-scan is not an error for the list
+			writeErr(w, http.StatusInternalServerError, err.Error())
+			return
 		}
-		recorded := s.recordedRuns(r, m.ID)
-		for _, t := range tasks {
-			// Conversation is not work. "你好" belongs in the sessions view,
-			// which already shows it; putting it here makes the board about
-			// messages instead of about goals.
-			if !IsTask(t, anyRecorded(t, recorded)) {
-				skippedChat++
-				continue
+		sessionsTotal = count
+		if len(metas) == 0 {
+			exhausted = true
+			break
+		}
+		scanned += len(metas)
+		ids := make([]string, 0, len(metas))
+		for _, m := range metas {
+			ids = append(ids, m.ID)
+		}
+		recorded := s.recordedRuns(r.Context(), ids)
+		// The oldest update time in this page bounds everything still
+		// unscanned: sessions come back newest-updated first, so no session
+		// after these can have been touched later than this.
+		//
+		// It is a bound on session activity, not on task age, and that is the
+		// whole difficulty. A session that was active this morning can hold a
+		// hundred tasks from last month, and stopping as soon as it had filled
+		// the page put those on top while a task from yesterday sat in the
+		// very next session, unread. Having enough tasks is not the same as
+		// having the right ones.
+		//
+		// Rounded up to the next second, because the list reports update times
+		// in whole seconds while a task's start is in milliseconds. Multiplying
+		// the truncated value gave a frontier up to 999ms too low — below a
+		// task that genuinely sits above it — which is a bound that lets the
+		// scan stop one session too early. A bound that is nearly right is not
+		// a bound.
+		frontier := (metas[len(metas)-1].LastUpdate + 1) * 1000
+		for _, m := range metas {
+			tasks, err := s.tasksOf(r, svc, m.ID, infoOf)
+			if err != nil {
+				continue // a session that vanished mid-scan is not an error for the list
 			}
-			if wantStatus != "" && t.Status != wantStatus {
-				continue
+			runs := recorded[m.ID]
+			for _, t := range tasks {
+				// Conversation is not work. "你好" belongs in the sessions
+				// view, which already shows it; putting it here makes the
+				// board about messages instead of about goals.
+				if !IsTask(t, func() bool { return anyRecorded(t, runs) }) {
+					skippedChat++
+					continue
+				}
+				if wantStatus != "" && t.Status != wantStatus {
+					continue
+				}
+				if wantType != "" && t.Type != wantType {
+					continue
+				}
+				t.Steps = summarizeSteps(t.Steps)
+				t.Reply = firstLine(t.Reply)
+				all = append(all, t)
 			}
-			if wantType != "" && t.Type != wantType {
-				continue
-			}
-			t.Steps = summarizeSteps(t.Steps)
-			t.Reply = firstLine(t.Reply)
-			all = append(all, t)
+		}
+		if scanned >= sessionsTotal {
+			exhausted = true
+			break
+		}
+		// Enough tasks is not the test. The test is that the page cannot
+		// change: the last task on it must already be at least as new as
+		// anything an unscanned session could still produce.
+		sortTasksNewestFirst(all)
+		if len(all) >= need && all[need-1].StartedAt >= frontier {
+			break
 		}
 	}
 	sortTasksNewestFirst(all)
 
-	limit := queryInt(r, "limit", 50, 1, 200)
-	offset := queryInt(r, "offset", 0, 0, 1<<20)
-	total := len(all)
-	if offset > total {
-		offset = total
+	found := len(all)
+	if offset > found {
+		offset = found
 	}
-	end := min(offset+limit, total)
+	end := min(offset+limit, found)
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"tasks": all[offset:end], "total": total,
-		"limit": limit, "offset": offset, "has_more": end < total,
-		"scanned_sessions": len(metas),
+		"tasks": all[offset:end], "total": found,
+		// total_exact says whether that count is the number of tasks or a
+		// floor. It is a floor whenever the scan stopped early — the same
+		// distinction the result search draws, and for the same reason: "42
+		// tasks" and "at least 42 tasks, look further back" call for different
+		// next moves.
+		"total_exact": exhausted,
+		"limit":       limit, "offset": offset,
+		"has_more":         end < found || !exhausted,
+		"scanned_sessions": scanned,
+		"sessions_total":   sessionsTotal,
 		// Reported rather than silently dropped, so "why is my chat not here"
 		// has an answer on the page instead of in the source.
 		"skipped_chat": skippedChat,
@@ -236,6 +319,10 @@ func (s *Server) handleTask(w http.ResponseWriter, r *http.Request) {
 	// The frames carry none on purpose: ADK merges parallel tool responses
 	// into one event reusing the first one's timestamp, so a frame-to-frame
 	// delta is not a duration.
+	//
+	// Keyed by run and call together. A merged task holds more than one run,
+	// and a call id is only unique inside its own — keying by the call alone
+	// gave every run's first call whichever duration was written last.
 	if tr := s.engine().Metrics(); tr != nil {
 		byCall := map[string]int{}
 		for _, run := range t.Runs {
@@ -244,13 +331,13 @@ func (s *Server) handleTask(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			for _, c := range rows {
-				byCall[c.CallID] = c.DurationMS
+				byCall[resultKey(run, c.CallID)] = c.DurationMS
 			}
 		}
 		for i := range t.Steps {
 			for j := range t.Steps[i].Tools {
 				tl := &t.Steps[i].Tools[j]
-				tl.DurationMS = byCall[tl.CallID]
+				tl.DurationMS = byCall[resultKey(tl.Round, tl.CallID)]
 			}
 		}
 	}
@@ -288,10 +375,21 @@ type Artifact struct {
 	Summary     string `json:"summary,omitempty"`
 }
 
+// resultKey addresses one call within one run.
+//
+// The store's primary key is (app, user, session, invocation, call) and this
+// is the part of it that varies inside a task. Anything that indexes calls by
+// the id alone silently merges two runs' first calls.
+func resultKey(round, callID string) string { return round + "/" + callID }
+
 // ResultRef is one tool call's stored result, for the step detail.
+//
+// Label is what a caller reads with: it is unique per session, where the call
+// id is unique only per run.
 type ResultRef struct {
 	Label       string `json:"label"`
 	CallID      string `json:"call_id"`
+	Round       string `json:"round"`
 	Bytes       int    `json:"bytes"`
 	Retrievable bool   `json:"retrievable"`
 	Expired     bool   `json:"expired"`
@@ -339,9 +437,9 @@ func (s *Server) artifactsOf(r *http.Request, sessionID string, t *Task) ([]Arti
 		// The row is here, so the bytes are here — unless retention dropped
 		// them, which the row itself records.
 		readable := !it.Expired
-		index[it.CallID] = ResultRef{
-			Label: it.Label, CallID: it.CallID, Bytes: it.Bytes,
-			Retrievable: readable, Expired: it.Expired,
+		index[resultKey(it.InvocationID, it.CallID)] = ResultRef{
+			Label: it.Label, CallID: it.CallID, Round: it.InvocationID,
+			Bytes: it.Bytes, Retrievable: readable, Expired: it.Expired,
 		}
 		if it.Bytes < artifactMinBytes && completeOf[it.Label] {
 			continue // small and whole: it lives in its step, not on the shelf

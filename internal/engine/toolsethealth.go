@@ -177,7 +177,22 @@ func (l *listing) do(ctx context.Context, name string, fn func(context.Context) 
 	l.mu.Unlock()
 
 	go func() {
+		// Deferred in this order because defers run last-registered-first: the
+		// answer is published, and only then is the slot freed.
+		//
+		// The other order left a window between the two — the entry already
+		// gone, the result not yet readable — and a caller arriving inside it
+		// found no in-flight call, no answer, and dialled the server again for
+		// a result that was sitting a microsecond away. It is a small window
+		// and it hit two or three times in twenty turns, which is exactly the
+		// rate at which it looks like something else.
+		defer func() {
+			l.mu.Lock()
+			delete(l.calls, name)
+			l.mu.Unlock()
+		}()
 		defer close(c.done)
+
 		// Values carried, cancellation dropped, deadline ours. A leader that
 		// goes away must not cancel the answer everyone else is waiting for.
 		base := context.WithoutCancel(orBackground(ctx))
@@ -185,10 +200,6 @@ func (l *listing) do(ctx context.Context, name string, fn func(context.Context) 
 		defer cancel()
 
 		c.tools, c.err = fn(run)
-
-		l.mu.Lock()
-		delete(l.calls, name)
-		l.mu.Unlock()
 	}()
 
 	return c.wait(ctx)

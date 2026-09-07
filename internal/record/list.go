@@ -16,6 +16,7 @@ package record
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -107,6 +108,54 @@ func (s *Store) List(ctx context.Context, sc Scope, opts ListOpts) ([]Item, erro
 			it.ExpiredAt, _ = time.Parse(time.RFC3339Nano, expired)
 		}
 		out = append(out, it)
+	}
+	return out, rows.Err()
+}
+
+// RecordedRuns reports which runs of the given sessions left anything behind.
+//
+// One query for a page of sessions rather than one per session. The caller is
+// the task list's admission test, which asks this of every session it reads
+// back — and it reads back hundreds. Asked one at a time it was the most
+// expensive thing on that page by a wide margin, and it was asked for an
+// answer that is a single distinct-select over an index.
+//
+// The shape is session → the set of its runs that stored something. An absent
+// session means it stored nothing, which is what the caller reads it as.
+func (s *Store) RecordedRuns(ctx context.Context, appName, userID string, sessionIDs []string) (map[string]map[string]bool, error) {
+	out := map[string]map[string]bool{}
+	if s == nil || s.db == nil || len(sessionIDs) == 0 {
+		return out, nil
+	}
+	args := make([]any, 0, len(sessionIDs)+2)
+	args = append(args, appName, userID)
+	holes := make([]string, 0, len(sessionIDs))
+	for _, id := range sessionIDs {
+		if id == "" {
+			continue
+		}
+		holes = append(holes, "?")
+		args = append(args, id)
+	}
+	if len(holes) == 0 {
+		return out, nil
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT DISTINCT session_id, invocation_id FROM tool_results
+		WHERE app_name=? AND user_id=? AND session_id IN (`+strings.Join(holes, ",")+`)`, args...)
+	if err != nil {
+		return out, fmt.Errorf("record: recorded runs: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var session, invocation string
+		if err := rows.Scan(&session, &invocation); err != nil {
+			return out, err
+		}
+		if out[session] == nil {
+			out[session] = map[string]bool{}
+		}
+		out[session][invocation] = true
 	}
 	return out, rows.Err()
 }

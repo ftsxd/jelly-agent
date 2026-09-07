@@ -114,18 +114,30 @@ function declOf(server, name) {
   return decls.value[`${server}/${name}`] || { produces: '', side_effect: '', source: '' }
 }
 
+// saveDecl sends the one field that changed, and nothing else.
+//
+// Sending both meant sending a snapshot: the changed field plus whatever this
+// page believed the other one was. Change the two dropdowns quickly and each
+// request carried a copy of the other field taken before its neighbour landed,
+// so the second save reverted the first. The server now treats an absent field
+// as "leave it alone", which is only useful if the page actually omits it.
+//
+// The saved row comes back in the response and is applied directly, rather
+// than re-reading the whole list — a reload here would race the next save the
+// same way the old snapshot did.
 async function saveDecl(server, name, patch) {
-  const cur = declOf(server, name)
+  const body = { name, server }
+  if (patch.produces !== undefined) body.produces = patch.produces
+  if (patch.side_effect !== undefined) body.side_effect = patch.side_effect
   try {
-    await api.saveToolMetadata({
-      name, server,
-      produces: patch.produces !== undefined ? patch.produces : cur.produces || '',
-      side_effect: patch.side_effect !== undefined ? patch.side_effect : cur.side_effect || '',
-    })
+    const r = await api.saveToolMetadata(body)
+    if (r?.tool) decls.value = { ...decls.value, [`${server}/${name}`]: r.tool }
     declError.value = ''
-    await loadDecls()
   } catch (e) {
     declError.value = e.message
+    // The dropdown is showing what the user picked and the file is not, so
+    // the list has to be re-read or the page keeps lying about it.
+    await loadDecls()
   }
 }
 
@@ -427,7 +439,11 @@ async function testForm() {
                         <option v-for="e in effects" :key="e.value" :value="e.value">{{ e.label }}</option>
                       </select>
                     </td>
-                    <td class="mono tiny muted">{{ declOf(s.name, t.name).source === 'console' ? '已声明' : '' }}</td>
+                    <td class="mono tiny">
+                      <span v-if="declOf(s.name, t.name).shadowed" class="warn-text"
+                            title="同目录下另一个文件声明了同一个工具，网关用的是那一份">未生效</span>
+                      <span v-else-if="declOf(s.name, t.name).source === 'console'" class="muted">已声明</span>
+                    </td>
                   </tr>
                 </tbody>
               </table>
@@ -451,6 +467,8 @@ async function testForm() {
 .decls td { padding: 3px 8px 3px 0; border-bottom: 1px solid var(--hairline); vertical-align: middle; }
 .decls tr.dimmed { opacity: 0.5; }
 .decls .sel { width: auto; min-width: 116px; padding: 2px var(--sp-2); height: 28px; }
+/* Colour is not the only signal — the word says it, the colour reinforces it. */
+.decls .warn-text { color: var(--warning); }
 .tiny { font-size: 11px; }
 
 .badge-bad {

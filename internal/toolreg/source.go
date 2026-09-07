@@ -60,6 +60,14 @@ func NewFileSource(dir string) *FileSource {
 
 func (f *FileSource) Name() string { return "file:" + f.dir }
 
+// ConsoleFile is the metadata file the web console owns and rewrites.
+//
+// Named here rather than in the console because how it is applied is a
+// property of this package: it patches the other files rather than competing
+// with them, which is what makes a declaration made in the UI take effect
+// without discarding whatever else was written about that tool.
+const ConsoleFile = "console.yaml"
+
 // metadataFile is the on-disk shape. The wrapper key exists so a file can
 // later carry defaults or a version without breaking the parse.
 type metadataFile struct {
@@ -72,12 +80,15 @@ type metadataFile struct {
 // would leave the registry quietly missing whatever that file defined, and the
 // symptom — a tool that is configured but absent — is far harder to trace back
 // than a parse error naming the file.
+//
+// The console's file is applied on top of the rest rather than alongside them.
+// See applyOverlay for why that is not the same as loading it first.
 func (f *FileSource) Load(ctx context.Context) ([]ops.ToolMetadata, error) {
 	paths, err := f.paths()
 	if err != nil {
 		return nil, err
 	}
-	var out []ops.ToolMetadata
+	var base, overlay []ops.ToolMetadata
 	for _, p := range paths {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -90,9 +101,60 @@ func (f *FileSource) Load(ctx context.Context) ([]ops.ToolMetadata, error) {
 		if err := yaml.Unmarshal(raw, &mf); err != nil {
 			return nil, fmt.Errorf("toolreg: parse %s: %w", p, err)
 		}
-		out = append(out, mf.Tools...)
+		if filepath.Base(p) == ConsoleFile {
+			overlay = append(overlay, mf.Tools...)
+			continue
+		}
+		base = append(base, mf.Tools...)
 	}
-	return out, nil
+	return applyOverlay(base, overlay), nil
+}
+
+// applyOverlay patches declarations onto the entries they name.
+//
+// The console's file carries a declaration and nothing else: what a tool
+// produces, and whether calling it changes anything. Those are the two facts a
+// person can answer about a third-party tool from a dropdown, and they are the
+// only two the console writes.
+//
+// So it cannot be an ordinary entry. Registration is first-wins per key, so
+// making the console's file load first — which is what it took for a
+// declaration to beat a hand-written one — meant its four fields stood in for
+// the whole entry, and everything else that entry carried was dropped as a
+// duplicate: the description the model reads, the timeout, the result ceiling,
+// the aliases, the injected parameters. Declaring that a tool returns metrics
+// would quietly remove its own description.
+//
+// A declaration for a tool no file mentions stands on its own, which is the
+// common case: MCP tools have no file entry at all unless somebody wrote one.
+func applyOverlay(base, overlay []ops.ToolMetadata) []ops.ToolMetadata {
+	if len(overlay) == 0 {
+		return base
+	}
+	at := make(map[string]int, len(base))
+	for i, m := range base {
+		at[m.Key()] = i
+	}
+	out := append([]ops.ToolMetadata(nil), base...)
+	for _, o := range overlay {
+		i, found := at[o.Key()]
+		if !found {
+			at[o.Key()] = len(out)
+			out = append(out, o)
+			continue
+		}
+		// Only what the overlay actually declared. An unset field means "the
+		// console has nothing to say about this", not "clear it" — clearing a
+		// declaration removes the whole entry from the console's file, which
+		// is what makes the underlying one apply again.
+		if o.Produces != "" {
+			out[i].Produces = o.Produces
+		}
+		if o.SideEffect != "" {
+			out[i].SideEffect = o.SideEffect
+		}
+	}
+	return out
 }
 
 // Watch polls for edits and re-loads on change.

@@ -55,7 +55,7 @@ func TestDeliverySurvivesAReopen(t *testing.T) {
 	again := open(t, path)
 	var got []byte
 	for offset := 0; ; {
-		c, err := again.Read(t.Context(), scope("s1"), "c1", offset, 8192)
+		c, err := again.Read(t.Context(), scope("s1"), "inv1", "c1", offset, 8192)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -84,7 +84,7 @@ func TestReadIsWindowedAndBounded(t *testing.T) {
 	if _, err := s.Put(t.Context(), rec("s1", "c1", []byte(strings.Repeat("y", 100)))); err != nil {
 		t.Fatal(err)
 	}
-	c, err := s.Read(t.Context(), scope("s1"), "c1", 10, 20)
+	c, err := s.Read(t.Context(), scope("s1"), "inv1", "c1", 10, 20)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -95,7 +95,7 @@ func TestReadIsWindowedAndBounded(t *testing.T) {
 		t.Errorf("total = %d, want the full length 100", c.Total)
 	}
 	// A limit above the ceiling is clamped rather than honoured.
-	c, err = s.Read(t.Context(), scope("s1"), "c1", 0, MaxWindow*10)
+	c, err = s.Read(t.Context(), scope("s1"), "inv1", "c1", 0, MaxWindow*10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -117,7 +117,7 @@ func TestAnotherSessionCannotRead(t *testing.T) {
 		{AppName: "jelly", UserID: "other", SessionID: "s1"},
 		{AppName: "other", UserID: "u", SessionID: "s1"},
 	} {
-		if _, err := s.Read(t.Context(), sc, "c1", 0, 100); !errors.Is(err, ErrNotFound) {
+		if _, err := s.Read(t.Context(), sc, "inv1", "c1", 0, 100); !errors.Is(err, ErrNotFound) {
 			t.Errorf("scope %+v got err %v, want ErrNotFound", sc, err)
 		}
 	}
@@ -127,7 +127,7 @@ func TestAnotherSessionCannotRead(t *testing.T) {
 // Distinguishing them would tell a caller which sessions exist.
 func TestUnknownCallIsNotFound(t *testing.T) {
 	s := open(t, filepath.Join(t.TempDir(), "state.db"))
-	if _, err := s.Read(t.Context(), scope("s1"), "nope", 0, 100); !errors.Is(err, ErrNotFound) {
+	if _, err := s.Read(t.Context(), scope("s1"), "inv1", "nope", 0, 100); !errors.Is(err, ErrNotFound) {
 		t.Errorf("err = %v, want ErrNotFound", err)
 	}
 }
@@ -150,7 +150,7 @@ func TestUpstreamTruncationIsThreeState(t *testing.T) {
 		if _, err := s.Put(t.Context(), r); err != nil {
 			t.Fatal(err)
 		}
-		c, err := s.Read(t.Context(), scope("s1"), tc.call, 0, 10)
+		c, err := s.Read(t.Context(), scope("s1"), "inv1", tc.call, 0, 10)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -167,8 +167,8 @@ func TestChecksumCoversTheWholePayload(t *testing.T) {
 	if _, err := s.Put(t.Context(), rec("s1", "c1", []byte("hello"))); err != nil {
 		t.Fatal(err)
 	}
-	a, _ := s.Read(t.Context(), scope("s1"), "c1", 0, 2)
-	b, _ := s.Read(t.Context(), scope("s1"), "c1", 2, 3)
+	a, _ := s.Read(t.Context(), scope("s1"), "inv1", "c1", 0, 2)
+	b, _ := s.Read(t.Context(), scope("s1"), "inv1", "c1", 2, 3)
 	if a.SHA256 == "" || a.SHA256 != b.SHA256 {
 		t.Errorf("checksums differ across windows: %q vs %q", a.SHA256, b.SHA256)
 	}
@@ -184,7 +184,7 @@ func TestRestoringTheSameCallReplacesIt(t *testing.T) {
 	if _, err := s.Put(t.Context(), rec("s1", "c1", []byte("the real result"))); err != nil {
 		t.Fatal(err)
 	}
-	c, err := s.Read(t.Context(), scope("s1"), "c1", 0, 100)
+	c, err := s.Read(t.Context(), scope("s1"), "inv1", "c1", 0, 100)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -215,7 +215,7 @@ func TestDeleteRemovesASession(t *testing.T) {
 	if err := s.Delete(t.Context(), scope("s1")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.Read(t.Context(), scope("s1"), "c1", 0, 10); !errors.Is(err, ErrNotFound) {
+	if _, err := s.Read(t.Context(), scope("s1"), "inv1", "c1", 0, 10); !errors.Is(err, ErrNotFound) {
 		t.Errorf("err = %v, want ErrNotFound after delete", err)
 	}
 }
@@ -403,11 +403,11 @@ func TestOpeningAPreSeqDatabaseMigrates(t *testing.T) {
 	s := open(t, path)
 
 	// The old rows got handles, distinct ones.
-	a, err := s.Read(t.Context(), scope("s1"), "old_a", 0, 10)
+	a, err := s.Read(t.Context(), scope("s1"), "inv0", "old_a", 0, 10)
 	if err != nil {
 		t.Fatalf("pre-existing row unreadable after migration: %v", err)
 	}
-	b, err := s.Read(t.Context(), scope("s1"), "old_b", 0, 10)
+	b, err := s.Read(t.Context(), scope("s1"), "inv0", "old_b", 0, 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -444,5 +444,37 @@ func TestLabelRoundTripAndRejection(t *testing.T) {
 		if n, ok := parseLabel(bad); ok {
 			t.Errorf("parseLabel(%q) accepted, giving %d", bad, n)
 		}
+	}
+}
+
+// Two runs of one conversation both number their first call "c1". The row key
+// says so — (app, user, session, invocation, call) — and a read that leaves the
+// invocation out has to pick one of them arbitrarily.
+//
+// This is not hypothetical: the task centre folds a follow-up run into the task
+// that opened it, so both runs' calls sit in one view, and before this the
+// second run's step showed the first run's bytes.
+func TestReadingTwoRunsThatShareACallID(t *testing.T) {
+	s := open(t, filepath.Join(t.TempDir(), "state.db"))
+	for _, run := range []struct{ inv, body string }{{"inv-1", "FIRST RUN"}, {"inv-2", "SECOND RUN"}} {
+		r := rec("s1", "c1", []byte(run.body))
+		r.InvocationID = run.inv
+		if _, err := s.Put(t.Context(), r); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, tc := range []struct{ inv, want string }{{"inv-1", "FIRST RUN"}, {"inv-2", "SECOND RUN"}} {
+		c, err := s.Read(t.Context(), scope("s1"), tc.inv, "c1", 0, 100)
+		if err != nil {
+			t.Fatalf("%s: %v", tc.inv, err)
+		}
+		if string(c.Data) != tc.want {
+			t.Errorf("%s/c1 读到 %q，想要 %q", tc.inv, c.Data, tc.want)
+		}
+	}
+	// And the two rows are separately addressable by handle, which is what the
+	// console reads with.
+	if _, err := s.Read(t.Context(), scope("s1"), "", "c1", 0, 100); !errors.Is(err, ErrNotFound) {
+		t.Errorf("没有 invocation 的读取应当是未找到，得到 %v", err)
 	}
 }

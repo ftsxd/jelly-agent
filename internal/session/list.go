@@ -2,6 +2,7 @@ package session
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 
 	// Pure-Go SQLite driver (modernc.org/sqlite), registered as "sqlite" — the
@@ -66,6 +67,9 @@ func ListPage(dbPath, appName, userID string, limit, offset int) (rows []Session
 		`SELECT COUNT(*) FROM sessions WHERE app_name = ? AND user_id = ?`,
 		appName, userID,
 	).Scan(&total); err != nil {
+		if isMissingTable(err) {
+			return nil, 0, nil // the schema arrives with the first session
+		}
 		return nil, 0, fmt.Errorf("count sessions: %w", err)
 	}
 
@@ -111,6 +115,9 @@ func AllIDs(dbPath, appName, userID string) ([]string, error) {
 		appName, userID,
 	)
 	if err != nil {
+		if isMissingTable(err) {
+			return nil, nil // the schema is created on first use; nothing here yet
+		}
 		return nil, fmt.Errorf("list session ids: %w", err)
 	}
 	defer res.Close()
@@ -123,4 +130,37 @@ func AllIDs(dbPath, appName, userID string) ([]string, error) {
 		ids = append(ids, id)
 	}
 	return ids, res.Err()
+}
+
+// Exists reports whether a session is still in the store.
+//
+// The delivery endpoints need it: they are scoped by session id in SQL, which
+// stops one conversation reaching another's payload, but says nothing about a
+// conversation that was deleted. Rows are removed with the session now, so
+// this is the second lock on the same door — and the one that still holds if a
+// delete only half succeeded.
+func Exists(dbPath, appName, userID, id string) (bool, error) {
+	if id == "" {
+		return false, nil
+	}
+	db, err := openDB(dbPath)
+	if err != nil {
+		return false, err
+	}
+	defer db.Close()
+	var one int
+	err = db.QueryRow(
+		`SELECT 1 FROM sessions WHERE app_name = ? AND user_id = ? AND id = ?`,
+		appName, userID, id,
+	).Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		if isMissingTable(err) {
+			return false, nil // the schema arrives with the first session
+		}
+		return false, fmt.Errorf("session exists %s: %w", id, err)
+	}
+	return true, nil
 }

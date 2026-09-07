@@ -3,6 +3,7 @@ package metrics
 import (
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -217,4 +218,44 @@ func (t *Tracker) ByInvocation(sessionID, invocationID string) ([]CallRow, error
 		return nil, nil
 	}
 	return t.rec.ByInvocation(sessionID, invocationID)
+}
+
+// DeleteSessions removes the call rows of the given sessions.
+//
+// Called when the sessions themselves are deleted. Timing rows are not
+// incidental bookkeeping: they carry the tool name, the arguments' shape and
+// the evidence handle, so leaving them behind leaves a readable trace of a
+// conversation the user asked to be gone.
+func (r *Recorder) DeleteSessions(ids []string) (int, error) {
+	if r == nil || r.db == nil || len(ids) == 0 {
+		return 0, nil
+	}
+	n := 0
+	for _, id := range ids {
+		if id == "" {
+			continue
+		}
+		res, err := r.db.Exec(`DELETE FROM tool_calls WHERE session_id = ?`, id)
+		if err != nil {
+			// A fresh database has no table yet, which means no rows to
+			// remove rather than a failure.
+			if strings.Contains(err.Error(), "no such table") {
+				return n, nil
+			}
+			return n, fmt.Errorf("metrics: delete calls of %s: %w", id, err)
+		}
+		if c, _ := res.RowsAffected(); c > 0 {
+			n += int(c)
+		}
+	}
+	return n, nil
+}
+
+// DeleteSessions passes through to the recorder, so callers holding a Tracker
+// (which is what the engine hands out) do not need the recorder as well.
+func (t *Tracker) DeleteSessions(ids []string) (int, error) {
+	if t == nil || t.rec == nil {
+		return 0, nil
+	}
+	return t.rec.DeleteSessions(ids)
 }

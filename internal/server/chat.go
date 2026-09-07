@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"iter"
 	"log/slog"
@@ -96,6 +97,16 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A task id names the conversation that opened it, so one from another
+	// conversation is refused rather than quietly ignored: a client sending it
+	// has a bug, and it is only visible here.
+	if req.TaskID != "" {
+		if err := task.Owns(req.TaskID, sessionID); err != nil {
+			writeErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
+
 	// Past this point the response is an SSE stream; errors go in-band.
 	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache, no-transform")
@@ -126,17 +137,26 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 	st, err := streamTurn(sse, r2.Run(ctx, engine.UserID, sessionID, msg,
 		agent.RunConfig{StreamingMode: agent.StreamingModeSSE}),
 		func(round string) {
-			end := s.runs().start(sessionID, round)
-			finish = func(status string) { finish = nil; end(status) }
+			// Which task this run's status belongs to. A continuation is
+			// displayed under the task it joined, so registering it under its
+			// own invocation left the running task looking idle — and, once
+			// the run ended, wearing the previous run's outcome.
+			under := ""
 			if req.TaskID != "" {
 				// Recorded as soon as the run has an identity. A failure here
 				// costs the run its place in an existing task, which is worth
-				// a log and not worth failing a turn the user is watching.
+				// a log and not worth failing a turn the user is watching —
+				// and the status then belongs under its own id, because that
+				// is where the unlinked run will be displayed.
 				if err := task.Link(eng.SessionDBPath(), req.TaskID, sessionID, round); err != nil {
 					slog.Warn("任务归属未能记录，本次运行会显示为独立任务",
 						"task", req.TaskID, "session", sessionID, logging.Err(err))
+				} else {
+					under = req.TaskID
 				}
 			}
+			end := s.runs().start(sessionID, round, under)
+			finish = func(status string) { finish = nil; end(status) }
 		})
 	if err != nil {
 		if finish != nil {
@@ -183,6 +203,16 @@ func streamTurn(out sink, seq iter.Seq2[*adksession.Event, error], onRound func(
 			}
 		}
 		project(ev, out, st)
+	}
+	// A model failure reported on the event rather than through the iterator.
+	// The frame is already out — project emits it where it is seen — so this
+	// only has to make the turn end as a failure instead of a success.
+	//
+	// Unless the turn went on to answer: a refusal the flow recovered from is
+	// worth showing and is not a failed run, and calling it one would mark a
+	// task the user did get an answer to as failed.
+	if st.failure != "" && !st.answered {
+		return st, errors.New(st.failure)
 	}
 	return st, nil
 }

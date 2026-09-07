@@ -2,12 +2,16 @@ package server
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 
 	"github.com/jelly-agent/jelly-agent/internal/config"
+	"github.com/jelly-agent/jelly-agent/internal/ops"
 )
 
 type declBody struct {
@@ -199,5 +203,293 @@ func TestADeclarationReachesTheGatewayNotJustTheDisplay(t *testing.T) {
 	}
 	if m.SideEffect != "mutating_risky" {
 		t.Errorf("side effect = %q; the policy would treat it as something else", m.SideEffect)
+	}
+}
+
+// Two dropdowns, two saves, and neither may lose the other's field.
+//
+// The page saves on change, so a save carries one field. Sending both — the
+// changed one and whatever the page believed the other was — meant each
+// request rebuilt the whole entry from a snapshot taken before the other one
+// landed, and the second write silently reverted the first. A side-effect
+// level lost that way is not cosmetic: that level is what the gateway's
+// ceiling policy reads.
+func TestSavingOneFieldLeavesTheOtherAlone(t *testing.T) {
+	s := newTestServer(t)
+	dir := t.TempDir()
+	s.engine().Config().Tools.MetadataDir = dir
+
+	if w := do(t, s, "POST", "/api/tools/metadata",
+		`{"name":"restart_pod","server":"k8s-mcp","side_effect":"mutating_risky"}`); w.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", w.Code, w.Body.String())
+	}
+	// A second save that says nothing about the side effect must not clear it.
+	if w := do(t, s, "POST", "/api/tools/metadata",
+		`{"name":"restart_pod","server":"k8s-mcp","produces":"workload_status"}`); w.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", w.Code, w.Body.String())
+	}
+
+	got := declOnDisk(t, dir, "k8s-mcp", "restart_pod")
+	if string(got.SideEffect) != "mutating_risky" {
+		t.Errorf("side_effect = %q；只改 produces 的那次把副作用等级抹掉了", got.SideEffect)
+	}
+	if string(got.Produces) != "workload_status" {
+		t.Errorf("produces = %q", got.Produces)
+	}
+
+	// And an explicit empty string still clears — absent and cleared are
+	// different requests, which is the whole point of the distinction.
+	if w := do(t, s, "POST", "/api/tools/metadata",
+		`{"name":"restart_pod","server":"k8s-mcp","side_effect":""}`); w.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", w.Code, w.Body.String())
+	}
+	if got := declOnDisk(t, dir, "k8s-mcp", "restart_pod"); string(got.SideEffect) != "" {
+		t.Errorf("显式清空没有生效: %q", got.SideEffect)
+	}
+}
+
+// Concurrent saves are serialised, and the file is replaced in one step.
+//
+// Every save is a read-modify-write of one file. Without a lock two of them
+// interleave and one is lost; without an atomic replace a reader — the
+// registry's own file watcher, or the next save — can see the truncated file
+// and read it as "nothing declared", which would wipe every other tool's
+// declaration on the following write.
+func TestConcurrentSavesDoNotLoseEachOther(t *testing.T) {
+	s := newTestServer(t)
+	dir := t.TempDir()
+	s.engine().Config().Tools.MetadataDir = dir
+
+	const n = 12
+	var wg sync.WaitGroup
+	for i := range n {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			body := fmt.Sprintf(`{"name":"tool_%d","server":"n9e-mcp","produces":"metric_series"}`, i)
+			if w := do(t, s, "POST", "/api/tools/metadata", body); w.Code != http.StatusOK {
+				t.Errorf("save %d: status = %d: %s", i, w.Code, w.Body.String())
+			}
+		}()
+	}
+	wg.Wait()
+
+	decls := readDecls(filepath.Join(dir, consoleFile))
+	if len(decls) != n {
+		t.Errorf("declarations = %d, want %d — 并发保存互相覆盖了: %+v", len(decls), n, decls)
+	}
+}
+
+// declOnDisk reads one declaration out of the console's file.
+func declOnDisk(t *testing.T, dir, server, name string) ops.ToolMetadata {
+	t.Helper()
+	for _, m := range readDecls(filepath.Join(dir, consoleFile)) {
+		if m.Server == server && m.Name == name {
+			return m
+		}
+	}
+	t.Fatalf("%s/%s 不在 %s 里", server, name, consoleFile)
+	return ops.ToolMetadata{}
+}
+
+// A reader must never catch the file half-written.
+//
+// The registry watches this directory and re-reads on any change, so it is a
+// reader nobody here controls. os.WriteFile truncates and then writes, so a
+// re-read landing in between sees an empty or partial file — which parses as
+// "nothing declared" and would drop every tool's declaration until the next
+// save put them back.
+func TestTheDeclarationFileIsNeverSeenHalfWritten(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, consoleFile)
+	old := []byte("tools:\n" + strings.Repeat("  - name: a\n", 4000))
+	fresh := []byte("tools:\n" + strings.Repeat("  - name: b\n", 4000))
+	if err := writeFileAtomic(path, old); err != nil {
+		t.Fatal(err)
+	}
+
+	stop := make(chan struct{})
+	bad := make(chan int, 1)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			b, err := os.ReadFile(path)
+			if err != nil {
+				continue // a rename can briefly race an open; that is not a torn read
+			}
+			if len(b) != len(old) && len(b) != len(fresh) {
+				select {
+				case bad <- len(b):
+				default:
+				}
+				return
+			}
+		}
+	}()
+
+	for range 200 {
+		if err := writeFileAtomic(path, fresh); err != nil {
+			t.Fatal(err)
+		}
+		if err := writeFileAtomic(path, old); err != nil {
+			t.Fatal(err)
+		}
+	}
+	close(stop)
+	<-done
+	select {
+	case n := <-bad:
+		t.Errorf("读到了 %d 字节的半成品文件；注册表会把它当成「什么都没声明」", n)
+	default:
+	}
+}
+
+// The page may only claim what is true.
+//
+// "已声明" used to mean "the console's file contains this key", which says
+// nothing about which file the registry actually took the answer from. With
+// the console's file loaded first that is normally the same thing — but the
+// page has to be able to tell the operator when it is not, rather than showing
+// a declaration that the gateway is ignoring.
+func TestADeclarationThatDidNotTakeEffectSaysSo(t *testing.T) {
+	s := newTestServer(t)
+	dir := t.TempDir()
+	s.engine().Config().Tools.MetadataDir = dir
+
+	// A hand-written file that sorts before console.yaml — the arrangement
+	// that used to win on filename alone.
+	hand := "tools:\n  - name: query_range\n    server: n9e-mcp\n    produces: log_excerpt\n"
+	if err := os.WriteFile(filepath.Join(dir, "a-hand-written.yaml"), []byte(hand), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if w := do(t, s, "POST", "/api/tools/metadata",
+		`{"name":"query_range","server":"n9e-mcp","produces":"metric_series"}`); w.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", w.Code, w.Body.String())
+	}
+
+	got := declFromAPI(t, s, "query_range")
+	if got.Produces != "metric_series" {
+		t.Errorf("生效的是 %q；控制台写的那份应当优先", got.Produces)
+	}
+	if got.Shadowed {
+		t.Error("控制台的声明明明生效了，却报成未生效")
+	}
+
+	// And when it genuinely loses — here, to a built-in, which is loaded
+	// before any file — the page says so instead of claiming success.
+	if w := do(t, s, "POST", "/api/tools/metadata",
+		`{"name":"read_result","produces":"topology"}`); w.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", w.Code, w.Body.String())
+	}
+	shadowed := declFromAPI(t, s, "read_result")
+	if shadowed.Produces == "topology" {
+		t.Skip("built-in metadata no longer wins; the shadowing case needs another fixture")
+	}
+	if !shadowed.Shadowed {
+		t.Errorf("声明没有生效（实际是 %q），页面却显示已声明", shadowed.Produces)
+	}
+}
+
+func declFromAPI(t *testing.T, s *Server, name string) toolDeclDTO {
+	t.Helper()
+	w := do(t, s, "GET", "/api/tools/metadata", "")
+	var body declBody
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	for _, d := range body.Tools {
+		if d.Name == name {
+			return d
+		}
+	}
+	t.Fatalf("%s 不在列表里", name)
+	return toolDeclDTO{}
+}
+
+// A declaration is a patch, and a patch working alongside a file is not a
+// patch being overridden.
+//
+// The console writes the field somebody set and says nothing about the other.
+// Comparing both against the registry meant a tool declared only for what it
+// produces read as 未生效 the moment a hand-written file supplied its side
+// effect — the two cooperating exactly as intended, reported as a conflict.
+func TestAPatchThatTookEffectIsNotReportedAsShadowed(t *testing.T) {
+	s := newTestServer(t)
+	dir := t.TempDir()
+	s.engine().Config().Tools.MetadataDir = dir
+
+	hand := "tools:\n  - name: query_range\n    server: n9e-mcp\n" +
+		"    description: 查询一段时间的指标曲线\n    side_effect: read_only\n"
+	if err := os.WriteFile(filepath.Join(dir, "n9e.yaml"), []byte(hand), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Only produces — the side effect keeps coming from the file.
+	if w := do(t, s, "POST", "/api/tools/metadata",
+		`{"name":"query_range","server":"n9e-mcp","produces":"metric_series"}`); w.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", w.Code, w.Body.String())
+	}
+
+	got := declFromAPI(t, s, "query_range")
+	if got.Produces != "metric_series" {
+		t.Errorf("produces = %q；控制台写的那份没有生效", got.Produces)
+	}
+	if got.Effect != "read_only" {
+		t.Errorf("side_effect = %q；文件里那份被抹掉了", got.Effect)
+	}
+	if got.Shadowed {
+		t.Error("补丁和文件正好各管一半，却被报成未生效")
+	}
+}
+
+// The save's answer has to be the same answer the list would give.
+//
+// The page applies it straight into the table — that is what keeps it from
+// re-reading and racing the next save — so a response that reports only what
+// the console wrote showed an inherited field as 未声明 until something else
+// forced a reload. The declaration is a patch; its response has to be the
+// merged result, not the patch.
+func TestTheSaveAnswersWithWhatTookEffect(t *testing.T) {
+	s := newTestServer(t)
+	dir := t.TempDir()
+	s.engine().Config().Tools.MetadataDir = dir
+
+	hand := "tools:\n  - name: query_range\n    server: n9e-mcp\n" +
+		"    description: 查询一段时间的指标曲线\n    side_effect: read_only\n"
+	if err := os.WriteFile(filepath.Join(dir, "n9e.yaml"), []byte(hand), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	w := do(t, s, "POST", "/api/tools/metadata",
+		`{"name":"query_range","server":"n9e-mcp","produces":"metric_series"}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", w.Code, w.Body.String())
+	}
+	var saved struct {
+		Tool toolDeclDTO `json:"tool"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &saved); err != nil {
+		t.Fatal(err)
+	}
+	if saved.Tool.Produces != "metric_series" {
+		t.Errorf("produces = %q", saved.Tool.Produces)
+	}
+	if saved.Tool.Effect != "read_only" {
+		t.Errorf("side_effect = %q；文件里继承来的那个被答成了未声明", saved.Tool.Effect)
+	}
+	if saved.Tool.Shadowed {
+		t.Error("保存成功却答成未生效")
+	}
+
+	// And it agrees with the list, which is the property that matters: the
+	// page shows one of them and then the other.
+	listed := declFromAPI(t, s, "query_range")
+	if listed != saved.Tool {
+		t.Errorf("保存返回 %+v，列表返回 %+v——同一个工具两种说法", saved.Tool, listed)
 	}
 }

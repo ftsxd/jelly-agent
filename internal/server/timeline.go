@@ -114,9 +114,33 @@ type turnState struct {
 	// reported in the first place.
 	totalCached   int32
 	cacheReported bool
+
+	// answered says the turn produced a final answer, which is what decides
+	// whether a failure earlier in it still stands. A model that was refused
+	// once, retried, and answered did not fail the turn.
+	answered bool
+
+	// failure holds what the model reported when it produced no content.
+	//
+	// ADK signals that kind of failure on the event, not through the iterator:
+	// a blocked prompt or a finish reason other than STOP arrives as an event
+	// with no Content and an ErrorCode. The iterator yields no Go error at
+	// all, so a caller that only watches for one saw a clean, empty, and
+	// apparently successful turn.
+	failure string
 }
 
 func newTurnState() *turnState { return &turnState{} }
+
+// fail records the first model-reported failure of the turn.
+//
+// The first, not the last: what stopped the run explains the rest, and a later
+// message describing a consequence would displace the cause.
+func (s *turnState) fail(msg string) {
+	if s.failure == "" {
+		s.failure = msg
+	}
+}
 
 // enter moves the state onto an event's invocation, resetting the per-response
 // counter when the invocation changes.
@@ -164,6 +188,23 @@ func project(ev *adksession.Event, out sink, st *turnState) {
 			"from": ev.Author, "to": to, "ts": ts, "branch": ev.Branch,
 		})
 	}
+	// A model turn that carried an error instead of an answer.
+	//
+	// This has to be read before the Content check, for the same reason the
+	// transfer does: ADK reports this kind of failure by yielding an event
+	// with no Content at all — a blocked prompt, or a finish reason other than
+	// STOP with nothing behind it (base_flow.go only skips such an event when
+	// the error code is empty too). Dropping it left the browser with a stream
+	// that simply stopped, and the run recorded as completed.
+	if code, msg := strings.TrimSpace(ev.ErrorCode), strings.TrimSpace(ev.ErrorMessage); code != "" || msg != "" {
+		text := modelErrorText(code, msg)
+		st.fail(text)
+		out.frame(frameError, map[string]any{
+			"message": text, "code": code, "ts": ts,
+			"agent": ev.Author, "round": st.invocation,
+		})
+	}
+
 	if ev.Content == nil {
 		return
 	}
@@ -252,6 +293,9 @@ func projectFinal(ev *adksession.Event, out sink, st *turnState, ts int64) {
 				// actually received rather than the last thing written down.
 				"final": !calls,
 			})
+			if !calls {
+				st.answered = true
+			}
 		}
 	}
 
@@ -374,4 +418,34 @@ func pendingApprovals(events []*adksession.Event) []string {
 		}
 	}
 	return slices.DeleteFunc(requested, func(id string) bool { return answered[id] })
+}
+
+// modelErrorText says what went wrong in words a reader can act on.
+//
+// The code alone ("SAFETY", "PROHIBITED_CONTENT") is a finish reason, not an
+// explanation, and providers often send it with no message at all. The known
+// ones are named; anything else is passed through rather than flattened into
+// "模型返回失败", because an unrecognised code is still the only clue there is.
+func modelErrorText(code, msg string) string {
+	known := map[string]string{
+		"SAFETY":             "模型因安全策略拒绝了这次回答",
+		"PROHIBITED_CONTENT": "模型判定内容不被允许，未生成回答",
+		"BLOCKLIST":          "请求命中了提供方的屏蔽列表",
+		"RECITATION":         "模型因引用限制中断了回答",
+		"MAX_TOKENS":         "回答超出输出上限，模型没有产生内容",
+		"OTHER":              "模型未生成内容",
+	}
+	label := known[strings.ToUpper(code)]
+	switch {
+	case label != "" && msg != "":
+		return label + "：" + msg
+	case label != "":
+		return label
+	case msg != "" && code != "":
+		return msg + "（" + code + "）"
+	case msg != "":
+		return msg
+	default:
+		return "模型返回失败：" + code
+	}
 }

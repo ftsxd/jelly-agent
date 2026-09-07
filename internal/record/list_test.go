@@ -157,3 +157,48 @@ func TestListBoundsItsPage(t *testing.T) {
 		t.Errorf("an absurd limit returned %d", len(got))
 	}
 }
+
+// Which runs left something behind, for a page of sessions at once.
+//
+// The task list asks this of every session it reads back, and it reads back
+// hundreds. One query per session made it the dominant cost of that page for
+// an answer that is a single distinct-select over an index.
+func TestRecordedRunsAnswersForManySessionsAtOnce(t *testing.T) {
+	s := open(t, filepath.Join(t.TempDir(), "state.db"))
+	put := func(session, inv, call string) {
+		t.Helper()
+		r := rec(session, call, []byte("x"))
+		r.InvocationID = inv
+		if _, err := s.Put(t.Context(), r); err != nil {
+			t.Fatal(err)
+		}
+	}
+	put("s1", "inv-1", "c1")
+	put("s1", "inv-1", "c2") // the same run twice: one entry, not two
+	put("s1", "inv-2", "c1")
+	put("s2", "inv-1", "c1")
+
+	got, err := s.RecordedRuns(t.Context(), "jelly", "u", []string{"s1", "s2", "s3", ""})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got["s1"]) != 2 || !got["s1"]["inv-1"] || !got["s1"]["inv-2"] {
+		t.Errorf("s1 = %v, want both runs", got["s1"])
+	}
+	if len(got["s2"]) != 1 || !got["s2"]["inv-1"] {
+		t.Errorf("s2 = %v", got["s2"])
+	}
+	// A session that stored nothing is absent rather than empty-and-present:
+	// the caller reads a missing entry as "nothing here".
+	if _, present := got["s3"]; present {
+		t.Errorf("s3 存了个空的进来: %v", got["s3"])
+	}
+	// Another scope's rows are not this scope's answer.
+	other, err := s.RecordedRuns(t.Context(), "jelly", "someone-else", []string{"s1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(other) != 0 {
+		t.Errorf("越过了 scope: %v", other)
+	}
+}

@@ -742,3 +742,104 @@ func keysOf(m map[string]json.RawMessage) []string {
 	slices.Sort(out)
 	return out
 }
+
+// modelError builds the event ADK yields when the model produced no content.
+//
+// Not a hypothetical shape: base_flow.go skips a contentless response only
+// when its error code is empty too, so this is precisely what a blocked prompt
+// or a non-STOP finish reason arrives as — no Content, no iterator error.
+func modelError(ts time.Time, code, msg string) *adksession.Event {
+	e := event(ts, "", nil)
+	e.ErrorCode = code
+	e.ErrorMessage = msg
+	return e
+}
+
+// withInv stamps an event with the invocation it belongs to, which is the
+// task's identity.
+func withInv(id string, e *adksession.Event) *adksession.Event {
+	e.InvocationID = id
+	return e
+}
+
+// The failure ADK reports on the event instead of through the iterator.
+//
+// This was silent in both directions: project returned on Content == nil
+// before looking at the error, so the browser's stream simply stopped
+// mid-turn, and streamTurn only treated a Go error as failure, so the run was
+// registered completed. A refused question looked exactly like an answered one
+// that happened to say nothing.
+func TestAModelErrorWithNoContentIsReportedNotSwallowed(t *testing.T) {
+	rec := httptest.NewRecorder()
+	sse := &sseWriter{w: rec, flusher: rec}
+
+	st, err := streamTurn(sse, seqOf(
+		yielded{ev: event(at(0), "model", []*genai.Part{callPart("c1", "get_logs", nil)})},
+		yielded{ev: event(at(10), "user", []*genai.Part{respPart("c1", "get_logs", map[string]any{"n": 1})})},
+		yielded{ev: modelError(at(20), "SAFETY", "")},
+	), nil)
+	if err == nil {
+		t.Fatal("一次没有产出内容的模型失败被当成了正常结束")
+	}
+	if st.failure == "" {
+		t.Error("turn state does not record the failure")
+	}
+	frames := parseSSE(t, rec.Body.String())
+	errs := only(frames, frameError)
+	if len(errs) != 1 {
+		t.Fatalf("frames = %v, want one error frame", typesOf(frames))
+	}
+	// The code alone is a finish reason, not an explanation; providers often
+	// send it with no message at all.
+	if msg, _ := errs[0]["message"].(string); !strings.Contains(msg, "安全") {
+		t.Errorf("message = %q; a bare finish reason is not an explanation", msg)
+	}
+	if errs[0]["code"] != "SAFETY" {
+		t.Errorf("code = %v; the raw code is what a bug report needs", errs[0]["code"])
+	}
+}
+
+// A refusal the flow recovered from is worth showing and is not a failed run.
+func TestAModelErrorFollowedByAnAnswerIsNotAFailedTurn(t *testing.T) {
+	rec := httptest.NewRecorder()
+	sse := &sseWriter{w: rec, flusher: rec}
+
+	_, err := streamTurn(sse, seqOf(
+		yielded{ev: modelError(at(0), "OTHER", "空响应")},
+		yielded{ev: event(at(10), "model", []*genai.Part{textPart("重试后拿到了结果。")})},
+	), nil)
+	if err != nil {
+		t.Fatalf("一次已经答复的对话被判成失败: %v", err)
+	}
+	frames := parseSSE(t, rec.Body.String())
+	if n := count(frames, frameError); n != 1 {
+		t.Errorf("frames = %v; the refusal is still worth showing", typesOf(frames))
+	}
+	if n := count(frames, frameText); n != 1 {
+		t.Errorf("frames = %v; the answer must still project", typesOf(frames))
+	}
+}
+
+// One question's refusal must not mark the session's other tasks failed.
+func TestAModelErrorFailsOnlyItsOwnRun(t *testing.T) {
+	frames, _ := run(
+		withInv("inv-1", event(at(0), "user", []*genai.Part{textPart("查一下告警")})),
+		withInv("inv-1", event(at(5), "model", []*genai.Part{callPart("c1", "list_alert_rules", nil)})),
+		withInv("inv-1", event(at(6), "user", []*genai.Part{respPart("c1", "list_alert_rules", map[string]any{"n": 3})})),
+		withInv("inv-1", event(at(9), "model", []*genai.Part{textPart("共 3 条。")})),
+		withInv("inv-2", event(at(20), "user", []*genai.Part{textPart("再问一个")})),
+		withInv("inv-2", event(at(24), "model", []*genai.Part{callPart("c1", "list_alert_rules", nil)})),
+		withInv("inv-2", event(at(25), "user", []*genai.Part{respPart("c1", "list_alert_rules", map[string]any{"n": 3})})),
+		withInv("inv-2", modelError(at(30), "SAFETY", "")),
+	)
+	tasks := foldTasks("web-1", frames, infos(nil), nil)
+	if len(tasks) != 2 {
+		t.Fatalf("tasks = %d", len(tasks))
+	}
+	if tasks[0].Status != TaskCompleted {
+		t.Errorf("答复过的任务被标成 %s", tasks[0].Status)
+	}
+	if tasks[1].Status != TaskFailed {
+		t.Errorf("被拒绝的任务标成 %s，应当是失败", tasks[1].Status)
+	}
+}

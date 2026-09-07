@@ -109,7 +109,7 @@ func TestPlainConversationIsNotATask(t *testing.T) {
 		if !got.Chat {
 			t.Errorf("%q was not recognised as conversation", text)
 		}
-		if IsTask(got, false) {
+		if IsTask(got, noRecords) {
 			t.Errorf("%q reached the task centre", text)
 		}
 	}
@@ -125,7 +125,7 @@ func TestARunThatDidSomethingIsATask(t *testing.T) {
 		answer("r1", "共 18 条告警规则。", 30),
 	}, k, nil)[0]
 
-	if got.Chat || !IsTask(got, false) {
+	if got.Chat || !IsTask(got, noRecords) {
 		t.Errorf("a run with a tool call was treated as conversation: %+v", got)
 	}
 }
@@ -139,10 +139,10 @@ func TestARunThatStoredSomethingIsATask(t *testing.T) {
 		answer("r1", "好的。", 10),
 	}, infos(nil), nil)[0]
 
-	if IsTask(got, false) {
+	if IsTask(got, noRecords) {
 		t.Fatal("precondition: it looks like conversation on its own")
 	}
-	if !IsTask(got, true) {
+	if !IsTask(got, someRecords) {
 		t.Error("a run with a stored result was excluded")
 	}
 }
@@ -154,7 +154,7 @@ func TestAScheduledRunIsAlwaysATask(t *testing.T) {
 		answer("r1", "巡检完成，无异常。", 10),
 	}, infos(nil), nil)[0]
 
-	if !IsTask(got, false) {
+	if !IsTask(got, noRecords) {
 		t.Error("a scheduled run was excluded")
 	}
 	if got.Type != TypeInspection {
@@ -446,3 +446,158 @@ func TestReadersAreAnalysisEvenWithoutVisibleArguments(t *testing.T) {
 		t.Errorf("the two readers did not share a step: %+v", got.Steps[1])
 	}
 }
+
+// An interrupted run resumed by a follow-up puts both runs' calls in one step,
+// and both runs number their first call c1.
+//
+// This is the case where matching a result to its call by id alone goes wrong
+// inside a single step: the follow-up's answer lands on the interrupted run's
+// call, which then reads as complete while the call that actually produced it
+// stays "执行中". The step boundary hides this whenever the first run got as
+// far as a reply, which is why it needs the interrupted shape to show.
+func TestAResumedRunsResultLandsOnItsOwnCall(t *testing.T) {
+	k := infos(nil)
+	frames := []map[string]any{
+		fr(frameUserMessage, "text", "查一下磁盘", "ts", int64(1)),
+		call("r1", "c1", "check_disk", 10),
+		// r1 never answered — the run was cut off, which is the usual reason
+		// someone resumes a task rather than asking a fresh question.
+		fr(frameUserMessage, "text", "继续", "ts", int64(30)),
+		call("r2", "c1", "check_disk", 40),
+		result("r2", "c1", true, 41, map[string]any{"summary": "3 台超阈值"}),
+		answer("r2", "3 台机器磁盘满了。", 50),
+	}
+	tasks := foldTasks("web-1", frames, k, map[string]string{"r2": "web-1/r1"})
+	if len(tasks) != 1 {
+		t.Fatalf("tasks = %d", len(tasks))
+	}
+	var work *Step
+	for i := range tasks[0].Steps {
+		if len(tasks[0].Steps[i].Tools) > 0 {
+			work = &tasks[0].Steps[i]
+			break
+		}
+	}
+	if work == nil || len(work.Tools) != 2 {
+		t.Fatalf("steps = %+v; want one step holding both runs' calls", tasks[0].Steps)
+	}
+	first, second := work.Tools[0], work.Tools[1]
+	if first.Round != "r1" || !first.Pending {
+		t.Errorf("被打断那一轮的调用应当仍是执行中: %+v", first)
+	}
+	if second.Round != "r2" || second.Pending || second.Summary != "3 台超阈值" {
+		t.Errorf("续跑那一轮的结果没有落到自己的调用上: %+v", second)
+	}
+}
+
+// A question refused before any tool ran is still a task, and a failed one.
+//
+// It produced no tool call, no answer, no stored result — so nothing else in
+// the frame stream belongs to that run, and the failure had nothing to attach
+// itself to. It was dropped, and the run disappeared from the board: the one
+// state a person actually has to do something about was the one the task
+// centre would not show.
+func TestARefusedQuestionIsAFailedTask(t *testing.T) {
+	frames := []map[string]any{
+		fr(frameUserMessage, "text", "把生产库删了", "ts", int64(1)),
+		fr(frameError, "round", "r1", "ts", int64(5),
+			"message", "模型因安全策略拒绝了这次回答", "code", "SAFETY"),
+	}
+	tasks := foldTasks("web-1", frames, infos(nil), nil)
+	if len(tasks) != 1 {
+		t.Fatalf("tasks = %d; 被拒绝的提问从任务中心消失了", len(tasks))
+	}
+	got := tasks[0]
+	if got.Status != TaskFailed {
+		t.Errorf("status = %q, want failed", got.Status)
+	}
+	if got.Error == "" {
+		t.Error("失败任务没有带上原因，看板上只剩一个红点")
+	}
+	if got.Title != "把生产库删了" {
+		t.Errorf("title = %q; 开启这一轮的提问就是它的标题", got.Title)
+	}
+	// And it is admitted: no tool ran, so the chat filter would drop it if the
+	// status did not say otherwise.
+	if !IsTask(got, noRecords) {
+		t.Error("失败的任务被当成普通对话过滤掉了")
+	}
+}
+
+// A run that was refused and then answered is not a failed run.
+//
+// The live stream already knew this — it only fails a turn that never answered
+// — but the projection applied the failure the moment it saw it. The same run
+// therefore read as completed while it streamed and as failed on every reload
+// afterwards, which is worse than either answer alone.
+func TestARecoveredRunDoesNotStayFailedOnReload(t *testing.T) {
+	frames := []map[string]any{
+		fr(frameUserMessage, "text", "看下告警", "ts", int64(1)),
+		call("r1", "c1", "list_alert_rules", 5),
+		result("r1", "c1", true, 6, map[string]any{"summary": "3 条"}),
+		fr(frameError, "round", "r1", "ts", int64(8), "message", "模型未生成内容", "code", "OTHER"),
+		answer("r1", "共 3 条告警规则。", 12),
+	}
+	tasks := foldTasks("web-1", frames, infos(nil), nil)
+	if len(tasks) != 1 {
+		t.Fatalf("tasks = %d", len(tasks))
+	}
+	if tasks[0].Status != TaskCompleted {
+		t.Errorf("status = %q; 这一轮最后是答复了的", tasks[0].Status)
+	}
+	if tasks[0].Reply != "共 3 条告警规则。" {
+		t.Errorf("reply = %q", tasks[0].Reply)
+	}
+}
+
+// And a failure in one run of a folded task does not spare that task when the
+// other run answered — the failed run still never answered.
+func TestOnlyTheUnansweredRunOfAFoldedTaskFails(t *testing.T) {
+	frames := []map[string]any{
+		fr(frameUserMessage, "text", "巡检磁盘", "ts", int64(1)),
+		call("r1", "c1", "check_disk", 5),
+		result("r1", "c1", true, 6, map[string]any{"summary": "缺少阈值"}),
+		answer("r1", "需要一个阈值。", 10),
+		fr(frameUserMessage, "text", "用 85%", "ts", int64(20)),
+		call("r2", "c1", "check_disk", 24),
+		fr(frameError, "round", "r2", "ts", int64(28), "message", "模型未生成内容"),
+	}
+	tasks := foldTasks("web-1", frames, infos(nil), map[string]string{"r2": "web-1/r1"})
+	if len(tasks) != 1 {
+		t.Fatalf("tasks = %d", len(tasks))
+	}
+	if tasks[0].Status != TaskFailed {
+		t.Errorf("status = %q; 续跑那一轮没有答复，任务没有完成", tasks[0].Status)
+	}
+}
+
+// The clearing is per run, not per task.
+//
+// A task whose first run was refused and whose follow-up answered still
+// contains a run that never answered, and that is what the failure is about.
+// Clearing it because some later run replied would report the task as clean
+// while the thing the user came back to fix is still in it.
+func TestAnAnswerClearsOnlyItsOwnRunsFailure(t *testing.T) {
+	frames := []map[string]any{
+		fr(frameUserMessage, "text", "巡检磁盘", "ts", int64(1)),
+		call("r1", "c1", "check_disk", 5),
+		fr(frameError, "round", "r1", "ts", int64(8), "message", "模型未生成内容"),
+		fr(frameUserMessage, "text", "再试一次", "ts", int64(20)),
+		call("r2", "c1", "check_disk", 24),
+		result("r2", "c1", true, 25, map[string]any{"summary": "3 台超阈值"}),
+		answer("r2", "3 台机器磁盘满了。", 30),
+	}
+	tasks := foldTasks("web-1", frames, infos(nil), map[string]string{"r2": "web-1/r1"})
+	if len(tasks) != 1 {
+		t.Fatalf("tasks = %d", len(tasks))
+	}
+	if tasks[0].Status != TaskFailed {
+		t.Errorf("status = %q; 第一轮没有答复，后一轮的答复不代表它成功了", tasks[0].Status)
+	}
+}
+
+// The two answers the records probe can give, as the callable IsTask now
+// takes. A function because answering it for real costs a query, and IsTask
+// asks only when nothing cheaper has settled the question.
+func noRecords() bool   { return false }
+func someRecords() bool { return true }

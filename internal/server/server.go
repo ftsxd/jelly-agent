@@ -5,6 +5,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"io/fs"
 	"log/slog"
@@ -36,7 +37,19 @@ type Server struct {
 	// runReg knows which runs are in flight, which is the one thing about a
 	// task that cannot be read off its stored events. See runs.go.
 	runsOnce sync.Once
-	runReg   *runRegistry
+	// declMu serialises writes to the console's tool-metadata file. Every save
+	// is a read-modify-write of one file, and the page saves a field at a time.
+	declMu sync.Mutex
+
+	// recordsProbe answers which runs of a set of sessions stored anything.
+	//
+	// A field rather than a direct call so a test can count how often the task
+	// list asks. "Once per page of sessions" is a property of the call site,
+	// not of the query — a test of the query alone stays green the day
+	// somebody puts it back inside the per-session loop, which is exactly the
+	// regression this is guarding. Nil means the delivery store answers it.
+	recordsProbe func(ctx context.Context, appName, userID string, sessionIDs []string) (map[string]map[string]bool, error)
+	runReg       *runRegistry
 }
 
 // New builds a server over the given engine. staticFS is the embedded frontend
@@ -46,12 +59,16 @@ func New(eng *engine.Engine, staticFS fs.FS) *Server {
 	// One-time cleanup of event rows orphaned by deletes that ran before sessions
 	// and events were removed together (SQLite foreign keys are off, so ADK's
 	// cascade never fired). Best-effort: a fresh/empty DB simply has none.
-	if n, err := jellysession.PurgeOrphanEvents(""); err == nil && n > 0 {
+	// Resolved from the engine rather than defaulted, for the same reason the
+	// delete path is: a deployment with its own database must not have its
+	// housekeeping run against a different one.
+	dbPath := eng.SessionDBPath()
+	if n, err := jellysession.PurgeOrphanEvents(dbPath); err == nil && n > 0 {
 		slog.Info("清理孤儿会话事件", "rows", n)
 	}
 	// Same for the L2 search index: drop rows whose session was deleted before
 	// the index was purged alongside it, so load_memory can't surface them.
-	if n, err := memory.PurgeOrphanIndex(""); err == nil && n > 0 {
+	if n, err := memory.PurgeOrphanIndex(dbPath); err == nil && n > 0 {
 		slog.Info("清理孤儿检索索引", "rows", n)
 	}
 	s := &Server{eng: eng, static: staticFS, auth: newAuthManager()}
@@ -123,8 +140,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/sessions/ids", s.handleSessionIDs)
 	mux.HandleFunc("GET /api/sessions/{id}", s.handleSessionDetail)
 	mux.HandleFunc("GET /api/sessions/{id}/timeline", s.handleSessionTimeline)
-	mux.HandleFunc("GET /api/sessions/{id}/results/{call}", s.handleToolResult)
-	mux.HandleFunc("GET /api/sessions/{id}/results/{call}/search", s.handleToolResultSearch)
+	mux.HandleFunc("GET /api/sessions/{id}/results/{ref}", s.handleToolResult)
+	mux.HandleFunc("GET /api/sessions/{id}/results/{ref}/search", s.handleToolResultSearch)
 	mux.HandleFunc("GET /api/tasks", s.handleTasks)
 	mux.HandleFunc("GET /api/tasks/{session}/{round}", s.handleTask)
 	mux.HandleFunc("POST /api/sessions/delete", s.handleDeleteSessions)

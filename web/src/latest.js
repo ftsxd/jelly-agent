@@ -44,6 +44,26 @@ export function latestOnly() {
       }
     },
 
+    /**
+     * Disowns whatever is in flight without starting anything.
+     *
+     * The gate only invalidated when a new call was made, which meant it
+     * covered "switch to another readable product" and nothing else: switching
+     * to an expired one, or to another task entirely, left the previous
+     * request still owning the pane. It would land afterwards and render one
+     * session's bytes under another's — hardest to spot when both sessions
+     * have an e1, which is the common case, since handles are numbered per
+     * session.
+     *
+     * Called on every path that changes what the pane is showing, including
+     * the ones that fetch nothing.
+     */
+    abandon() {
+      seq++
+      if (pending) pending.abort()
+      pending = null
+    },
+
     /** True while `mine` is still the newest call. */
     owns(mine) {
       return mine === seq
