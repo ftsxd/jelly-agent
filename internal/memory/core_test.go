@@ -1,13 +1,15 @@
 package memory
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
 
 func newCore(t *testing.T) *Core {
 	t.Helper()
-	c, err := NewCore(t.TempDir(), 0, 0)
+	c, err := NewCore(t.TempDir(), 0, 0, 0)
 	if err != nil {
 		t.Fatalf("NewCore: %v", err)
 	}
@@ -124,7 +126,7 @@ func TestUnknownTargetErrors(t *testing.T) {
 
 func TestBudgetTrimsOldestWithMarker(t *testing.T) {
 	// Tight budget so only the most recent entries survive.
-	c, err := NewCore(t.TempDir(), 12, 500)
+	c, err := NewCore(t.TempDir(), 12, 500, 0)
 	if err != nil {
 		t.Fatalf("NewCore: %v", err)
 	}
@@ -161,5 +163,129 @@ func mustRemember(t *testing.T, c *Core, facts ...string) {
 		if err := c.Remember(TargetMemory, f); err != nil {
 			t.Fatalf("Remember %q: %v", f, err)
 		}
+	}
+}
+
+// The environment block is injected every turn, ahead of the rest.
+//
+// Ahead because it is the ground the rest is reasoned against, and because it
+// is the most stable of the three — the prompt cache rewards putting what
+// changes least at the front, and MEMORY.md, which the agent itself rewrites,
+// changes most.
+func TestEnvironmentIsInjectedFirst(t *testing.T) {
+	c, err := NewCore(t.TempDir(), 0, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	write := func(name, body string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(c.Dir(), name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(EnvironmentFile, "- 监控只有一套 n9e，数据源是 k8s Prometheus")
+	write(UserFile, "- 用户偏好简洁的中文回答")
+	write(MemoryFile, "- 上次排查过 payment-api 超时")
+
+	got := c.Render("你是 jelly-agent。")
+	for _, want := range []string{"ENVIRONMENT.md", "n9e", "USER.md", "MEMORY.md", "你是 jelly-agent。"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("rendered prompt is missing %q:\n%s", want, got)
+		}
+	}
+	env, usr, mem := strings.Index(got, "ENVIRONMENT.md"), strings.Index(got, "USER.md"), strings.Index(got, "MEMORY.md")
+	if !(env < usr && usr < mem) {
+		t.Errorf("顺序是 env=%d user=%d memory=%d，应当是环境最前、记忆最后", env, usr, mem)
+	}
+	if base := strings.Index(got, "你是 jelly-agent。"); base < mem {
+		t.Errorf("静态指令排在了核心记忆之前 (%d < %d)", base, mem)
+	}
+}
+
+// The agent cannot write the environment file.
+//
+// That is the whole reason it is a separate file rather than a section of
+// MEMORY.md: it is what an operator asserts, and a model must not be able to
+// overwrite or forget the ground truth it is reasoning against.
+func TestTheAgentCannotWriteTheEnvironmentFile(t *testing.T) {
+	c, err := NewCore(t.TempDir(), 0, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const truth = "- 腾讯云 Redis 未接入本平台"
+	if err := os.WriteFile(filepath.Join(c.Dir(), EnvironmentFile), []byte(truth), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Neither target reaches it, and there is no third target that does.
+	for _, target := range []Target{TargetMemory, TargetUser, "", Target(EnvironmentFile), "environment", "env"} {
+		_ = c.Remember(target, "- 腾讯云 Redis 已经接入了")
+		_, _ = c.Forget(target, "腾讯云")
+	}
+	if got := c.Environment(); got != truth {
+		t.Errorf("环境事实被改写成了 %q", got)
+	}
+}
+
+// An empty or absent file contributes nothing, so every existing install
+// behaves exactly as it did.
+func TestNoEnvironmentFileChangesNothing(t *testing.T) {
+	c, err := NewCore(t.TempDir(), 0, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := c.Environment(); got != "" {
+		t.Errorf("environment = %q, want empty", got)
+	}
+	if got := c.Render("基础指令"); got != "基础指令" {
+		t.Errorf("render = %q, want the bare instruction", got)
+	}
+}
+
+// The environment file is trimmed from the end, not the start.
+//
+// The direction is the whole point. MEMORY.md is notes where the newest matter
+// most, so it keeps the tail. ENVIRONMENT.md opens with the data-source table
+// — the ids a query cannot be made without — and closes with caveats. Trimming
+// it the same way keeps the caveats and drops the table, which is the least
+// useful half of the file with no sign that the rest existed.
+func TestTheEnvironmentFileIsTrimmedFromTheEnd(t *testing.T) {
+	c, err := NewCore(t.TempDir(), 0, 0, 12) // a budget small enough to bind
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := strings.Join([]string{
+		"必须保留：ds_id=4 是 k8s 生产",
+		"中间的行",
+		"再一行",
+		"最后一行：待确认的事情",
+	}, "\n")
+	if err := os.WriteFile(filepath.Join(c.Dir(), EnvironmentFile), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got := c.Render("基础指令")
+	if !strings.Contains(got, "ds_id=4") {
+		t.Errorf("开头的数据源表被截掉了:\n%s", got)
+	}
+	if strings.Contains(got, "最后一行") {
+		t.Errorf("预算没有生效，尾部也进来了:\n%s", got)
+	}
+	// And it says so, rather than looking like the whole file.
+	if !strings.Contains(got, "未进入上下文") {
+		t.Errorf("截断没有留下痕迹，读的人会以为这就是全部:\n%s", got)
+	}
+
+	// MEMORY.md keeps trimming the other way — the newest note survives.
+	if err := os.WriteFile(filepath.Join(c.Dir(), MemoryFile),
+		[]byte("- 最早的一条\n- 最新的一条"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tight, err := NewCore(c.Dir(), 6, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out := tight.Render("x"); !strings.Contains(out, "最新的一条") {
+		t.Errorf("MEMORY.md 的裁剪方向被一起改掉了:\n%s", out)
 	}
 }

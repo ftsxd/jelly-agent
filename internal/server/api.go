@@ -507,7 +507,10 @@ func (s *Server) handleMemoryCore(w http.ResponseWriter, _ *http.Request) {
 	}
 	mem, usr := core.Snapshot()
 	writeJSON(w, http.StatusOK, map[string]any{
-		"dir":            core.Dir(),
+		"dir": core.Dir(),
+		// The environment first, because that is the order it is injected in
+		// and the order the prompt page shows.
+		"environment":    core.Environment(),
 		"user":           usr,
 		"memory":         mem,
 		"search_enabled": s.engine().SearchEnabled(),
@@ -517,7 +520,7 @@ func (s *Server) handleMemoryCore(w http.ResponseWriter, _ *http.Request) {
 
 // memoryCoreInput sets one core-memory file's raw content from the web editor.
 type memoryCoreInput struct {
-	Target  string `json:"target"` // "user" | "memory"
+	Target  string `json:"target"` // "environment" | "user" | "memory"
 	Content string `json:"content"`
 }
 
@@ -530,6 +533,24 @@ func (s *Server) handleSetMemoryCore(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	core, err := s.engine().Core()
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	// The environment file is written through its own method rather than a
+	// memory.Target, because Target is what the agent's remember and forget
+	// tools resolve through. This endpoint is the operator — it is behind the
+	// admin session — and the operator is exactly who may assert what the
+	// deployment can see. The model still has no route to it.
+	if in.Target == "environment" {
+		if err := core.SetEnvironment(in.Content); err != nil {
+			writeErr(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+		return
+	}
 	var target memory.Target
 	switch in.Target {
 	case "user":
@@ -537,12 +558,7 @@ func (s *Server) handleSetMemoryCore(w http.ResponseWriter, r *http.Request) {
 	case "memory", "":
 		target = memory.TargetMemory
 	default:
-		writeErr(w, http.StatusBadRequest, "target 仅支持 user / memory")
-		return
-	}
-	core, err := s.engine().Core()
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error())
+		writeErr(w, http.StatusBadRequest, "target 仅支持 environment / user / memory")
 		return
 	}
 	if err := core.Set(target, in.Content); err != nil {

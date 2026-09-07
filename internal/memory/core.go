@@ -24,8 +24,33 @@ const (
 	MemoryFile = "MEMORY.md"
 	UserFile   = "USER.md"
 
+	// EnvironmentFile describes the deployment: which monitoring systems exist,
+	// what each one covers, and — the part that actually saves work — what is
+	// not connected to any of them.
+	//
+	// It is a third core file rather than a section of MEMORY.md because the
+	// two have different owners. MEMORY.md is what the agent writes through
+	// remember/forget; this is what an operator asserts, and a model must not
+	// be able to overwrite or forget the ground truth it is reasoning against.
+	// fileFor deliberately does not map to it, so the write tools cannot reach
+	// it at all.
+	//
+	// It is not tool metadata either. A tool's description can say what that
+	// tool answers; it cannot say that nothing here answers questions about
+	// Tencent Cloud managed Redis — an absent data source has no tool to hang
+	// a description on, and establishing that absence by exploration costs a
+	// handful of calls and a wrong-looking answer every time it is asked.
+	//
+	// And it is not a skill, because a skill is fetched on demand: this has to
+	// be in front of the model while it is still deciding what to do.
+	EnvironmentFile = "ENVIRONMENT.md"
+
 	defaultMemoryBudget = 800 // tokens, see PLAN §10.5
 	defaultUserBudget   = 500
+	// Larger than the other two: it is prose about an environment, it is read
+	// on every turn of every session, and it is the cheapest tokens in the
+	// prompt — a paragraph here replaces the exploration it makes unnecessary.
+	defaultEnvBudget = 1500
 )
 
 // Target names a core-memory file the agent can write to.
@@ -43,12 +68,13 @@ type Core struct {
 	dir          string
 	memoryBudget int
 	userBudget   int
+	envBudget    int
 }
 
 // NewCore opens the core-memory directory, creating it if needed. An empty dir
 // defaults to ~/.jelly-agent/memory; a leading ~ is expanded. Non-positive
 // budgets fall back to the defaults.
-func NewCore(dir string, memoryBudget, userBudget int) (*Core, error) {
+func NewCore(dir string, memoryBudget, userBudget, envBudget int) (*Core, error) {
 	if dir == "" {
 		home, err := os.UserHomeDir()
 		if err != nil {
@@ -68,10 +94,13 @@ func NewCore(dir string, memoryBudget, userBudget int) (*Core, error) {
 	if userBudget <= 0 {
 		userBudget = defaultUserBudget
 	}
+	if envBudget <= 0 {
+		envBudget = defaultEnvBudget
+	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("create memory dir: %w", err)
 	}
-	return &Core{dir: dir, memoryBudget: memoryBudget, userBudget: userBudget}, nil
+	return &Core{dir: dir, memoryBudget: memoryBudget, userBudget: userBudget, envBudget: envBudget}, nil
 }
 
 // Dir reports the directory holding the core-memory files.
@@ -88,6 +117,15 @@ func (c *Core) Snapshot() (mem, user string) {
 // install behaves exactly like the static instruction.
 func (c *Core) Render(base string) string {
 	var b strings.Builder
+	// The environment goes first, and not only because it is the ground the
+	// rest stands on: it is also the most stable of the three, and the prompt
+	// cache rewards putting what changes least at the front. MEMORY.md, which
+	// the agent rewrites, goes last for the same reason.
+	if env := c.budgetedHead(EnvironmentFile, c.envBudget); env != "" {
+		b.WriteString("## 环境（ENVIRONMENT.md）—— 运维声明的事实，优先于你的推测\n")
+		b.WriteString(env)
+		b.WriteString("\n\n")
+	}
 	if usr := c.budgeted(UserFile, c.userBudget); usr != "" {
 		b.WriteString("## 用户画像（USER.md）\n")
 		b.WriteString(usr)
@@ -100,6 +138,13 @@ func (c *Core) Render(base string) string {
 	}
 	b.WriteString(base)
 	return b.String()
+}
+
+// Environment returns the raw contents of ENVIRONMENT.md, for display. Empty
+// means the file is empty or absent, which is the state every install starts
+// in and behaves exactly as before.
+func (c *Core) Environment() string {
+	return strings.TrimRight(c.read(EnvironmentFile), "\n")
 }
 
 // Remember appends fact as a bullet to the target file, creating it if needed.
@@ -179,6 +224,25 @@ func (c *Core) Set(target Target, content string) error {
 	if err != nil {
 		return err
 	}
+	return c.write(name, content)
+}
+
+// SetEnvironment replaces ENVIRONMENT.md.
+//
+// A method of its own rather than another Target, and that is the whole point.
+// What protects this file is not that it is read-only — an operator has to be
+// able to edit it, and the console is where they will — it is that only the
+// operator's path reaches it. Target is what the agent's remember and forget
+// tools resolve through, so leaving it out of fileFor keeps the model out
+// while leaving the console a door. Read-only would have been the wrong
+// property: it would have locked out the one caller who is supposed to write.
+func (c *Core) SetEnvironment(content string) error {
+	return c.write(EnvironmentFile, content)
+}
+
+// write replaces one core file, normalising the trailing newline so an edit
+// from the console and one from a tool leave the file in the same shape.
+func (c *Core) write(name, content string) error {
 	content = strings.TrimRight(content, "\n")
 	if content != "" {
 		content += "\n"
@@ -192,6 +256,40 @@ func (c *Core) Set(target Target, content string) error {
 // budgeted reads name and trims it to fit budget tokens, keeping the most
 // recent entries (files grow by appending). A marker notes any drop so the
 // model knows memory was truncated rather than absent.
+// budgetedHead trims from the end instead of the start, for a file whose
+// opening lines are the load-bearing ones.
+//
+// The direction is the whole point. MEMORY.md is a list of notes where the
+// newest matter most, so budgeted keeps the tail. ENVIRONMENT.md opens with
+// the data-source table — the ids a query cannot be made without — and closes
+// with caveats. Trimming it the same way would silently drop the table and
+// keep the caveats, which is a prompt that has the least useful half of the
+// file in it and no sign that the rest existed.
+func (c *Core) budgetedHead(name string, budget int) string {
+	content := strings.TrimRight(c.read(name), "\n")
+	if content == "" {
+		return ""
+	}
+	if estimateTokens(content) <= budget {
+		return content
+	}
+	lines := strings.Split(content, "\n")
+	var kept []string
+	used := 0
+	for i, line := range lines {
+		cost := estimateTokens(line) + 1 // +1 for the newline join
+		if used+cost > budget && len(kept) > 0 {
+			kept = append(kept, fmt.Sprintf(
+				"（… 后面还有 %d 行未进入上下文，已超出 env_budget_tokens；需要时请精简本文件或调大预算 …）",
+				len(lines)-i))
+			break
+		}
+		kept = append(kept, line)
+		used += cost
+	}
+	return strings.Join(kept, "\n")
+}
+
 func (c *Core) budgeted(name string, budget int) string {
 	content := strings.TrimRight(c.read(name), "\n")
 	if content == "" {

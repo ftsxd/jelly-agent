@@ -327,6 +327,9 @@ type MemoryCore struct {
 	Dir                string `mapstructure:"dir" yaml:"dir,omitempty"`
 	MemoryBudgetTokens int    `mapstructure:"memory_budget_tokens" yaml:"memory_budget_tokens,omitempty"`
 	UserBudgetTokens   int    `mapstructure:"user_budget_tokens" yaml:"user_budget_tokens,omitempty"`
+	// EnvBudgetTokens bounds ENVIRONMENT.md, the operator's description of what
+	// this deployment can and cannot see. Zero takes the layer's default.
+	EnvBudgetTokens int `mapstructure:"env_budget_tokens" yaml:"env_budget_tokens,omitempty"`
 }
 
 // MemorySearch configures L2 session search (PLAN §10.5). Disabled by default;

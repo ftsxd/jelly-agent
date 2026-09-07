@@ -221,7 +221,7 @@ func (e *Engine) SearchEnabled() bool { return e.cfg.Memory.Search.Enabled }
 // Core builds the L1 core-memory store from config (or its defaults).
 func (e *Engine) Core() (*memory.Core, error) {
 	mc := e.cfg.Memory.Core
-	return memory.NewCore(mc.Dir, mc.MemoryBudgetTokens, mc.UserBudgetTokens)
+	return memory.NewCore(mc.Dir, mc.MemoryBudgetTokens, mc.UserBudgetTokens, mc.EnvBudgetTokens)
 }
 
 // Search builds the L2 FTS5 search service over the shared state.db when
@@ -374,6 +374,14 @@ func (e *Engine) SystemPrompt(provider string) (parts []PromptPart, err error) {
 	allow := e.cfg.Skills.AllowScripts
 
 	parts = append(parts, PromptPart{Name: "指令", Text: RootInstruction})
+	// Listed in the order it is injected, so the page reads the way the model
+	// receives it. The environment block is first because it is what the rest
+	// is reasoned against — and because an operator looking at this page is
+	// usually asking "does it know X about our setup", which should be the
+	// first thing they see.
+	if env := core.Environment(); env != "" {
+		parts = append(parts, PromptPart{Name: memory.EnvironmentFile, Text: env})
+	}
 	if mem != "" {
 		parts = append(parts, PromptPart{Name: "MEMORY.md", Text: mem})
 	}

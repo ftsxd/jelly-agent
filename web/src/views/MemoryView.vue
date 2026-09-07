@@ -112,9 +112,18 @@ async function toggleSearch() {
   }
 }
 
+// Keyed by target rather than branched, so adding a file to this page is a
+// row in the map and a card in the template — not a third arm of a ternary
+// that silently picks the wrong draft.
+const coreFiles = {
+  environment: () => core.value?.environment,
+  user: () => core.value?.user,
+  memory: () => core.value?.memory,
+}
+
 function startEditCore(target) {
   editTarget.value = target
-  draft.value = (target === 'user' ? core.value?.user : core.value?.memory) || ''
+  draft.value = coreFiles[target]?.() || ''
 }
 
 function cancelEditCore() {
@@ -171,6 +180,34 @@ function fmtTime(unix) {
         <div v-if="coreLoading" class="empty"><span class="spinner" /></div>
         <div v-else-if="coreError" class="error-bar"><Icon name="alert" :size="16" /> {{ coreError }}</div>
         <template v-else>
+          <!-- 环境先于另外两份注入，所以也排在最前。
+               它是运维声明的事实：模型的 remember / forget 到不了这个文件，
+               只有这个页面能写。 -->
+          <div class="card mem-card">
+            <div class="mem-head">
+              <span class="mem-title"><Icon name="doc" :size="15" /> ENVIRONMENT.md</span>
+              <span class="mem-note muted tiny">运维声明，模型不可写</span>
+              <button v-if="editTarget !== 'environment'" class="btn btn-mini" @click="startEditCore('environment')">
+                <Icon name="settings" :size="13" /> 编辑
+              </button>
+            </div>
+            <template v-if="editTarget === 'environment'">
+              <textarea v-model="draft" class="textarea mono mem-edit" rows="14"
+                        placeholder="每个数据源三到五行：叫什么、覆盖什么、不覆盖什么、问到不覆盖的该怎么答" />
+              <div class="mem-actions">
+                <button class="btn btn-mini" @click="cancelEditCore" :disabled="savingCore">取消</button>
+                <button class="btn btn-mini btn-primary" @click="saveCore" :disabled="savingCore">
+                  <span v-if="savingCore" class="spinner" /> 保存
+                </button>
+              </div>
+            </template>
+            <template v-else>
+              <pre v-if="core.environment" class="mem-body mono">{{ core.environment }}</pre>
+              <div v-else class="mem-empty muted">
+                （暂未描述环境。写清楚哪些数据源接入了、哪些没接入，模型就不必靠翻看板去猜）
+              </div>
+            </template>
+          </div>
           <div class="card mem-card">
             <div class="mem-head">
               <span class="mem-title"><Icon name="user" :size="15" /> USER.md</span>
@@ -558,6 +595,13 @@ function fmtTime(unix) {
   display: flex;
   align-items: center;
   gap: var(--sp-2);
+}
+/* Pushed to the right of the title so the edit button stays where it is on
+   every card — mem-head is space-between, so a third child would otherwise
+   move it. */
+.mem-note {
+  margin-right: auto;
+  font-weight: 400;
 }
 .btn-mini {
   padding: 2px var(--sp-2);
