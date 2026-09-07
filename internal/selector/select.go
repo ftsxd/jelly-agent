@@ -101,6 +101,10 @@ type Result struct {
 // deliberate choice to keep the prompt bounded rather than to keep it relevant.
 func Select(query string, tools []ops.ToolMetadata, cfg Config) Result {
 	q := tokenize(query)
+	// What the question appears to want, for the tools that cannot say it in
+	// the same language as the question. See intent.go for why this is needed
+	// at all and why it is weighted below every literal match.
+	in := inferIntent(q)
 
 	// order preserves the declared sequence as the last tiebreaker, so an
 	// identical catalogue and an identical question always produce an
@@ -110,7 +114,7 @@ func Select(query string, tools []ops.ToolMetadata, cfg Config) Result {
 	cands := make([]ops.Candidate, 0, len(tools))
 	tiers := make(map[string]int, len(tools))
 	for i, m := range tools {
-		sc, relevance, reason := score(q, m)
+		sc, relevance, reason := score(q, in, m)
 		order[m.Name] = i
 		tiers[m.Name] = tierOf(m, relevance)
 		cands = append(cands, ops.Candidate{
@@ -202,16 +206,16 @@ func tierOf(m ops.ToolMetadata, relevance float64) int {
 // within a tier and includes the latency tiebreaker; relevance decides which
 // tier the tool is in and is purely lexical — see tierOf for why conflating
 // them was wrong twice over.
-func score(q map[string]bool, m ops.ToolMetadata) (total, relevance float64, reason string) {
+func score(q map[string]bool, in intent, m ops.ToolMetadata) (total, relevance float64, reason string) {
 	if len(q) == 0 {
 		return 0, 0, ""
 	}
 	var hits []string
 
-	add := func(weight float64, label string, texts ...string) {
+	against := func(from map[string]bool, weight float64, label string, texts ...string) {
 		n := 0
 		for _, t := range texts {
-			n += overlap(q, tokenize(t))
+			n += overlap(from, tokenize(t))
 		}
 		if n == 0 {
 			return
@@ -219,12 +223,36 @@ func score(q map[string]bool, m ops.ToolMetadata) (total, relevance float64, rea
 		relevance += weight * float64(n)
 		hits = append(hits, label)
 	}
+	add := func(weight float64, label string, texts ...string) {
+		against(q, weight, label, texts...)
+	}
 
 	add(wName, "名称", m.Names()...)
 	add(wUseCase, "适用场景", m.UseCases...)
 	add(wTag, "标签", append(append([]string{m.Backend, m.Server}, m.Tags...), m.Suites...)...)
 	add(wExample, "示例", m.Examples...)
 	add(wDescription, "描述", m.Description)
+
+	// The recovered signals. Each fires at most once — see intent.go for why
+	// scaling them by the token count let inference overtake testimony — and
+	// together they cannot reach wUseCase.
+	if !in.empty() {
+		once := func(weight float64, label string, texts ...string) {
+			for _, t := range texts {
+				if overlap(in.stems, tokenize(t)) > 0 {
+					relevance += weight
+					hits = append(hits, label)
+					return
+				}
+			}
+		}
+		if m.Produces != "" && in.kinds[m.Produces] {
+			relevance += wKind
+			hits = append(hits, "产出类型")
+		}
+		once(wStemName, "名称(推断)", m.Names()...)
+		once(wStemDescribe, "描述(推断)", m.Description)
+	}
 
 	if n := countOverlap(q, m.AntiExamples); n > 0 {
 		relevance += wAntiExample * float64(n)
