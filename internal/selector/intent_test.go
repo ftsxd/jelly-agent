@@ -177,7 +177,7 @@ func TestOverBroadWordsAreNotCues(t *testing.T) {
 		"该使用哪个数据源",
 		"帮我看看有哪些通知渠道",
 	} {
-		if in := inferIntent(tokenize(q)); !in.empty() {
+		if in := inferIntent(tokenize(q)); !in.Empty() {
 			t.Errorf("%q 推断出了 kinds=%v stems=%v，它不是一个指标问题", q, in.kinds, in.stems)
 		}
 	}
@@ -223,7 +223,7 @@ func TestAQuestionWithNoCuesIsUnchanged(t *testing.T) {
 		meta("beta", desc("Something else.")),
 	}
 	q := "帮我看看有哪些通知渠道"
-	if in := inferIntent(tokenize(q)); !in.empty() {
+	if in := inferIntent(tokenize(q)); !in.Empty() {
 		t.Fatalf("这个问题不该推断出任何意图: kinds=%v stems=%v", in.kinds, in.stems)
 	}
 	res := Select(q, tools, Config{})
@@ -260,5 +260,72 @@ func TestTheReasonNamesTheInferredSignal(t *testing.T) {
 		if !strings.Contains(r, want) {
 			t.Errorf("reason = %q，没有说明 %q 这个信号", r, want)
 		}
+	}
+}
+
+// A conversation is continuous; a question is not.
+//
+// By the third turn nobody repeats 指标 or CPU. "集群 id 我不清楚，你给我下"
+// is still a metrics question and infers nothing at all on its own — which put
+// the PromQL tools back at the bottom of a flat ranking, where the budget cut
+// them, and the model reported (correctly) that it had no way to query. The
+// capability had been taken away by the wording of a follow-up.
+func TestACarriedIntentKeepsTheToolsAFollowUpStoppedNaming(t *testing.T) {
+	var tools []ops.ToolMetadata
+	for _, n := range []string{
+		"get_notify_channel", "list_alert_subscribes", "list_mutes",
+		"list_notify_rules", "list_roles", "list_users",
+	} {
+		tools = append(tools, meta(n, desc("Administrative endpoint.")))
+	}
+	tools = append(tools,
+		meta("query_range", desc("Run a PromQL range query against a Prometheus-compatible datasource.")),
+		meta("query_instant", desc("Run a PromQL instant query against a Prometheus-compatible datasource."),
+			produces(ops.KindMetricSeries)),
+	)
+
+	const followUp = "集群 id 我不清楚，你给我下"
+	// On its own it says nothing, and under a binding budget the query tools
+	// are the ones cut — they sort last among a field of zeroes.
+	alone := Select(followUp, tools, Config{MaxTools: 5})
+	if rankOf(alone, "query_range") >= 0 || rankOf(alone, "query_instant") >= 0 {
+		t.Fatalf("前提不成立：这句话单独看本就该丢掉查询工具，实际入选=%v", alone.Selected)
+	}
+
+	// Carried from an earlier turn of the same conversation, they stay.
+	carried := Infer("查一下这个实例最近 3 天的 cpu 使用率")
+	if carried.Empty() {
+		t.Fatal("前一轮那句话没有推断出任何意图")
+	}
+	withHistory := Select(followUp, tools, Config{MaxTools: 5, Carried: carried})
+	for _, want := range []string{"query_range", "query_instant"} {
+		if rankOf(withHistory, want) < 0 {
+			t.Errorf("%s 在追问里丢了；这次对话一直在问指标: 入选=%v", want, withHistory.Selected)
+		}
+	}
+}
+
+// Merge is a union and mutates neither side: the caller holds one of these per
+// session, and a selection must not be able to grow somebody else's record.
+func TestMergingIntentsDoesNotMutateEither(t *testing.T) {
+	a := Infer("cpu 使用率")
+	b := Infer("看下日志")
+	merged := a.Merge(b)
+
+	if !merged.kinds[ops.KindMetricSeries] || !merged.kinds[ops.KindLogExcerpt] {
+		t.Errorf("并集不完整: %v", merged.kinds)
+	}
+	if a.kinds[ops.KindLogExcerpt] {
+		t.Error("Merge 改写了左边")
+	}
+	if b.kinds[ops.KindMetricSeries] {
+		t.Error("Merge 改写了右边")
+	}
+	// And an empty intent merges cleanly in both directions.
+	if got := (Intent{}).Merge(a); !got.kinds[ops.KindMetricSeries] {
+		t.Error("空意图与非空合并丢了内容")
+	}
+	if got := a.Merge(Intent{}); !got.kinds[ops.KindMetricSeries] {
+		t.Error("非空与空意图合并丢了内容")
 	}
 }

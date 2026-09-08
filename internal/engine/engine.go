@@ -119,6 +119,11 @@ type Engine struct {
 	admitOnce sync.Once
 	admit     *admissions
 
+	// intentOnce/intent remember what each conversation has been asking for,
+	// so a follow-up that names no metric does not lose the metric tools.
+	intentOnce sync.Once
+	intent     *intents
+
 	// budget tracks how much room each round has left for tool results.
 	budgetOnce sync.Once
 	budget     *resultBudget
@@ -1208,6 +1213,7 @@ func (e *Engine) buildNode(name, description, provider, instruction string, tool
 		cfg:      selector.Config{MaxTools: e.maxTools()},
 		report:   logSelection,
 		admit:    e.admissions(),
+		carried:  e.intents(),
 		health:   e.toolsetHealth(),
 		inflight: e.toolListing(),
 	}

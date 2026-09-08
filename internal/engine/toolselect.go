@@ -49,6 +49,10 @@ type selectingToolset struct {
 	// builds, because a toolset instance lives for one request while the
 	// prompt cache it protects lives for the conversation. See admit.go.
 	admit *admissions
+	// carried remembers what this conversation has been asking for, so a
+	// follow-up that names no metric does not lose the metric tools. See
+	// intents.go for why admission alone cannot cover that case.
+	carried *intents
 }
 
 func (s *selectingToolset) Name() string { return "jelly_selector" }
@@ -128,7 +132,15 @@ func (s *selectingToolset) Tools(ctx agent.ReadonlyContext) ([]adktool.Tool, err
 		metas = append(metas, metadataOf(t))
 	}
 
-	res := selector.Select(queryOf(ctx), metas, s.cfg)
+	// This turn's question, read together with everything the conversation has
+	// asked so far. A follow-up stops repeating itself long before the topic
+	// changes.
+	cfg := s.cfg
+	query := queryOf(ctx)
+	if s.carried != nil {
+		cfg.Carried = s.carried.carry(sessionOf(ctx), selector.Infer(query))
+	}
+	res := selector.Select(query, metas, cfg)
 
 	// Selected is in catalogue order; the ranking, the matched flag and the
 	// baseline flag live in Candidates. All three matter: baseline is outside

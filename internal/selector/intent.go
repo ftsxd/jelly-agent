@@ -61,13 +61,43 @@ const (
 	maxInferred = wKind + wStemName + wStemDescribe
 )
 
-// intent is what a question appears to be asking for.
-type intent struct {
+// Intent is what a question appears to be asking for.
+//
+// Exported so a caller can carry it across turns. A conversation is
+// continuous, but a question is not: by the third turn nobody repeats
+// "指标" or "CPU" — "集群 id 我不清楚，你给我下" is still a metrics question
+// and infers nothing at all. Inferring from that turn alone dropped the PromQL
+// tools mid-conversation and the model reported, correctly, that it had no way
+// to query. Accumulating per session is the engine's job; merging is here.
+type Intent struct {
 	kinds map[ops.EvidenceKind]bool
 	stems map[string]bool
 }
 
-func (i intent) empty() bool { return len(i.kinds) == 0 && len(i.stems) == 0 }
+// Infer reads a question through the lexicon.
+func Infer(query string) Intent { return inferIntent(tokenize(query)) }
+
+// Empty reports whether nothing was inferred.
+func (i Intent) Empty() bool { return len(i.kinds) == 0 && len(i.stems) == 0 }
+
+// Merge returns the union. Neither side is mutated: the caller holds one of
+// these per session and Select is handed a value, so a selection must not be
+// able to grow somebody else's record.
+func (i Intent) Merge(other Intent) Intent {
+	out := Intent{
+		kinds: make(map[ops.EvidenceKind]bool, len(i.kinds)+len(other.kinds)),
+		stems: make(map[string]bool, len(i.stems)+len(other.stems)),
+	}
+	for _, src := range []Intent{i, other} {
+		for k := range src.kinds {
+			out.kinds[k] = true
+		}
+		for s := range src.stems {
+			out.stems[s] = true
+		}
+	}
+	return out
+}
 
 // cue maps a question token to what it implies.
 //
@@ -145,8 +175,8 @@ var cues = map[string]cue{
 }
 
 // inferIntent reads the question's tokens through the lexicon.
-func inferIntent(q map[string]bool) intent {
-	in := intent{kinds: map[ops.EvidenceKind]bool{}, stems: map[string]bool{}}
+func inferIntent(q map[string]bool) Intent {
+	in := Intent{kinds: map[ops.EvidenceKind]bool{}, stems: map[string]bool{}}
 	for tok := range q {
 		c, ok := cues[tok]
 		if !ok {

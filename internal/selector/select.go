@@ -67,6 +67,16 @@ type Config struct {
 	// the stage, while exceeding a token target costs tokens. The two are not
 	// comparable, and there are few baseline tools by design.
 	MaxTools int
+
+	// Carried is what earlier turns of this conversation were asking for.
+	//
+	// Selection reads one question, and a question stops repeating itself: by
+	// the third turn "集群 id 我不清楚，你给我下" infers nothing, though the
+	// conversation is still about metrics. Without this the PromQL tools were
+	// cut mid-conversation and the model reported — correctly — that it had no
+	// way to query. The engine accumulates this per session; zero value means
+	// this turn stands alone, which is what a first turn and every test does.
+	Carried Intent
 }
 
 // Result is one selection.
@@ -104,7 +114,7 @@ func Select(query string, tools []ops.ToolMetadata, cfg Config) Result {
 	// What the question appears to want, for the tools that cannot say it in
 	// the same language as the question. See intent.go for why this is needed
 	// at all and why it is weighted below every literal match.
-	in := inferIntent(q)
+	in := inferIntent(q).Merge(cfg.Carried)
 
 	// order preserves the declared sequence as the last tiebreaker, so an
 	// identical catalogue and an identical question always produce an
@@ -206,7 +216,7 @@ func tierOf(m ops.ToolMetadata, relevance float64) int {
 // within a tier and includes the latency tiebreaker; relevance decides which
 // tier the tool is in and is purely lexical — see tierOf for why conflating
 // them was wrong twice over.
-func score(q map[string]bool, in intent, m ops.ToolMetadata) (total, relevance float64, reason string) {
+func score(q map[string]bool, in Intent, m ops.ToolMetadata) (total, relevance float64, reason string) {
 	if len(q) == 0 {
 		return 0, 0, ""
 	}
@@ -236,7 +246,7 @@ func score(q map[string]bool, in intent, m ops.ToolMetadata) (total, relevance f
 	// The recovered signals. Each fires at most once — see intent.go for why
 	// scaling them by the token count let inference overtake testimony — and
 	// together they cannot reach wUseCase.
-	if !in.empty() {
+	if !in.Empty() {
 		once := func(weight float64, label string, texts ...string) {
 			for _, t := range texts {
 				if overlap(in.stems, tokenize(t)) > 0 {
