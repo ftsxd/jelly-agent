@@ -31,6 +31,10 @@ web/node_modules/
 web/dist/*
 !web/dist/.gitkeep
 
+# 其他会话在这个目录里干活留下的产物（述职材料、表格整理等），和本仓库无关。
+# 这里是 Claude Code 的工作目录，不代表这些文件属于这个项目。
+/outputs/
+
 # 编辑器 / 系统
 .DS_Store
 .idea/
