@@ -524,3 +524,77 @@ func TestTheSaveAnswersWithWhatTookEffect(t *testing.T) {
 		t.Errorf("保存返回 %+v，列表返回 %+v——同一个工具两种说法", saved.Tool, listed)
 	}
 }
+
+// The editor's boxes hold what the console file overrides. The list has to
+// keep that separate from what the registry resolved, or the page has no way
+// to fill them without inventing overrides.
+//
+// This is the bug it prevents: opening the editor on an MCP tool filled the
+// description box with the MCP server's own English description, and pressing
+// 保存元数据 wrote it into the override file — freezing a value that was
+// supposed to follow the server, and marking the tool 已声明 for a field
+// nobody had decided anything about.
+func TestListSeparatesTheConsoleDeclarationFromWhatApplies(t *testing.T) {
+	s := newTestServer(t)
+	dir := t.TempDir()
+	s.engine().Config().Tools.MetadataDir = dir
+
+	// web_search is a builtin: it arrives with its own description, which the
+	// console does not declare.
+	body := `{"name":"web_search","suites":["research"]}`
+	if w := do(t, s, "POST", "/api/tools/metadata", body); w.Code != http.StatusOK {
+		t.Fatalf("save status = %d: %s", w.Code, w.Body.String())
+	}
+
+	got := declFromAPI(t, s, "web_search")
+	if got.Declared == nil {
+		t.Fatal("the console declared this tool and the list does not say what")
+	}
+	if !slices.Equal(got.Declared.Suites, []string{"research"}) {
+		t.Errorf("declared suites = %v", got.Declared.Suites)
+	}
+	if got.Description == "" {
+		t.Fatal("precondition: web_search should resolve to its builtin description")
+	}
+	if got.Declared.Description != "" {
+		t.Errorf("the console declares no description, but the list reports %q as declared",
+			got.Declared.Description)
+	}
+}
+
+// A tool the console says nothing about must not come back looking declared.
+func TestListLeavesUndeclaredToolsWithoutADeclaration(t *testing.T) {
+	s := newTestServer(t)
+	s.engine().Config().Tools.MetadataDir = t.TempDir()
+
+	if got := declFromAPI(t, s, "web_search"); got.Declared != nil {
+		t.Errorf("nothing was declared, list reports %+v", got.Declared)
+	}
+}
+
+// The save's answer is applied straight into the page, so it has to describe
+// the declaration the same way the list does — otherwise the boxes refill
+// from a different shape the moment somebody saves.
+func TestSaveAnswersWithTheSameDeclarationShapeAsTheList(t *testing.T) {
+	s := newTestServer(t)
+	dir := t.TempDir()
+	s.engine().Config().Tools.MetadataDir = dir
+
+	w := do(t, s, "POST", "/api/tools/metadata", `{"name":"web_search","suites":["research"]}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("save status = %d: %s", w.Code, w.Body.String())
+	}
+	var saved struct {
+		Tool toolDeclDTO `json:"tool"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &saved); err != nil {
+		t.Fatal(err)
+	}
+	listed := declFromAPI(t, s, "web_search")
+	if saved.Tool.Declared == nil || listed.Declared == nil {
+		t.Fatalf("save = %+v, list = %+v", saved.Tool.Declared, listed.Declared)
+	}
+	if !reflect.DeepEqual(saved.Tool.Declared, listed.Declared) {
+		t.Errorf("save = %+v, list = %+v", saved.Tool.Declared, listed.Declared)
+	}
+}

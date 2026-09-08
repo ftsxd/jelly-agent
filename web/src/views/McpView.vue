@@ -2,6 +2,7 @@
 import { onMounted, reactive, ref } from 'vue'
 import Icon from '../components/Icon.vue'
 import { api } from '../api'
+import { declPatch, draftOf, inheritedOf, parseLines } from '../toolmeta'
 
 const servers = ref([])
 const loading = ref(true)
@@ -95,6 +96,8 @@ const declFile = ref('')
 const declError = ref('')
 const declOpen = reactive({})
 const declDrafts = reactive({})
+// What each open editor was filled from, so a save can send only what moved.
+const declBase = reactive({})
 const declSaving = reactive({})
 
 async function loadDecls() {
@@ -121,19 +124,26 @@ function declKey(server, name) {
   return `${server}/${name}`
 }
 
+// toggleDecl opens the editor filled with what the console file declares —
+// not with what the registry resolved. See toolmeta.js: the two are different
+// and filling the boxes with the resolved value turned every inherited field
+// into an override as soon as anybody pressed 保存元数据.
+//
+// An unsaved draft survives a collapse; it can no longer overwrite anything
+// it did not touch, because the save sends only the changed fields.
 function toggleDecl(server, tool) {
   const key = declKey(server, tool.name)
   declOpen[key] = !declOpen[key]
   if (!declDrafts[key]) {
-    const d = declOf(server, tool.name)
-    declDrafts[key] = {
-      description: d.description || tool.description || '',
-      use_cases: (d.use_cases || []).join('\n'),
-      examples: (d.examples || []).join('\n'),
-      anti_examples: (d.anti_examples || []).join('\n'),
-      suites: (d.suites || []).join('\n'),
-    }
+    declDrafts[key] = draftOf(declOf(server, tool.name))
+    declBase[key] = { ...declDrafts[key] }
   }
+}
+
+// declInherited is what applies to the fields this file leaves alone, shown
+// beside the boxes rather than inside them.
+function declInherited(server, name) {
+  return inheritedOf(declOf(server, name))
 }
 
 // saveDecl sends the one field that changed, and nothing else.
@@ -166,14 +176,14 @@ async function saveDeclDetails(server, name) {
   const key = declKey(server, name)
   const d = declDrafts[key]
   if (!d) return
+  const patch = declPatch(d, declBase[key] || d)
+  if (!patch) return // nothing moved; writing the file would only risk clobbering
   declSaving[key] = true
-  await saveDecl(server, name, {
-    description: d.description.trim(),
-    use_cases: parseLines(d.use_cases),
-    examples: parseLines(d.examples),
-    anti_examples: parseLines(d.anti_examples),
-    suites: parseLines(d.suites),
-  })
+  await saveDecl(server, name, patch)
+  // The saved row came back and declOf now answers from it, so the baseline
+  // moves forward with it — otherwise the next save re-sends this same patch.
+  declDrafts[key] = draftOf(declOf(server, name))
+  declBase[key] = { ...declDrafts[key] }
   declSaving[key] = false
 }
 
@@ -182,9 +192,6 @@ function cancel() {
   error.value = ''
 }
 
-function parseLines(text) {
-  return text.split('\n').map((l) => l.trim()).filter(Boolean)
-}
 function parseKV(text) {
   const out = {}
   for (const line of parseLines(text)) {
@@ -490,25 +497,40 @@ async function testForm() {
                           <label class="field detail-wide">
                             <span class="label">模型描述</span>
                             <textarea v-model="declDrafts[declKey(s.name, t.name)].description" class="textarea" rows="2" />
+                            <span v-if="declInherited(s.name, t.name).description" class="muted tiny">
+                              未覆盖，当前生效：{{ declInherited(s.name, t.name).description }}
+                            </span>
                           </label>
                           <label class="field">
                             <span class="label">适用场景（每行一个）</span>
                             <textarea v-model="declDrafts[declKey(s.name, t.name)].use_cases" class="textarea" rows="3" />
+                            <span v-if="declInherited(s.name, t.name).use_cases" class="muted tiny">
+                              未覆盖，当前生效：{{ declInherited(s.name, t.name).use_cases }}
+                            </span>
                           </label>
                           <label class="field">
                             <span class="label">示例（每行一个）</span>
                             <textarea v-model="declDrafts[declKey(s.name, t.name)].examples" class="textarea" rows="3" />
+                            <span v-if="declInherited(s.name, t.name).examples" class="muted tiny">
+                              未覆盖，当前生效：{{ declInherited(s.name, t.name).examples }}
+                            </span>
                           </label>
                           <label class="field">
                             <span class="label">反例（每行一个）</span>
                             <textarea v-model="declDrafts[declKey(s.name, t.name)].anti_examples" class="textarea" rows="3" />
+                            <span v-if="declInherited(s.name, t.name).anti_examples" class="muted tiny">
+                              未覆盖，当前生效：{{ declInherited(s.name, t.name).anti_examples }}
+                            </span>
                           </label>
                           <label class="field">
                             <span class="label">能力包 suites（每行一个）</span>
-                            <textarea v-model="declDrafts[declKey(s.name, t.name)].suites" class="textarea mono" rows="3" placeholder="promql" />
+                            <textarea v-model="declDrafts[declKey(s.name, t.name)].suites" class="textarea mono" rows="3" />
+                            <span v-if="declInherited(s.name, t.name).suites" class="muted tiny">
+                              未覆盖，当前生效：{{ declInherited(s.name, t.name).suites }}
+                            </span>
                           </label>
                           <div class="detail-actions detail-wide">
-                            <span class="hint">这些字段参与 Top Tools 打分；清空表示撤销控制台覆盖。</span>
+                            <span class="hint">框里是本文件的覆盖内容，空着就沿用上游；只有改动过的字段会被保存。</span>
                             <button type="button" class="btn btn-primary" :disabled="declSaving[declKey(s.name, t.name)]"
                               @click="saveDeclDetails(s.name, t.name)">
                               <span v-if="declSaving[declKey(s.name, t.name)]" class="spinner" /> 保存元数据

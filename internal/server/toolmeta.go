@@ -52,6 +52,17 @@ type toolDeclDTO struct {
 	Examples     []string `json:"examples,omitempty"`
 	AntiExamples []string `json:"anti_examples,omitempty"`
 	Suites       []string `json:"suites,omitempty"`
+	// Declared is what the console's own file says, field by field — as
+	// opposed to the fields above, which are what the registry resolved.
+	//
+	// The editor needs both and they are not the same thing. Filling its
+	// boxes with the resolved value made every inherited field an explicit
+	// override the moment somebody opened the editor and saved: an MCP
+	// server's own description got copied into the override file, and a
+	// field the operator never touched got written back from whatever the
+	// page happened to be showing. Nil means the console declares nothing
+	// for this tool, which is not the same as declaring it empty.
+	Declared *toolDeclFields `json:"declared,omitempty"`
 	// Produces and Effect are what the registry actually resolved, which is
 	// not always what the console asked for — see Shadowed.
 	Produces string `json:"produces,omitempty"`
@@ -66,6 +77,16 @@ type toolDeclDTO struct {
 	// comparing the declaration against what the registry resolved, so the
 	// page can only claim what is true.
 	Shadowed bool `json:"shadowed,omitempty"`
+}
+
+// toolDeclFields is the console's own declaration for one tool: the selection
+// fields it may override, and nothing resolved on its behalf.
+type toolDeclFields struct {
+	Description  string   `json:"description,omitempty"`
+	UseCases     []string `json:"use_cases,omitempty"`
+	Examples     []string `json:"examples,omitempty"`
+	AntiExamples []string `json:"anti_examples,omitempty"`
+	Suites       []string `json:"suites,omitempty"`
 }
 
 // handleToolMetadata lists what has been declared, and where each came from.
@@ -271,6 +292,13 @@ func declRow(m, decl ops.ToolMetadata, declared bool, src string) toolDeclDTO {
 		Source: src,
 	}
 	if declared {
+		row.Declared = &toolDeclFields{
+			Description:  decl.Description,
+			UseCases:     decl.UseCases,
+			Examples:     decl.Examples,
+			AntiExamples: decl.AntiExamples,
+			Suites:       decl.Suites,
+		}
 		// Reported only about the fields the console actually declared.
 		//
 		// The declaration is a patch: it carries the field somebody set and
