@@ -186,13 +186,17 @@ type StepTool struct {
 
 // Step is a stretch of work with one purpose.
 type Step struct {
-	ID        string     `json:"id"`
-	Index     int        `json:"index"`
-	Label     string     `json:"label"`
-	Phase     string     `json:"phase"`
-	Kind      string     `json:"kind,omitempty"`
-	Status    string     `json:"status"`
-	Agent     string     `json:"agent,omitempty"`
+	ID     string `json:"id"`
+	Index  int    `json:"index"`
+	Label  string `json:"label"`
+	Phase  string `json:"phase"`
+	Kind   string `json:"kind,omitempty"`
+	Status string `json:"status"`
+	Agent  string `json:"agent,omitempty"`
+	// Handover names the agent a transfer_to_agent handed this step's work to,
+	// on the first step that agent opens. Empty on every other step, so the
+	// flow marks where the work changed hands and stays quiet in between.
+	Handover  string     `json:"handover,omitempty"`
 	StartedAt int64      `json:"started_at,omitempty"`
 	EndedAt   int64      `json:"ended_at,omitempty"`
 	Tools     []StepTool `json:"tools,omitempty"`
@@ -291,6 +295,9 @@ func foldTasks(sessionID string, frames []map[string]any, infoOf func(string) To
 		// telling two stories depending on which surface you looked at.
 		errs     []roundError
 		answered map[string]bool
+		// handover holds the agent a transfer named, until the next step
+		// created can carry it.
+		handover string
 	}
 	order := []string{}
 	byTask := map[string]*building{}
@@ -351,7 +358,8 @@ func foldTasks(sessionID string, frames []map[string]any, infoOf func(string) To
 			}
 		}
 		switch typ {
-		case frameToolCall, frameToolResult, frameText, frameThought, frameLLMTurn, frameError:
+		case frameToolCall, frameToolResult, frameText, frameThought, frameLLMTurn,
+			frameError, frameAgentTransfer:
 		default:
 			continue
 		}
@@ -371,6 +379,21 @@ func foldTasks(sessionID string, frames []map[string]any, infoOf func(string) To
 		pendingTitle = ""
 
 		switch typ {
+		case frameAgentTransfer:
+			// A transfer produces no step of its own — it does no work, and an
+			// empty box would make the flow read as something that did not
+			// happen. It is recorded on the next step instead, which is the
+			// one the new agent opens.
+			//
+			// This has to come from the frame rather than from comparing
+			// adjacent steps' agents: a coordinator that delegates immediately
+			// runs no tool and writes no text, so it owns no step at all, and
+			// the run looks single-agent from the steps alone. That is exactly
+			// the shape that showed no handover.
+			if to, _ := f["to"].(string); to != "" {
+				b.handover = to
+			}
+
 		case frameError:
 			msg, _ := f["message"].(string)
 			b.errs = append(b.errs, roundError{round: round, msg: msg})
@@ -400,7 +423,9 @@ func foldTasks(sessionID string, frames []map[string]any, infoOf func(string) To
 					ID: "s" + strconv.Itoa(len(b.steps)+1), Index: len(b.steps),
 					Phase: phase, Kind: string(info.Kind), Label: label,
 					Status: TaskRunning, Agent: agent, StartedAt: ts,
+					Handover: b.handover,
 				}
+				b.handover = ""
 				b.steps = append(b.steps, b.cur)
 			}
 			b.cur.Calls++
@@ -490,11 +515,17 @@ func foldTasks(sessionID string, frames []map[string]any, infoOf func(string) To
 			if b.cur != nil && b.cur.Status == TaskRunning {
 				b.cur.Status = TaskCompleted
 			}
+			concludedBy, _ := f["agent"].(string)
 			b.steps = append(b.steps, &Step{
 				ID: "s" + strconv.Itoa(len(b.steps)+1), Index: len(b.steps),
 				Label: "形成结论", Phase: phaseConclude, Status: TaskCompleted,
 				StartedAt: ts, EndedAt: ts, Note: firstLine(text),
+				// Who concluded. Left empty before, which is why a delegated
+				// run showed exactly one step with an agent on it and so read
+				// as single-agent.
+				Agent: concludedBy, Handover: b.handover,
 			})
+			b.handover = ""
 			// The task's reply is the latest one, because that is what the
 			// user last received.
 			b.task.Reply = text

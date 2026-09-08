@@ -263,14 +263,21 @@ export async function loadTaskList(gate, fetch, sink) {
  * looked the same and the agent's name was buried in the step detail, one
  * click away. This surfaces it on the card that starts the new agent's work.
  *
- * Answered by comparing with the previous step rather than from the transfer
- * frame, because a transfer produces no step of its own (it does no work), and
- * inventing one would put an empty box in a flow that is meant to read as what
- * actually happened.
+ * The server records it on the step the new agent opens — a transfer produces
+ * no step of its own, because it does no work and an empty box would make the
+ * flow read as something that did not happen. Comparing adjacent steps' agents
+ * is the fallback for runs projected before that field existed; on its own it
+ * misses the common case, where a coordinator delegates immediately, owns no
+ * step, and the run looks single-agent from the steps alone.
  */
 export function handoverAt(steps, index) {
   const step = (steps || [])[index]
-  if (!step?.agent) return ''
+  if (!step) return ''
+  // What the server recorded from the transfer frame. Authoritative: it knows
+  // a handover happened even when the coordinator owns no step to compare
+  // against, which is the case that showed nothing at all.
+  if (step.handover) return step.handover
+  if (!step.agent) return ''
   const prev = index > 0 ? steps[index - 1] : null
   // The first step names its agent too, when there is more than one in play:
   // otherwise a run that delegates immediately shows no agent anywhere.

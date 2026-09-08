@@ -346,3 +346,22 @@ describe('handoverAt', () => {
     expect(handoverAt(undefined, 0)).toBe('')
   })
 })
+
+describe('handoverAt with the server-recorded field', () => {
+  // The case adjacent-agent comparison cannot see: a coordinator that
+  // delegates immediately runs no tool and writes no text, so it owns no step,
+  // and every step belongs to the specialist. The transfer still happened.
+  it('trusts what the server recorded from the transfer frame', () => {
+    const steps = [
+      { id: 's1', agent: 'MetricsQuery', handover: 'MetricsQuery' },
+      { id: 's2', agent: 'MetricsQuery' },
+    ]
+    expect(handoverAt(steps, 0)).toBe('MetricsQuery')
+    expect(handoverAt(steps, 1)).toBe('')
+  })
+
+  it('falls back to comparing agents when the field is absent', () => {
+    const steps = [{ id: 's1', agent: 'A' }, { id: 's2', agent: 'B' }]
+    expect(handoverAt(steps, 1)).toBe('B')
+  })
+})

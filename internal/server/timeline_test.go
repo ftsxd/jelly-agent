@@ -843,3 +843,26 @@ func TestAModelErrorFailsOnlyItsOwnRun(t *testing.T) {
 		t.Errorf("被拒绝的任务标成 %s，应当是失败", tasks[1].Status)
 	}
 }
+
+// 转交帧要带 round，和其他每一种帧一样。
+//
+// 它原来不带，于是任务折叠没法判断这次换手属于哪一轮运行，只能整个丢掉——
+// 而换手正是委派运行里最值得看的一刻。
+func TestATransferFrameCarriesItsRound(t *testing.T) {
+	ev := event(at(0), "", nil)
+	ev.InvocationID = "inv-7"
+	ev.Author = "OrchestrationAgent"
+	ev.Actions.TransferToAgent = "MetricsQuery"
+
+	frames, _ := run(ev)
+	tr := only(frames, frameAgentTransfer)
+	if len(tr) != 1 {
+		t.Fatalf("frames = %v，想要一个 transfer 帧", typesOf(frames))
+	}
+	if tr[0]["round"] != "inv-7" {
+		t.Errorf("round = %v，转交帧没带轮次，折叠时会被丢掉", tr[0]["round"])
+	}
+	if tr[0]["to"] != "MetricsQuery" || tr[0]["from"] != "OrchestrationAgent" {
+		t.Errorf("transfer = %v", tr[0])
+	}
+}

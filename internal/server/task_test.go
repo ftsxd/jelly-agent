@@ -659,3 +659,52 @@ func TestAStepDoesNotSpanTwoAgents(t *testing.T) {
 		t.Errorf("归属错了: %q / %q", got.Steps[0].Agent, got.Steps[1].Agent)
 	}
 }
+
+// 委派运行里最值得看的一刻是换手，而它一度完全看不见。
+//
+// 靠比较相邻步骤的 agent 是找不出来的：立刻委派的协调者一个工具都没调、一个
+// 字都没写，它名下根本没有步骤，于是从步骤上看整轮就像单 agent 跑的。信号只
+// 在 agent_transfer 帧里，而那个帧原本连 round 都不带，fold 直接丢掉了。
+func TestAHandoverIsRecordedOnTheStepThatFollowsIt(t *testing.T) {
+	got := foldTasks("web-1", []map[string]any{
+		fr(frameUserMessage, "text", "查一下 CPU", "ts", int64(1)),
+		fr(frameAgentTransfer, "round", "r1", "from", "OrchestrationAgent",
+			"to", "MetricsQuery", "ts", int64(2)),
+		fr(frameToolCall, "round", "r1", "call_id", "c1", "name", "query_instant",
+			"ts", int64(10), "agent", "MetricsQuery", "args", map[string]any{}),
+		result("r1", "c1", true, 11, map[string]any{"summary": "1 条曲线"}),
+		fr(frameText, "round", "r1", "agent", "MetricsQuery",
+			"branch", "OrchestrationAgent.MetricsQuery",
+			"text", "峰值 8.4%。", "ts", int64(20), "final", true),
+	}, infos(nil), nil)[0]
+
+	if len(got.Steps) != 2 {
+		t.Fatalf("步骤 = %d: %v", len(got.Steps), labels(got))
+	}
+	if got.Steps[0].Handover != "MetricsQuery" {
+		t.Errorf("换手没有记在接手方的第一步上: handover=%q", got.Steps[0].Handover)
+	}
+	// 只标一次：后面的步骤不再重复。
+	if got.Steps[1].Handover != "" {
+		t.Errorf("换手在后续步骤上重复了: %q", got.Steps[1].Handover)
+	}
+	// 结论那一步也要记下是谁下的结论——原来是空的，于是整轮只有一个步骤带
+	// agent 名，看起来就是单 agent。
+	if got.Steps[1].Agent != "MetricsQuery" {
+		t.Errorf("形成结论没有记 agent: %q", got.Steps[1].Agent)
+	}
+}
+
+// 没有转交的运行不该凭空多出一个换手标记。
+func TestASingleAgentRunRecordsNoHandover(t *testing.T) {
+	got := foldTasks("web-1", []map[string]any{
+		call("r1", "c1", "query_instant", 10),
+		result("r1", "c1", true, 11, map[string]any{"summary": "ok"}),
+		answer("r1", "查完了。", 20),
+	}, infos(nil), nil)[0]
+	for _, s := range got.Steps {
+		if s.Handover != "" {
+			t.Errorf("步骤 %s 无端标了换手: %q", s.ID, s.Handover)
+		}
+	}
+}

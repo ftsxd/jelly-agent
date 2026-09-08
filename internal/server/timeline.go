@@ -185,7 +185,10 @@ func project(ev *adksession.Event, out sink, st *turnState) {
 	// before the Content check below.
 	if to := strings.TrimSpace(ev.Actions.TransferToAgent); to != "" {
 		out.frame(frameAgentTransfer, map[string]any{
-			"from": ev.Author, "to": to, "ts": ts, "branch": ev.Branch,
+			// round like every other frame: without it the task fold cannot
+			// tell which run a handover belongs to, and simply dropped them.
+			"from": ev.Author, "to": to, "ts": ts,
+			"branch": ev.Branch, "round": st.invocation,
 		})
 	}
 	// A model turn that carried an error instead of an answer.
