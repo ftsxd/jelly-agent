@@ -73,3 +73,28 @@ describe('rendering', () => {
     expect(renderMarkdown('a < b & c')).toContain('&lt;')
   })
 })
+
+// The task centre shows the same reply the chat showed, so it has to render
+// the same way. It used plain interpolation, and a reply full of tables,
+// **bold** and ## headings came out as raw pipes and asterisks.
+describe('what the task centre needs from the renderer', () => {
+  it('renders a GFM table', () => {
+    const html = renderMarkdown('| 节点 | 3天峰值 |\n|---|---|\n| 172.17.153.58 | 30% |')
+    expect(html).toContain('<table>')
+    expect(html).toContain('<th>节点</th>')
+    expect(html).toContain('<td>30%</td>')
+  })
+
+  it('renders headings, bold and inline code', () => {
+    const html = renderMarkdown('## 结论\n**30%** 出现在 `172.17.153.58`')
+    expect(html).toMatch(/<h2[^>]*>结论<\/h2>/)
+    expect(html).toContain('<strong>30%</strong>')
+    expect(html).toContain('<code>172.17.153.58</code>')
+  })
+
+  it('renders a horizontal rule and a list', () => {
+    const html = renderMarkdown('---\n\n- 一项\n- 两项')
+    expect(html).toContain('<hr>')
+    expect(html).toContain('<li>一项</li>')
+  })
+})

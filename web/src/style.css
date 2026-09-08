@@ -417,3 +417,111 @@ button:active {
     transition-duration: 0.001ms !important;
   }
 }
+
+/* 渲染后的 markdown。
+ *
+ * 全局而不是某个视图私有，因为有两个地方要用同一份：对话页的 agent 气泡，
+ * 和任务中心的「最终回复」——那是同一段文本，用户在对话里看到的和在任务
+ * 详情里回看的必须长一样。原先只有对话页有这套样式，于是任务中心把表格、
+ * **粗体** 和 ## 标题原样吐了出来。
+ *
+ * v-html 注入的 HTML 拿不到 scoped 样式的属性，所以这里也不能放进任何
+ * 组件的 <style scoped>：放进去就得写 :deep()，而两份 :deep() 必然漂移。
+ */
+.md p {
+  margin: 0 0 0.6em;
+}
+.md p:last-child {
+  margin-bottom: 0;
+}
+/* Lists keep their marker inside the bubble: the default padding-left of 40px
+   pushes markers past the bubble's own padding and they hang in the gutter. */
+.md ul,
+.md ol {
+  margin: 0.4em 0 0.6em;
+  padding-left: 1.4em;
+}
+.md li {
+  margin: 0.2em 0;
+}
+.md li::marker {
+  color: var(--text-muted);
+}
+.md strong {
+  font-weight: 600;
+  color: var(--text);
+}
+.md code {
+  font-family: var(--font-mono);
+  font-size: 0.88em;
+  padding: 0.12em 0.36em;
+  border-radius: 4px;
+  background: var(--surface-3);
+  border: 1px solid var(--hairline);
+}
+.md pre {
+  margin: 0.5em 0;
+  padding: var(--sp-3);
+  border-radius: var(--radius-sm);
+  background: var(--surface-3);
+  border: 1px solid var(--hairline);
+  /* A wide code block scrolls inside itself rather than widening the bubble
+     and, through it, the whole conversation column. */
+  overflow-x: auto;
+}
+.md pre code {
+  padding: 0;
+  border: 0;
+  background: none;
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+.md h1,
+.md h2,
+.md h3,
+.md h4 {
+  /* A reply is already inside a bubble under a heading of its own, so the
+     model's "#" levels are rendered as emphasis rather than as page headings —
+     browser defaults would put 2em type in a chat line. */
+  margin: 0.7em 0 0.35em;
+  font-size: 1em;
+  font-weight: 600;
+}
+.md h1:first-child,
+.md h2:first-child,
+.md h3:first-child {
+  margin-top: 0;
+}
+.md blockquote {
+  margin: 0.5em 0;
+  padding: 0.1em 0 0.1em var(--sp-3);
+  border-left: 2px solid var(--border);
+  color: var(--text-dim);
+}
+.md a {
+  color: var(--primary);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.md hr {
+  margin: 0.8em 0;
+  border: 0;
+  border-top: 1px solid var(--border);
+}
+.md table {
+  margin: 0.5em 0;
+  border-collapse: collapse;
+  font-size: 13px;
+  display: block;
+  overflow-x: auto;
+}
+.md th,
+.md td {
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  text-align: left;
+}
+.md th {
+  background: var(--surface-3);
+  font-weight: 600;
+}

@@ -24,6 +24,7 @@ import { sendOnEnter } from '../ime'
 import { latestOnly } from '../latest'
 import { absTime, relTime } from '../time'
 import { fmtBytes, prettyJSON } from '../format'
+import { renderMarkdown } from '../markdown'
 import {
   anyLive, artifactState, artifactsOfStep, emptyReason, isLive, loadTaskList,
   needsAttention, resultOf, selectionStore, statusOf, stepOfArtifact,
@@ -566,7 +567,9 @@ function continueChat(id) {
               <span class="block-title">最终回复</span>
               <span v-if="detail.reply" class="muted tiny">用户实际看到的回答</span>
             </div>
-            <div v-if="detail.reply" class="reply">{{ detail.reply }}</div>
+            <!-- 与对话页同一个渲染器和同一套 .md 样式：这是同一段文本，
+                 用户在对话里看到的和在任务详情里回看的必须长一样。 -->
+            <div v-if="detail.reply" class="reply md" v-html="renderMarkdown(detail.reply)"></div>
             <div v-else-if="detail.status === 'failed'" class="error-bar">
               <Icon name="alert" :size="14" />
               {{ detail.error || '任务失败，没有产生最终回复' }}
@@ -699,7 +702,9 @@ function continueChat(id) {
 .notice-bar { display: flex; align-items: center; gap: var(--sp-2);
               padding: var(--sp-2) var(--sp-3); background: var(--warning-tint);
               color: var(--warning); border-radius: var(--radius-sm); font-size: 13px; }
-.reply { font-size: 14px; line-height: 1.7; white-space: pre-wrap;
+.reply { font-size: 14px; line-height: 1.7;
+         /* 没有 pre-wrap：渲染后的 HTML 自带块级元素，再按原样保留换行
+            会把标签之间的换行也变成空行。 */
          word-break: break-word; padding: var(--sp-3);
          border: 1px solid var(--hairline); border-radius: var(--radius-sm);
          background: var(--surface); }
