@@ -8,6 +8,7 @@ import { api, streamChat } from '../api'
 import { renderMarkdown } from '../markdown'
 import { applyFrame, emptyTimeline, finalAnswer } from '../timeline'
 import { latestOnly } from '../latest'
+import { sendOnEnter } from '../ime'
 import { taskOfSession } from '../tasks'
 
 const PROVIDER_KEY = 'jelly.provider' // remembers the last-used provider
@@ -153,6 +154,10 @@ async function scrollDown() {
   await nextTick()
   if (scroller.value) scroller.value.scrollTop = scroller.value.scrollHeight
 }
+
+// Enter sends — unless it belongs to the input method. Typing Chinese, Enter
+// picks the highlighted candidate, and sending then posts the raw pinyin.
+const enter = sendOnEnter(() => send())
 
 function newChat() {
   if (busy.value) return
@@ -352,7 +357,8 @@ function authorOf(m) {
         class="textarea"
         rows="1"
         placeholder="输入消息，Enter 发送，Shift+Enter 换行"
-        @keydown.enter.exact.prevent="send"
+        @keydown.enter.exact="enter.keydown"
+        @compositionend="enter.compositionend"
         :disabled="busy"
       />
       <button v-if="busy" class="btn btn-icon" @click="stop" title="停止">

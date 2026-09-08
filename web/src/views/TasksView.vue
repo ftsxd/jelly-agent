@@ -20,6 +20,7 @@ import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import Icon from '../components/Icon.vue'
 import { api } from '../api'
+import { sendOnEnter } from '../ime'
 import { latestOnly } from '../latest'
 import { absTime, relTime } from '../time'
 import { fmtBytes, prettyJSON } from '../format'
@@ -241,6 +242,9 @@ async function readMore(ref, offset) {
     upstream: r.value.upstream_truncated || '',
   }
 }
+
+// Enter searches — unless it belongs to the input method. See ime.js.
+const searchEnter = sendOnEnter(() => runSearch())
 
 async function runSearch() {
   const ref = openRef.value
@@ -521,7 +525,8 @@ function continueChat(id) {
                   v-model="query"
                   class="input"
                   placeholder="在完整内容里按正则搜索，不必整份加载"
-                  @keydown.enter="runSearch"
+                  @keydown.enter="searchEnter.keydown"
+                  @compositionend="searchEnter.compositionend"
                   @keydown.esc="query = ''"
                 />
                 <button class="btn btn-sm" @click="runSearch">搜索</button>

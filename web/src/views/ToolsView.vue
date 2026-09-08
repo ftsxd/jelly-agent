@@ -2,6 +2,7 @@
 import { onMounted, ref } from 'vue'
 import Icon from '../components/Icon.vue'
 import { api } from '../api'
+import { sendOnEnter } from '../ime'
 
 const tools = ref([])
 const loading = ref(true)
@@ -52,6 +53,10 @@ async function run() {
     running.value = false
   }
 }
+
+// Enter runs — unless it belongs to the input method. See ime.js.
+const fetchEnter = sendOnEnter(() => runFetch())
+const runEnter = sendOnEnter(() => run())
 
 async function runFetch() {
   const u = url.value.trim()
@@ -108,7 +113,8 @@ async function runFetch() {
               v-model="url"
               class="input mono"
               placeholder="https://example.com"
-              @keydown.enter="runFetch"
+              @keydown.enter="fetchEnter.keydown"
+              @compositionend="fetchEnter.compositionend"
             />
           </label>
           <div class="row">
@@ -146,7 +152,8 @@ async function runFetch() {
               v-model="query"
               class="input"
               placeholder="例如：ADK-Go 是什么"
-              @keydown.enter="run"
+              @keydown.enter="runEnter.keydown"
+              @compositionend="runEnter.compositionend"
             />
           </label>
           <div class="row">

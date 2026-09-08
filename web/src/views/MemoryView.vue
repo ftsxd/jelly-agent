@@ -2,6 +2,7 @@
 import { computed, onMounted, ref } from 'vue'
 import Icon from '../components/Icon.vue'
 import { api } from '../api'
+import { sendOnEnter } from '../ime'
 
 const core = ref(null)
 const coreLoading = ref(true)
@@ -145,6 +146,9 @@ async function saveCore() {
     savingCore.value = false
   }
 }
+
+// Enter searches — unless it belongs to the input method. See ime.js.
+const searchEnter = sendOnEnter(() => search())
 
 async function search() {
   const q = query.value.trim()
@@ -343,7 +347,8 @@ function fmtTime(unix) {
               v-model="query"
               class="input"
               placeholder="全文检索历史会话…"
-              @keydown.enter="search"
+              @keydown.enter="searchEnter.keydown"
+              @compositionend="searchEnter.compositionend"
             />
             <button class="btn btn-primary" @click="search" :disabled="searching || !query.trim()">
               <Icon v-if="!searching" name="search" :size="16" />
