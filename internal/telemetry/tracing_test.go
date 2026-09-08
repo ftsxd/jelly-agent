@@ -161,6 +161,31 @@ func TestEstimateConfigTokensCountsSchemasNotJustNames(t *testing.T) {
 	}
 }
 
+func TestEstimateConfigTokensCountsJSONSchemasFromMCPTools(t *testing.T) {
+	cfg := &genai.GenerateContentConfig{
+		Tools: []*genai.Tool{
+			{FunctionDeclarations: []*genai.FunctionDeclaration{
+				{
+					Name: "query_range", Description: "Run PromQL",
+					ParametersJsonSchema: map[string]any{
+						"type": "object", "properties": map[string]any{
+							"query": map[string]any{"type": "string"},
+							"start": map[string]any{"type": "string"},
+							"end":   map[string]any{"type": "string"},
+						},
+					},
+				},
+			}},
+		},
+	}
+	_, withSchema, count := EstimateConfigTokens(cfg)
+	cfg.Tools[0].FunctionDeclarations[0].ParametersJsonSchema = nil
+	_, bare, _ := EstimateConfigTokens(cfg)
+	if count != 1 || withSchema <= bare {
+		t.Fatalf("MCP JSON schema was not counted: with=%d bare=%d count=%d", withSchema, bare, count)
+	}
+}
+
 // Both recorders take a context that may carry no span at all — the CLI runs
 // with tracing disabled by default — so neither may panic or require a guard
 // at the call site.

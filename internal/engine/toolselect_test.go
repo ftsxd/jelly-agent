@@ -122,6 +122,24 @@ func TestDefaultBudgetDoesNotCutASmallCatalogue(t *testing.T) {
 	}
 }
 
+func TestRequiredSuiteSurvivesWithoutSessionAdmission(t *testing.T) {
+	promql := ops.ToolMetadata{Name: "query_instant", Suites: []string{"promql"}}
+	sel := &selectingToolset{
+		static: []adktool.Tool{
+			&stubTool{name: "a_padding"},
+			&stubTool{name: promql.Name, meta: &promql},
+		},
+		cfg: selector.Config{MaxTools: 1, RequiredSuites: []string{"promql"}},
+	}
+	got, err := sel.Tools(&askingCtx{question: "完全无关"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(toolNames(got), []string{"query_instant"}) {
+		t.Errorf("selected %v, want the required suite tool", toolNames(got))
+	}
+}
+
 // A tool the gateway did not wrap has no metadata to rank on. It must still be
 // ranked on what it does expose rather than sinking below everything by
 // default.

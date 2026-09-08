@@ -46,7 +46,7 @@ type promptToolDTO struct {
 	Bound int `json:"max_result_bytes,omitempty"`
 }
 
-// handlePrompt reports the fixed part of the prompt and what it costs.
+// handlePrompt reports the per-call prompt overhead and its estimated cost.
 func (s *Server) handlePrompt(w http.ResponseWriter, r *http.Request) {
 	eng := s.engine()
 	// Which agent's prompt. Empty falls back to the configured default, so the
@@ -97,6 +97,43 @@ func (s *Server) handlePrompt(w http.ResponseWriter, r *http.Request) {
 			SideEffect: string(effectiveEffect(m)), Tokens: n, Bound: m.MaxResultBytes,
 		})
 	}
+	// Prefer what the model actually received. Metadata cannot reconstruct an
+	// MCP declaration's parameter schema and does not contain undeclared MCP
+	// tools at all, so the old estimate commonly under-reported this fixed cost
+	// by several times. Before the first model call we still return the labelled
+	// fallback above; afterwards the input shape is an exact model-boundary
+	// observation while the token count remains a tokenizer estimate.
+	measured := false
+	measuredAt := int64(0)
+	snapshotAgent := agent
+	if snapshotAgent == "" {
+		snapshotAgent = "root"
+	}
+	if snap, ok := eng.LastPromptSnapshot(snapshotAgent); ok {
+		measured = true
+		measuredAt = snap.At.UnixMilli()
+		toolsTokens = snap.ToolsTokens
+		toolsOut = make([]promptToolDTO, 0, len(snap.Tools))
+		for _, t := range snap.Tools {
+			row := promptToolDTO{
+				Name: t.Name, Description: t.Description,
+				Tokens: t.Tokens, Server: t.Server,
+			}
+			// The level always resolves, declared or not. A lookup miss is
+			// every MCP tool nobody has declared — 39 of 42 here — and
+			// leaving the field empty rendered a blank badge, which reads as
+			// "no side effect". Policy says the opposite: a remote tool that
+			// says nothing is assumed to mutate.
+			m, known := registry.Lookup(t.Name)
+			if known {
+				row.Bound = m.MaxResultBytes
+			} else {
+				m = ops.ToolMetadata{Name: t.Name, Server: t.Server}
+			}
+			row.SideEffect = string(effectiveEffect(m))
+			toolsOut = append(toolsOut, row)
+		}
+	}
 
 	// Which agent this is the prompt for, and whether the text shown is that
 	// agent's own or the base it inherits. The page offers to edit it, and
@@ -106,12 +143,15 @@ func (s *Server) handlePrompt(w http.ResponseWriter, r *http.Request) {
 		agents = append(agents, a.Name)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"parts":         out,
-		"tools":         toolsOut,
-		"agent":         agent,
-		"agents":        agents,
-		"own":           agent != "" && eng.InstructionFor(agent) != eng.BaseInstruction(),
-		"base_editable": true,
+		"parts":          out,
+		"tools":          toolsOut,
+		"agent":          agent,
+		"agents":         agents,
+		"own":            agent != "" && eng.InstructionFor(agent) != eng.BaseInstruction(),
+		"base_editable":  true,
+		"tools_measured": measured,
+		// When, so the page can say measured *when*. Zero while unmeasured.
+		"tools_measured_at": measuredAt,
 		"totals": map[string]int{
 			"system_tokens":  systemTokens,
 			"tools_tokens":   toolsTokens,

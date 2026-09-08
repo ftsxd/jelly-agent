@@ -117,10 +117,14 @@ sandbox:
 #     provider: deepseek          # 留空=默认 Provider，可让不同 Agent 跑不同模型
 #     instruction: 你是协调者，先判断该由哪个专家处理，再决定是否转交。  # 留空=内置默认指令
 #     sub_agents: [researcher, coder]   # 可转交的子 Agent
+#     required_tools: []                # 核心工具名；优先入场，不参加相关性淘汰
+#     required_suites: []               # 核心能力包；展开 tools 元数据里的 suites
 #     enabled: true
 #   - name: researcher
 #     description: 擅长联网检索与资料整理
 #     mcp: [filesystem]           # 按需加载的 MCP 子集；不选=不挂 MCP
+#     required_tools: [query_instant, query_range] # 无需元数据，配置后立即生效
+#     required_suites: [promql]   # 与 required_tools 叠加，不是二选一
 #     enabled: true
 #   - name: coder
 #     description: 写代码与调试

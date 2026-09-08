@@ -28,14 +28,16 @@ func (s *Server) handleListAgents(w http.ResponseWriter, _ *http.Request) {
 
 // agentInput is the POST /api/agents body (create or update by name).
 type agentInput struct {
-	Name        string   `json:"name"`
-	Description string   `json:"description"`
-	Provider    string   `json:"provider"`
-	Instruction string   `json:"instruction"`
-	MCP         []string `json:"mcp"`
-	SubAgents   []string `json:"sub_agents"`
-	Enabled     bool     `json:"enabled"`
-	MakeDefault bool     `json:"make_default"`
+	Name           string   `json:"name"`
+	Description    string   `json:"description"`
+	Provider       string   `json:"provider"`
+	Instruction    string   `json:"instruction"`
+	MCP            []string `json:"mcp"`
+	RequiredTools  []string `json:"required_tools"`
+	RequiredSuites []string `json:"required_suites"`
+	SubAgents      []string `json:"sub_agents"`
+	Enabled        bool     `json:"enabled"`
+	MakeDefault    bool     `json:"make_default"`
 }
 
 // handleSaveAgent upserts an agent definition and hot-reloads. Sub-agent names
@@ -72,13 +74,15 @@ func (s *Server) handleSaveAgent(w http.ResponseWriter, r *http.Request) {
 	}
 
 	def := config.AgentDef{
-		Name:        in.Name,
-		Description: strings.TrimSpace(in.Description),
-		Provider:    strings.TrimSpace(in.Provider),
-		Instruction: in.Instruction,
-		MCP:         cleanNames(in.MCP),
-		SubAgents:   subs,
-		Enabled:     in.Enabled,
+		Name:           in.Name,
+		Description:    strings.TrimSpace(in.Description),
+		Provider:       strings.TrimSpace(in.Provider),
+		Instruction:    in.Instruction,
+		MCP:            cleanNames(in.MCP),
+		RequiredTools:  cleanNames(in.RequiredTools),
+		RequiredSuites: cleanNames(in.RequiredSuites),
+		SubAgents:      subs,
+		Enabled:        in.Enabled,
 	}
 	if idx := indexOfAgent(raw.Agents, in.Name); idx < 0 {
 		raw.Agents = append(raw.Agents, def)

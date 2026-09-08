@@ -253,6 +253,14 @@ type AgentDef struct {
 	// MCP names the MCP servers this agent loads (a subset of the enabled
 	// servers). Empty ⇒ no MCP. Mirrors PlatformBot.MCP semantics.
 	MCP []string `mapstructure:"mcp" yaml:"mcp,omitempty" json:"mcp,omitempty"`
+	// RequiredTools are model-visible tool names that define this agent's core
+	// capability. They are admitted before scored tools and never disappear
+	// because a user phrased a follow-up without the selector's keywords.
+	RequiredTools []string `mapstructure:"required_tools" yaml:"required_tools,omitempty" json:"required_tools,omitempty"`
+	// RequiredSuites expands through ToolMetadata.Suites. It is the maintainable
+	// form of RequiredTools once a deployment has classified its tool catalogue;
+	// both fields are additive rather than alternatives.
+	RequiredSuites []string `mapstructure:"required_suites" yaml:"required_suites,omitempty" json:"required_suites,omitempty"`
 	// SubAgents names the child agents this one may transfer to (delegation).
 	SubAgents []string `mapstructure:"sub_agents" yaml:"sub_agents,omitempty" json:"sub_agents,omitempty"`
 	// Enabled gates whether the agent is selectable / built. Disabled agents are

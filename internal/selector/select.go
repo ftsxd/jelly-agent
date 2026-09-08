@@ -68,6 +68,13 @@ type Config struct {
 	// comparable, and there are few baseline tools by design.
 	MaxTools int
 
+	// RequiredTools and RequiredSuites define an agent's core capability.
+	// Required entries spend normal tool-budget slots, but cannot be cut. If an
+	// agent requires more tools than MaxTools, correctness wins and the result
+	// exceeds the cap rather than silently disabling part of the agent.
+	RequiredTools  []string
+	RequiredSuites []string
+
 	// Carried is what earlier turns of this conversation were asking for.
 	//
 	// Selection reads one question, and a question stops repeating itself: by
@@ -101,6 +108,15 @@ type Result struct {
 	// Capped reports whether the cap actually removed anything, so a caller
 	// can tell "selection ran" from "selection changed the outcome".
 	Capped bool
+	// MissingRequired names what the agent declared as core capability and the
+	// catalogue could not offer — a mistyped name, a suite nothing declares,
+	// or a server that is down this turn. Empty in the normal case.
+	//
+	// It exists because the first two are otherwise silent, and "declared a
+	// core capability, got nothing" is the exact failure required_tools was
+	// added to end. Leaving it unreported would reproduce that failure one
+	// layer up, with a typo instead of a keyword.
+	MissingRequired []string
 }
 
 // Select ranks tools against a question and applies the cap.
@@ -125,11 +141,19 @@ func Select(query string, tools []ops.ToolMetadata, cfg Config) Result {
 	tiers := make(map[string]int, len(tools))
 	for i, m := range tools {
 		sc, relevance, reason := score(q, in, m)
+		required := contains(cfg.RequiredTools, m.Name) || overlaps(cfg.RequiredSuites, m.Suites)
+		if required {
+			if reason != "" {
+				reason = "Agent 必需；" + reason
+			} else {
+				reason = "Agent 必需"
+			}
+		}
 		order[m.Name] = i
-		tiers[m.Name] = tierOf(m, relevance)
+		tiers[m.Name] = tierOf(m, relevance, required)
 		cands = append(cands, ops.Candidate{
 			Tool: m.Name, Score: sc, Reason: reason, Matched: relevance > 0,
-			Baseline: m.Baseline, Fallback: m.Fallback,
+			Baseline: m.Baseline, Required: required, Fallback: m.Fallback,
 		})
 	}
 
@@ -158,6 +182,11 @@ func Select(query string, tools []ops.ToolMetadata, cfg Config) Result {
 			picked = append(picked, cands[i].Tool)
 			continue
 		}
+		if cands[i].Required {
+			picked = append(picked, cands[i].Tool)
+			budget--
+			continue
+		}
 		if budget > 0 {
 			picked = append(picked, cands[i].Tool)
 			budget--
@@ -168,14 +197,18 @@ func Select(query string, tools []ops.ToolMetadata, cfg Config) Result {
 
 	// Back to the declared order for the prompt. See Result.Selected.
 	sort.SliceStable(picked, func(i, j int) bool { return order[picked[i]] < order[picked[j]] })
-	return Result{Selected: picked, Candidates: cands, Capped: len(picked) < len(cands)}
+	return Result{
+		Selected: picked, Candidates: cands, Capped: len(picked) < len(cands),
+		MissingRequired: missingRequired(cfg, tools),
+	}
 }
 
-// tier orders the four kinds of candidate.
+// tierOf orders the five kinds of candidate.
 //
 // Baseline is unconditional: a workflow stage runs it before the model gets a
 // turn, so dropping it breaks the stage rather than merely narrowing a choice.
 //
+// An agent-required tool comes immediately after baseline and cannot be cut.
 // A tool that matched the question comes next, ahead of Fallback — this is the
 // part worth stating, because the obvious arrangement is wrong. Ranking
 // Fallback above everything scored would let a generic tool displace one that
@@ -196,17 +229,37 @@ func Select(query string, tools []ops.ToolMetadata, cfg Config) Result {
 // not" — the whole reason the field exists. Tiering on "matched anything at
 // all" kept such a tool in the matched tier at −18 points, where it still beat
 // an unmatched fallback at 0 and took the last budget slot.
-func tierOf(m ops.ToolMetadata, relevance float64) int {
+func tierOf(m ops.ToolMetadata, relevance float64, required bool) int {
 	switch {
 	case m.Baseline:
 		return 0
-	case relevance > 0:
+	case required:
 		return 1
-	case m.Fallback:
+	case relevance > 0:
 		return 2
-	default:
+	case m.Fallback:
 		return 3
+	default:
+		return 4
 	}
+}
+
+func contains(values []string, want string) bool {
+	for _, value := range values {
+		if strings.TrimSpace(value) == want {
+			return true
+		}
+	}
+	return false
+}
+
+func overlaps(left, right []string) bool {
+	for _, value := range left {
+		if contains(right, strings.TrimSpace(value)) {
+			return true
+		}
+	}
+	return false
 }
 
 // score rates one tool against the question and says why, in words an operator
@@ -289,4 +342,42 @@ func countOverlap(q map[string]bool, texts []string) int {
 		n += overlap(q, tokenize(t))
 	}
 	return n
+}
+
+// missingRequired names what the agent required and the catalogue did not
+// offer: a mistyped tool name, a suite nothing declares, or a server that is
+// down this turn.
+//
+// Reported rather than treated as an error, because the last of those three is
+// a legitimate state — but reported, because the first two are silent
+// otherwise, and "declared a core capability, got nothing" is precisely the
+// failure required_tools exists to end. A typo would have reproduced it with
+// the fix in place.
+func missingRequired(cfg Config, tools []ops.ToolMetadata) []string {
+	if len(cfg.RequiredTools) == 0 && len(cfg.RequiredSuites) == 0 {
+		return nil
+	}
+	haveTool := make(map[string]bool, len(tools))
+	haveSuite := map[string]bool{}
+	for _, m := range tools {
+		for _, n := range m.Names() {
+			haveTool[n] = true
+		}
+		for _, s := range m.Suites {
+			haveSuite[s] = true
+		}
+	}
+	var missing []string
+	for _, want := range cfg.RequiredTools {
+		if want != "" && !haveTool[want] {
+			missing = append(missing, want)
+		}
+	}
+	for _, want := range cfg.RequiredSuites {
+		if want != "" && !haveSuite[want] {
+			missing = append(missing, "suite:"+want)
+		}
+	}
+	sort.Strings(missing)
+	return missing
 }

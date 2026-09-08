@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/jelly-agent/jelly-agent/internal/config"
 	"github.com/jelly-agent/jelly-agent/internal/engine"
@@ -91,4 +92,64 @@ func instructionFromAPI(t *testing.T, s *Server, query string) string {
 	}
 	t.Fatal("响应里没有「指令」这一块")
 	return ""
+}
+
+// 未声明的 MCP 工具，副作用等级也必须解析出来。
+//
+// 快照路径原来只在注册表里查得到时才设这个字段，而 42 个 n9e 工具里只有 3 个
+// 声明过——剩下 39 个是空串，前端那个 badge 又是无条件渲染的，于是显示成空白。
+// 而空白读起来像"没有副作用"，恰恰是策略里写明不能这么读的：第三方服务器
+// 沉默不等于安全保证，远端工具没声明就按会改动处理。
+func TestAnUndeclaredRemoteToolStillReportsItsSideEffect(t *testing.T) {
+	s := newTestServer(t)
+	// 一次实发观测，里面有一个注册表里查不到的远端工具。
+	s.engine().SetPromptSnapshotForTest("root", engine.PromptSnapshot{
+		ToolsTokens: 120,
+		At:          time.Now(),
+		Tools: []engine.PromptToolSnapshot{
+			{Name: "list_notify_channels", Description: "List notification channels.",
+				Tokens: 60, Server: "n9e-mcp"},
+			{Name: "web_search", Description: "Search the web.", Tokens: 60},
+		},
+	})
+
+	w := do(t, s, "GET", "/api/prompt", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", w.Code, w.Body.String())
+	}
+	var body struct {
+		Measured   bool  `json:"tools_measured"`
+		MeasuredAt int64 `json:"tools_measured_at"`
+		Tools      []struct {
+			Name       string `json:"name"`
+			Server     string `json:"server"`
+			SideEffect string `json:"side_effect"`
+		} `json:"tools"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if !body.Measured {
+		t.Fatal("有观测样本却报成按元数据估算")
+	}
+	if body.MeasuredAt == 0 {
+		t.Error("没有给出观测时间——页面就无法说明这份测量是何时的")
+	}
+	byName := map[string]string{}
+	server := map[string]string{}
+	for _, tl := range body.Tools {
+		byName[tl.Name] = tl.SideEffect
+		server[tl.Name] = tl.Server
+	}
+	// 远端且未声明 → 按会改动处理，绝不能是空串。
+	if got := byName["list_notify_channels"]; got != "mutating" {
+		t.Errorf("未声明的远端工具副作用 = %q，应当按 mutating 处理", got)
+	}
+	if server["list_notify_channels"] != "n9e-mcp" {
+		t.Errorf("快照没把来源服务器带过来: %q", server["list_notify_channels"])
+	}
+	// 内置且未声明 → 只读，这是另一半，不能一起改成 mutating。
+	if got := byName["web_search"]; got != "read_only" {
+		t.Errorf("未声明的内置工具副作用 = %q，应当是 read_only", got)
+	}
 }

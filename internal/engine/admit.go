@@ -64,6 +64,9 @@ type pick struct {
 	// and with a budget of one a baseline tool displaced the very tool the
 	// question had matched.
 	baseline []string
+	// Required tools define the agent's core capability. They spend ordinary
+	// slots, but never yield to scoring or to the previous prompt shape.
+	required []string
 	// Matched are the tools this question hit. Never displaced: a set that
 	// lacks the tool the question needs has the model told it does not exist,
 	// and answering anyway.
@@ -95,11 +98,12 @@ func (a *admissions) admit(session string, p pick, order map[string]int, budget 
 		}
 		return out
 	}
-	baseline, matched, filler := live(p.baseline), live(p.matched), live(p.filler)
+	baseline, required := live(p.baseline), live(p.required)
+	matched, filler := live(p.matched), live(p.filler)
 
 	if session == "" {
 		// No session to be stable across; nothing to remember.
-		all := append(append(append([]string(nil), baseline...), matched...), filler...)
+		all := append(append(append(append([]string(nil), baseline...), required...), matched...), filler...)
 		return sortByCatalogue(dedupe(all), order)
 	}
 
@@ -117,7 +121,7 @@ func (a *admissions) admit(session string, p pick, order map[string]int, budget 
 	// everything that has to compete for a slot.
 	room := budget
 	if room <= 0 {
-		room = len(matched) + len(prev) + len(filler)
+		room = len(required) + len(matched) + len(prev) + len(filler)
 	}
 	scored := make([]string, 0, room)
 	take := func(names []string) {
@@ -128,13 +132,27 @@ func (a *admissions) admit(session string, p pick, order map[string]int, budget 
 			scored = append(scored, n)
 		}
 	}
-	take(matched) // this question's needs come first
+	// Required is allowed to exceed the configured room. A contradictory
+	// configuration should be visible in its token bill, not by quietly
+	// removing a capability the operator explicitly required.
+	for _, n := range required {
+		if !slices.Contains(scored, n) && !slices.Contains(baseline, n) {
+			scored = append(scored, n)
+		}
+	}
+	take(matched) // then this question's needs
 	take(prev)    // then keep the prompt as it was
 	take(filler)  // only then spend what is left on padding
 
 	// Remembered without the baseline tools: they are added unconditionally
 	// every turn, so storing them would let them eat next turn's budget
 	// through prev.
+	//
+	// Required tools do stay in the record, and that outlives the config: take
+	// one out of required_tools and this session keeps offering it. Deliberate
+	// — the point of remembering at all is that the tool block is the prompt's
+	// prefix, and dropping a tool mid-conversation forfeits the cache on
+	// everything behind it. A new conversation gets the new configuration.
 	a.byID[session] = scored
 	return sortByCatalogue(dedupe(append(append([]string(nil), baseline...), scored...)), order)
 }

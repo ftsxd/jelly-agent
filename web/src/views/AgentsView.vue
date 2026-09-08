@@ -19,6 +19,8 @@ const form = reactive({
   provider: '',
   instruction: '',
   mcp: [],
+  required_tools_text: '',
+  required_suites_text: '',
   sub_agents: [],
   enabled: true,
   make_default: false,
@@ -54,6 +56,8 @@ function startNew() {
     provider: '',
     instruction: '',
     mcp: [],
+    required_tools_text: '',
+    required_suites_text: '',
     sub_agents: [],
     enabled: true,
     make_default: false,
@@ -68,6 +72,8 @@ function startEdit(a) {
     provider: a.provider || '',
     instruction: a.instruction || '',
     mcp: [...(a.mcp || [])],
+    required_tools_text: (a.required_tools || []).join('\n'),
+    required_suites_text: (a.required_suites || []).join('\n'),
     sub_agents: [...(a.sub_agents || [])],
     enabled: a.enabled,
     make_default: defaultAgent.value === a.name,
@@ -89,6 +95,8 @@ async function submit() {
       provider: form.provider,
       instruction: form.instruction,
       mcp: form.mcp,
+      required_tools: parseNames(form.required_tools_text),
+      required_suites: parseNames(form.required_suites_text),
       sub_agents: form.sub_agents,
       enabled: form.enabled,
       make_default: form.make_default,
@@ -103,6 +111,10 @@ async function submit() {
   }
 }
 
+function parseNames(text) {
+  return [...new Set((text || '').split(/[\n,]/).map((v) => v.trim()).filter(Boolean))]
+}
+
 async function toggle(a) {
   try {
     await api.saveAgent({
@@ -111,6 +123,8 @@ async function toggle(a) {
       provider: a.provider || '',
       instruction: a.instruction || '',
       mcp: a.mcp || [],
+      required_tools: a.required_tools || [],
+      required_suites: a.required_suites || [],
       sub_agents: a.sub_agents || [],
       enabled: !a.enabled,
     })
@@ -128,6 +142,8 @@ async function makeDefault(a) {
       provider: a.provider || '',
       instruction: a.instruction || '',
       mcp: a.mcp || [],
+      required_tools: a.required_tools || [],
+      required_suites: a.required_suites || [],
       sub_agents: a.sub_agents || [],
       enabled: a.enabled,
       make_default: true,
@@ -212,6 +228,21 @@ async function remove(a) {
             </div>
           </div>
 
+          <div class="capability-grid span2">
+            <label class="field">
+              <span class="label">必需工具（每行一个）</span>
+              <textarea v-model="form.required_tools_text" class="textarea mono" rows="3"
+                placeholder="query_instant&#10;query_range" />
+              <span class="field-help">立即生效；这些工具优先入场，不参与相关性淘汰。</span>
+            </label>
+            <label class="field">
+              <span class="label">必需能力包（每行一个 suite）</span>
+              <textarea v-model="form.required_suites_text" class="textarea mono" rows="3"
+                placeholder="promql" />
+              <span class="field-help">自动包含元数据中属于该 suite 的全部工具；可与必需工具同时使用。</span>
+            </label>
+          </div>
+
           <label class="check">
             <input type="checkbox" v-model="form.enabled" />
             <span>启用</span>
@@ -252,9 +283,11 @@ async function remove(a) {
                 <span class="badge" :class="a.enabled ? 'badge-accent' : ''">{{ a.enabled ? '已启用' : '已停用' }}</span>
               </div>
               <div class="srv-meta dim">{{ a.description || '（无描述）' }}</div>
-              <div v-if="(a.sub_agents || []).length || (a.mcp || []).length" class="srv-secrets">
+              <div v-if="(a.sub_agents || []).length || (a.mcp || []).length || (a.required_tools || []).length || (a.required_suites || []).length" class="srv-secrets">
                 <span v-for="n in a.sub_agents" :key="'s' + n" class="badge" title="子 Agent（转交目标）">↪ {{ n }}</span>
                 <span v-for="n in a.mcp" :key="'m' + n" class="badge mono" title="MCP">{{ n }}</span>
+                <span v-for="n in a.required_tools" :key="'rt' + n" class="badge mono" title="必需工具">工具 {{ n }}</span>
+                <span v-for="n in a.required_suites" :key="'rs' + n" class="badge mono badge-accent" title="必需能力包">suite {{ n }}</span>
               </div>
             </div>
             <div class="srv-actions">
@@ -327,6 +360,16 @@ async function remove(a) {
   flex-direction: column;
   gap: var(--sp-2);
 }
+.capability-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--sp-3);
+}
+.field-help {
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1.5;
+}
 .span2 {
   grid-column: 1 / -1;
 }
@@ -354,6 +397,10 @@ async function remove(a) {
   border-color: var(--accent);
   background: var(--accent-tint);
   color: var(--accent);
+}
+@media (max-width: 680px) {
+  .grid, .capability-grid { grid-template-columns: 1fr; }
+  .capability-grid { grid-column: 1 / -1; }
 }
 .check {
   display: flex;

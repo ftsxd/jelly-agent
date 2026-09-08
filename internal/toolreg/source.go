@@ -112,10 +112,8 @@ func (f *FileSource) Load(ctx context.Context) ([]ops.ToolMetadata, error) {
 
 // applyOverlay patches declarations onto the entries they name.
 //
-// The console's file carries a declaration and nothing else: what a tool
-// produces, and whether calling it changes anything. Those are the two facts a
-// person can answer about a third-party tool from a dropdown, and they are the
-// only two the console writes.
+// The console's file carries a declaration patch: model-facing retrieval text,
+// suites, what a tool produces, and whether calling it changes anything.
 //
 // So it cannot be an ordinary entry. Registration is first-wins per key, so
 // making the console's file load first — which is what it took for a
@@ -152,6 +150,21 @@ func applyOverlay(base, overlay []ops.ToolMetadata) []ops.ToolMetadata {
 		}
 		if o.SideEffect != "" {
 			out[i].SideEffect = o.SideEffect
+		}
+		if o.Description != "" {
+			out[i].Description = o.Description
+		}
+		if len(o.UseCases) > 0 {
+			out[i].UseCases = append([]string(nil), o.UseCases...)
+		}
+		if len(o.Examples) > 0 {
+			out[i].Examples = append([]string(nil), o.Examples...)
+		}
+		if len(o.AntiExamples) > 0 {
+			out[i].AntiExamples = append([]string(nil), o.AntiExamples...)
+		}
+		if len(o.Suites) > 0 {
+			out[i].Suites = append([]string(nil), o.Suites...)
 		}
 	}
 	return out

@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 
@@ -40,12 +41,17 @@ type metadataFile struct {
 
 // toolDeclDTO is one tool's declaration as the console edits it.
 //
-// A deliberately small slice of ToolMetadata: these four are what the console
-// can meaningfully ask about a third-party tool, and offering the rest would
-// invite editing fields whose consequences are not visible from this page.
+// A deliberately scoped slice of ToolMetadata: the fields that affect model
+// selection plus evidence and side-effect declarations. Offering the rest
+// would invite editing fields whose consequences are not visible here.
 type toolDeclDTO struct {
-	Name   string `json:"name"`
-	Server string `json:"server,omitempty"`
+	Name         string   `json:"name"`
+	Server       string   `json:"server,omitempty"`
+	Description  string   `json:"description,omitempty"`
+	UseCases     []string `json:"use_cases,omitempty"`
+	Examples     []string `json:"examples,omitempty"`
+	AntiExamples []string `json:"anti_examples,omitempty"`
+	Suites       []string `json:"suites,omitempty"`
 	// Produces and Effect are what the registry actually resolved, which is
 	// not always what the console asked for — see Shadowed.
 	Produces string `json:"produces,omitempty"`
@@ -104,20 +110,25 @@ func (s *Server) handleToolMetadata(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// toolDeclInput is one save. The two editable fields are pointers so that
+// toolDeclInput is one save. Editable fields are pointers so that
 // "not sent" and "cleared" are different requests.
 //
 // They have to be. The page has a dropdown per field and saves on change, so a
-// save carries one field — and a struct that cannot tell absent from empty
-// read the other one as "cleared" and wrote the clear. Two quick changes then
+// a save may carry one field — and a struct that cannot tell absent from empty
+// reads the others as "cleared" and writes the clear. Two quick changes then
 // raced: each request rebuilt the whole entry from what it had, and the loser
 // silently lost a field. Losing a side-effect level that way is not a cosmetic
 // bug, because that level is what the gateway's ceiling policy reads.
 type toolDeclInput struct {
-	Name     string  `json:"name"`
-	Server   string  `json:"server,omitempty"`
-	Produces *string `json:"produces,omitempty"`
-	Effect   *string `json:"side_effect,omitempty"`
+	Name         string    `json:"name"`
+	Server       string    `json:"server,omitempty"`
+	Description  *string   `json:"description,omitempty"`
+	UseCases     *[]string `json:"use_cases,omitempty"`
+	Examples     *[]string `json:"examples,omitempty"`
+	AntiExamples *[]string `json:"anti_examples,omitempty"`
+	Suites       *[]string `json:"suites,omitempty"`
+	Produces     *string   `json:"produces,omitempty"`
+	Effect       *string   `json:"side_effect,omitempty"`
 }
 
 // handleSaveToolMetadata upserts one declaration and hot-reloads.
@@ -144,7 +155,8 @@ func (s *Server) handleSaveToolMetadata(w http.ResponseWriter, r *http.Request) 
 		writeErr(w, http.StatusBadRequest, "未知的 side_effect 取值："+*in.Effect)
 		return
 	}
-	if in.Produces == nil && in.Effect == nil {
+	if in.Description == nil && in.UseCases == nil && in.Examples == nil &&
+		in.AntiExamples == nil && in.Suites == nil && in.Produces == nil && in.Effect == nil {
 		writeErr(w, http.StatusBadRequest, "没有要修改的字段")
 		return
 	}
@@ -190,10 +202,25 @@ func (s *Server) handleSaveToolMetadata(w http.ResponseWriter, r *http.Request) 
 	if in.Effect != nil {
 		cur.SideEffect = ops.SideEffectLevel(*in.Effect)
 	}
+	if in.Description != nil {
+		cur.Description = strings.TrimSpace(*in.Description)
+	}
+	if in.UseCases != nil {
+		cur.UseCases = cleanNames(*in.UseCases)
+	}
+	if in.Examples != nil {
+		cur.Examples = cleanNames(*in.Examples)
+	}
+	if in.AntiExamples != nil {
+		cur.AntiExamples = cleanNames(*in.AntiExamples)
+	}
+	if in.Suites != nil {
+		cur.Suites = cleanNames(*in.Suites)
+	}
 	// An entry with nothing left in it is removed rather than stored blank:
 	// "not declared" and "declared as nothing" look the same downstream, and
 	// only the first is true.
-	if cur.Produces != "" || cur.SideEffect != "" {
+	if hasConsoleFields(cur) {
 		kept = append(kept, cur)
 	}
 	sort.Slice(kept, func(i, j int) bool {
@@ -238,6 +265,8 @@ func (s *Server) handleSaveToolMetadata(w http.ResponseWriter, r *http.Request) 
 func declRow(m, decl ops.ToolMetadata, declared bool, src string) toolDeclDTO {
 	row := toolDeclDTO{
 		Name: m.Name, Server: m.Server,
+		Description: m.Description, UseCases: m.UseCases, Examples: m.Examples,
+		AntiExamples: m.AntiExamples, Suites: m.Suites,
 		Produces: string(m.Produces), Effect: string(m.SideEffect),
 		Source: src,
 	}
@@ -252,7 +281,12 @@ func declRow(m, decl ops.ToolMetadata, declared bool, src string) toolDeclDTO {
 		// reporting is a field the console set that the registry did not end
 		// up with.
 		row.Shadowed = (decl.Produces != "" && decl.Produces != m.Produces) ||
-			(decl.SideEffect != "" && decl.SideEffect != m.SideEffect)
+			(decl.SideEffect != "" && decl.SideEffect != m.SideEffect) ||
+			(decl.Description != "" && decl.Description != m.Description) ||
+			(len(decl.UseCases) > 0 && !slices.Equal(decl.UseCases, m.UseCases)) ||
+			(len(decl.Examples) > 0 && !slices.Equal(decl.Examples, m.Examples)) ||
+			(len(decl.AntiExamples) > 0 && !slices.Equal(decl.AntiExamples, m.AntiExamples)) ||
+			(len(decl.Suites) > 0 && !slices.Equal(decl.Suites, m.Suites))
 	}
 	return row
 }
@@ -300,6 +334,11 @@ func writeFileAtomic(path string, data []byte) error {
 }
 
 func declKey(server, name string) string { return server + "/" + name }
+
+func hasConsoleFields(m ops.ToolMetadata) bool {
+	return m.Description != "" || len(m.UseCases) > 0 || len(m.Examples) > 0 ||
+		len(m.AntiExamples) > 0 || len(m.Suites) > 0 || m.Produces != "" || m.SideEffect != ""
+}
 
 // readDecls loads the console's file, treating any problem as "nothing
 // declared yet" — the file is ours, a missing one is the normal first state,

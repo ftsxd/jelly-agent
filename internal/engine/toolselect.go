@@ -53,6 +53,10 @@ type selectingToolset struct {
 	// follow-up that names no metric does not lose the metric tools. See
 	// intents.go for why admission alone cannot cover that case.
 	carried *intents
+	// agent names whose required_tools these are, for the shortfall report.
+	agent string
+	// reportMissing surfaces required entries the catalogue could not offer.
+	reportMissing func(agent string, missing []string)
 }
 
 func (s *selectingToolset) Name() string { return "jelly_selector" }
@@ -142,6 +146,14 @@ func (s *selectingToolset) Tools(ctx agent.ReadonlyContext) ([]adktool.Tool, err
 	}
 	res := selector.Select(query, metas, cfg)
 
+	// A required tool the catalogue could not offer. Loud, once per agent per
+	// distinct shortfall: a mistyped name or an unclassified suite is
+	// otherwise completely silent, and "declared a core capability, got
+	// nothing" is the failure required_tools was added to end.
+	if len(res.MissingRequired) > 0 && s.reportMissing != nil {
+		s.reportMissing(s.agent, res.MissingRequired)
+	}
+
 	// Selected is in catalogue order; the ranking, the matched flag and the
 	// baseline flag live in Candidates. All three matter: baseline is outside
 	// the budget, matched says which slots this question has earned, and the
@@ -154,6 +166,8 @@ func (s *selectingToolset) Tools(ctx agent.ReadonlyContext) ([]adktool.Tool, err
 		switch {
 		case c.Baseline:
 			p.baseline = append(p.baseline, c.Tool)
+		case c.Required:
+			p.required = append(p.required, c.Tool)
 		case c.Matched:
 			p.matched = append(p.matched, c.Tool)
 		default:
@@ -165,7 +179,7 @@ func (s *selectingToolset) Tools(ctx agent.ReadonlyContext) ([]adktool.Tool, err
 	if s.admit != nil {
 		final = s.admit.admit(sessionOf(ctx), p, order, s.cfg.MaxTools)
 	} else {
-		all := append(append(append([]string(nil), p.baseline...), p.matched...), p.filler...)
+		all := append(append(append(append([]string(nil), p.baseline...), p.required...), p.matched...), p.filler...)
 		final = sortByCatalogue(dedupe(all), order)
 	}
 

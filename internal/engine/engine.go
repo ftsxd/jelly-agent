@@ -35,6 +35,7 @@ import (
 	jellysession "github.com/jelly-agent/jelly-agent/internal/session"
 	"github.com/jelly-agent/jelly-agent/internal/skill"
 	jellytelemetry "github.com/jelly-agent/jelly-agent/internal/telemetry"
+	"github.com/jelly-agent/jelly-agent/internal/tokens"
 	jellytool "github.com/jelly-agent/jelly-agent/internal/tool"
 	"github.com/jelly-agent/jelly-agent/internal/toolreg"
 
@@ -141,6 +142,108 @@ type Engine struct {
 	recordsOnce sync.Once
 	recordStore *record.Store
 	recordsErr  error
+
+	// promptByAgent is the last exact fixed prompt shape observed at the model
+	// boundary. The console cannot reconstruct MCP schemas from metadata: the
+	// parameter JSON is most of their cost, and undeclared MCP tools are absent
+	// from the registry altogether.
+	promptMu      sync.RWMutex
+	promptByAgent map[string]PromptSnapshot
+
+	// missingRequired tracks required_tools/required_suites entries the
+	// catalogue could not offer, so a typo is loud once instead of silent.
+	missingMu       sync.Mutex
+	missingRequired map[string][]string
+}
+
+// PromptToolSnapshot is one declaration exactly as it reached the model.
+type PromptToolSnapshot struct {
+	Name        string
+	Description string
+	Tokens      int
+	// Server is which MCP server the tool came from, empty for a built-in.
+	//
+	// Carried because the console has to resolve the tool's side-effect level,
+	// and an undeclared remote tool is not in the registry to look up. Absent,
+	// the page rendered an empty badge for it — and an empty badge reads as
+	// "no side effect", which is the one thing the policy says a third-party
+	// server's silence must never be taken for.
+	Server string
+}
+
+// PromptSnapshot is the latest exact fixed-cost observation for an agent.
+//
+// The system instruction is deliberately not here: this process assembles it,
+// so estimating from our own text is as exact as the model boundary could be,
+// and carrying a second number would invite reading it as the measured one.
+type PromptSnapshot struct {
+	ToolsTokens int
+	Tools       []PromptToolSnapshot
+	// At is when the request was observed. The page says "measured", and
+	// without this it cannot say measured *when* — which matters most right
+	// after an operator changes metadata or max_tools, because the newest
+	// observation still predates the change until a turn runs.
+	At time.Time
+}
+
+// SetPromptSnapshotForTest injects an observation without running a turn.
+//
+// The alternative is a live model call, which is what this observation comes
+// from — so the console's side of it would otherwise have no test at all, and
+// the field it reads is exactly where a blank side-effect badge came from.
+func (e *Engine) SetPromptSnapshotForTest(agent string, p PromptSnapshot) {
+	e.promptMu.Lock()
+	defer e.promptMu.Unlock()
+	if e.promptByAgent == nil {
+		e.promptByAgent = map[string]PromptSnapshot{}
+	}
+	e.promptByAgent[agent] = p
+}
+
+// LastPromptSnapshot returns the last request observed for agent.
+func (e *Engine) LastPromptSnapshot(agent string) (PromptSnapshot, bool) {
+	e.promptMu.RLock()
+	defer e.promptMu.RUnlock()
+	p, ok := e.promptByAgent[agent]
+	p.Tools = append([]PromptToolSnapshot(nil), p.Tools...)
+	return p, ok
+}
+
+func (e *Engine) observePrompt(agentName string, cfg *genai.GenerateContentConfig, _, toolsTokens int) {
+	if cfg == nil {
+		return
+	}
+	// Server attribution comes from the gateway, not the registry: it answers
+	// for adopted tools too, which is every MCP tool nobody has declared.
+	_, gw := e.toolRegistry()
+	var tools []PromptToolSnapshot
+	for _, group := range cfg.Tools {
+		if group == nil {
+			continue
+		}
+		for _, d := range group.FunctionDeclarations {
+			if d == nil {
+				continue
+			}
+			n := tokens.Estimate(d.Name) + tokens.Estimate(d.Description)
+			if b, err := json.Marshal(jellymodel.ToolParameters(d)); err == nil {
+				n += tokens.Estimate(string(b))
+			}
+			snap := PromptToolSnapshot{Name: d.Name, Description: d.Description, Tokens: n}
+			if m, ok := gw.Metadata(d.Name); ok {
+				snap.Server = m.Server
+			}
+			tools = append(tools, snap)
+		}
+	}
+	e.promptMu.Lock()
+	if e.promptByAgent == nil {
+		e.promptByAgent = map[string]PromptSnapshot{}
+	}
+	e.promptByAgent[agentName] = PromptSnapshot{
+		ToolsTokens: toolsTokens, Tools: tools, At: time.Now(),
+	}
+	e.promptMu.Unlock()
 }
 
 // New wraps a loaded config in an engine.
@@ -702,6 +805,49 @@ func (e *Engine) reportUndeclared(server string, names []string) {
 		"server", where, "tools", names, "count", len(names))
 }
 
+// reportMissingRequired surfaces a required tool or suite the catalogue could
+// not offer, once per agent per distinct shortfall.
+//
+// De-duplicated because a toolset re-selects every turn: without it a typo
+// would print on every message. Keyed by the shortfall as well as the agent,
+// so a server coming back — which changes the shortfall — is reported again
+// rather than suppressed by the first one.
+func (e *Engine) reportMissingRequired(agent string, missing []string) {
+	if len(missing) == 0 {
+		return
+	}
+	key := agent + "\x00" + strings.Join(missing, ",")
+	e.missingMu.Lock()
+	if e.missingRequired == nil {
+		e.missingRequired = map[string][]string{}
+	}
+	_, seen := e.missingRequired[key]
+	e.missingRequired[agent] = missing
+	if !seen {
+		e.missingRequired[key] = missing
+	}
+	e.missingMu.Unlock()
+	if seen {
+		return
+	}
+	slog.Warn("agent 声明的必需工具本轮拿不到（名字写错、suite 没人声明，或该 MCP 服务器暂时不可达）",
+		"agent", agent, "missing", missing, "count", len(missing))
+}
+
+// MissingRequired reports, per agent, the required entries last found missing.
+func (e *Engine) MissingRequired() map[string][]string {
+	e.missingMu.Lock()
+	defer e.missingMu.Unlock()
+	out := make(map[string][]string, len(e.missingRequired))
+	for k, v := range e.missingRequired {
+		if strings.Contains(k, "\x00") {
+			continue // the de-dup key, not an agent
+		}
+		out[k] = append([]string(nil), v...)
+	}
+	return out
+}
+
 // Undeclared returns the tools running on synthesized metadata, by server.
 func (e *Engine) Undeclared() map[string][]string {
 	e.undeclaredMu.Lock()
@@ -1021,7 +1167,8 @@ func (e *Engine) buildAgentTree(name string, core *memory.Core, withSearch bool,
 	// Named agents load only the MCP servers they list (empty ⇒ none), matching
 	// PlatformBot semantics — explicit selection in the UI.
 	toolsets := e.ToolsetsFor(def.MCP)
-	return e.buildNode(name, desc, def.Provider, instruction, toolsets, subs, core, withSearch)
+	return e.buildNode(name, desc, def.Provider, instruction, toolsets, subs, core, withSearch,
+		def.RequiredTools, def.RequiredSuites)
 }
 
 // BuildAgentWith is like BuildAgent but controls which MCP servers are loaded:
@@ -1045,7 +1192,7 @@ func (e *Engine) BuildAgentWith(provider string, mcpNames []string) (agent.Agent
 	}
 
 	a, prov, err := e.buildNode("root", "jelly-agent root agent with web search and core memory.",
-		provider, e.BaseInstruction(), toolsets, nil, core, search != nil)
+		provider, e.BaseInstruction(), toolsets, nil, core, search != nil, nil, nil)
 	if err != nil {
 		if search != nil {
 			search.Close()
@@ -1122,6 +1269,7 @@ func (e *Engine) withCompaction(llm adkmodel.LLM, agentName string, canRecall bo
 			cfg = req.Config
 		}
 		sysTokens, toolTokens, toolCount := jellytelemetry.EstimateConfigTokens(cfg)
+		e.observePrompt(agentName, cfg, sysTokens, toolTokens)
 		jellytelemetry.RecordPrompt(ctx, jellytelemetry.PromptComposition{
 			HistoryTokens:   r.BeforeTokens,
 			TokensAfter:     r.AfterTokens,
@@ -1148,7 +1296,7 @@ func (e *Engine) withCompaction(llm adkmodel.LLM, agentName string, canRecall bo
 // is rendered fresh each turn (core memory + skill catalog prepended) via an
 // InstructionProvider. Shared by the legacy single agent and the multi-agent
 // tree so both behave identically.
-func (e *Engine) buildNode(name, description, provider, instruction string, toolsets []NamedToolset, subAgents []agent.Agent, core *memory.Core, withSearch bool) (agent.Agent, config.Provider, error) {
+func (e *Engine) buildNode(name, description, provider, instruction string, toolsets []NamedToolset, subAgents []agent.Agent, core *memory.Core, withSearch bool, requiredTools, requiredSuites []string) (agent.Agent, config.Provider, error) {
 	llm, prov, err := e.reg.Get(provider)
 	if err != nil {
 		return nil, prov, err
@@ -1193,8 +1341,11 @@ func (e *Engine) buildNode(name, description, provider, instruction string, tool
 	// so they are bound through a toolset wrapper instead of a tool one.
 	store, gw := e.toolRegistry()
 	binder := &gateway.Binder{
-		GW:       gw,
-		Registry: gateway.Snapshot(store.Load()),
+		GW: gw,
+		// MCP toolsets are rebound on every turn, so use the live registry here:
+		// metadata saved from the console must affect selection on the next
+		// turn without restarting the agent or its MCP subprocesses.
+		Registry: gateway.Live(store),
 		Context:  e.incidentFor,
 		Fallback: e.undeclaredFallback(),
 		Report:   e.reportUndeclared,
@@ -1208,14 +1359,18 @@ func (e *Engine) buildNode(name, description, provider, instruction string, tool
 	// the budget is global, and ADK only re-consults toolsets. See
 	// selectingToolset.
 	sel := &selectingToolset{
-		static:   tools,
-		sets:     bound,
-		cfg:      selector.Config{MaxTools: e.maxTools()},
-		report:   logSelection,
-		admit:    e.admissions(),
-		carried:  e.intents(),
-		health:   e.toolsetHealth(),
-		inflight: e.toolListing(),
+		static: tools,
+		sets:   bound,
+		cfg: selector.Config{
+			MaxTools: e.maxTools(), RequiredTools: requiredTools, RequiredSuites: requiredSuites,
+		},
+		report:        logSelection,
+		agent:         name,
+		reportMissing: e.reportMissingRequired,
+		admit:         e.admissions(),
+		carried:       e.intents(),
+		health:        e.toolsetHealth(),
+		inflight:      e.toolListing(),
 	}
 
 	beforeTool, afterTool := e.toolCallbacks()

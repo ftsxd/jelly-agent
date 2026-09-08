@@ -356,6 +356,32 @@ func TestCandidatesExplainBothSides(t *testing.T) {
 	}
 }
 
+func TestRequiredToolsAndSuitesCannotBeCut(t *testing.T) {
+	tools := []ops.ToolMetadata{
+		{Name: "a_padding"},
+		{Name: "query_instant", Suites: []string{"promql"}},
+		{Name: "query_range", Suites: []string{"promql"}},
+		{Name: "z_padding"},
+	}
+	res := Select("完全无关", tools, Config{
+		MaxTools:       1,
+		RequiredTools:  []string{"query_instant"},
+		RequiredSuites: []string{"promql"},
+	})
+	for _, want := range []string{"query_instant", "query_range"} {
+		if !slices.Contains(res.Selected, want) {
+			t.Errorf("required %s was cut: %v", want, res.Selected)
+		}
+		c := candidateFor(res, want)
+		if c == nil || !c.Required {
+			t.Errorf("%s was not reported as required: %+v", want, c)
+		}
+	}
+	if len(res.Selected) != 2 {
+		t.Errorf("selected %v; required entries may exceed a contradictory budget, padding may not", res.Selected)
+	}
+}
+
 func candidateFor(r Result, tool string) *ops.Candidate {
 	for i := range r.Candidates {
 		if r.Candidates[i].Tool == tool {
@@ -396,5 +422,53 @@ func TestMatchedIsNotJustAPositiveScore(t *testing.T) {
 	}
 	if !byName["get_logs"].Matched {
 		t.Error("the tool the question hit was not reported as matched")
+	}
+}
+
+// 声明了核心能力却拿不到，必须报出来。
+//
+// 名字写错、suite 没人声明——这两种情况原本完全无声，而"声明了核心能力、
+// 结果什么都没有"正是 required_tools 要终结的失败。不报的话，同一个失败只是
+// 换了个触发条件（从关键词换成拼写）在上一层重演。
+func TestRequiredEntriesTheCatalogueCannotOfferAreReported(t *testing.T) {
+	tools := []ops.ToolMetadata{
+		meta("query_range", desc("Run a PromQL range query.")),
+		meta("list_targets", func(m *ops.ToolMetadata) { m.Suites = []string{"inventory"} }),
+	}
+	res := Select("随便问一句", tools, Config{
+		RequiredTools:  []string{"query_range", "query_instnat"}, // 后者拼错
+		RequiredSuites: []string{"inventory", "promql"},          // 后者没人声明
+	})
+
+	want := []string{"query_instnat", "suite:promql"}
+	if !slices.Equal(res.MissingRequired, want) {
+		t.Errorf("MissingRequired = %v，想要 %v", res.MissingRequired, want)
+	}
+	// 兑现了的那两个不该出现在缺失名单里，而且要真的入选。
+	for _, ok := range []string{"query_range", "list_targets"} {
+		if rankOf(res, ok) < 0 {
+			t.Errorf("%s 声明为必需却没入选", ok)
+		}
+	}
+}
+
+// 没声明 required 的部署，这个字段始终是空的——不是空切片和 nil 的区别，
+// 是根本不去算。
+func TestNoRequiredMeansNoShortfallReport(t *testing.T) {
+	res := Select("查一下 cpu", []ops.ToolMetadata{meta("query_range")}, Config{})
+	if res.MissingRequired != nil {
+		t.Errorf("MissingRequired = %v，没声明必需时不该有", res.MissingRequired)
+	}
+}
+
+// 别名也算兑现：注册表把一个工具的多个名字都解析到同一条，required 写别名
+// 应当认得出来。
+func TestARequiredAliasCounts(t *testing.T) {
+	tools := []ops.ToolMetadata{
+		meta("query_range", func(m *ops.ToolMetadata) { m.Aliases = []string{"promql_range"} }),
+	}
+	res := Select("随便", tools, Config{RequiredTools: []string{"promql_range"}})
+	if len(res.MissingRequired) != 0 {
+		t.Errorf("别名没被认作兑现: %v", res.MissingRequired)
 	}
 }

@@ -93,6 +93,9 @@ const effects = ref([])
 const declDir = ref('')
 const declFile = ref('')
 const declError = ref('')
+const declOpen = reactive({})
+const declDrafts = reactive({})
+const declSaving = reactive({})
 
 async function loadDecls() {
   try {
@@ -114,6 +117,25 @@ function declOf(server, name) {
   return decls.value[`${server}/${name}`] || { produces: '', side_effect: '', source: '' }
 }
 
+function declKey(server, name) {
+  return `${server}/${name}`
+}
+
+function toggleDecl(server, tool) {
+  const key = declKey(server, tool.name)
+  declOpen[key] = !declOpen[key]
+  if (!declDrafts[key]) {
+    const d = declOf(server, tool.name)
+    declDrafts[key] = {
+      description: d.description || tool.description || '',
+      use_cases: (d.use_cases || []).join('\n'),
+      examples: (d.examples || []).join('\n'),
+      anti_examples: (d.anti_examples || []).join('\n'),
+      suites: (d.suites || []).join('\n'),
+    }
+  }
+}
+
 // saveDecl sends the one field that changed, and nothing else.
 //
 // Sending both meant sending a snapshot: the changed field plus whatever this
@@ -127,8 +149,7 @@ function declOf(server, name) {
 // same way the old snapshot did.
 async function saveDecl(server, name, patch) {
   const body = { name, server }
-  if (patch.produces !== undefined) body.produces = patch.produces
-  if (patch.side_effect !== undefined) body.side_effect = patch.side_effect
+  Object.assign(body, patch)
   try {
     const r = await api.saveToolMetadata(body)
     if (r?.tool) decls.value = { ...decls.value, [`${server}/${name}`]: r.tool }
@@ -139,6 +160,21 @@ async function saveDecl(server, name, patch) {
     // the list has to be re-read or the page keeps lying about it.
     await loadDecls()
   }
+}
+
+async function saveDeclDetails(server, name) {
+  const key = declKey(server, name)
+  const d = declDrafts[key]
+  if (!d) return
+  declSaving[key] = true
+  await saveDecl(server, name, {
+    description: d.description.trim(),
+    use_cases: parseLines(d.use_cases),
+    examples: parseLines(d.examples),
+    anti_examples: parseLines(d.anti_examples),
+    suites: parseLines(d.suites),
+  })
+  declSaving[key] = false
 }
 
 function cancel() {
@@ -417,34 +453,71 @@ async function testForm() {
                    不声明就只能显示"执行工具"。这里声明，写进元数据目录。 -->
               <table class="decls">
                 <thead>
-                  <tr><th>工具</th><th>产出</th><th>副作用</th><th></th></tr>
+                  <tr><th>工具</th><th>产出</th><th>副作用</th><th>元数据</th></tr>
                 </thead>
                 <tbody>
-                  <tr v-for="t in tests[s.name].tools" :key="t.name"
-                      :class="{ dimmed: s.tools?.length && !s.tools.includes(t.name) }">
-                    <td class="mono" :title="t.description">{{ t.name }}</td>
-                    <td>
-                      <select class="input sel" :value="declOf(s.name, t.name).produces"
-                              :aria-label="t.name + ' 产出什么'"
-                              @change="saveDecl(s.name, t.name, { produces: $event.target.value })">
-                        <option value="">未声明</option>
-                        <option v-for="k in kinds" :key="k.value" :value="k.value">{{ k.label }}</option>
-                      </select>
-                    </td>
-                    <td>
-                      <select class="input sel" :value="declOf(s.name, t.name).side_effect"
-                              :aria-label="t.name + ' 的副作用'"
-                              @change="saveDecl(s.name, t.name, { side_effect: $event.target.value })">
-                        <option value="">未声明</option>
-                        <option v-for="e in effects" :key="e.value" :value="e.value">{{ e.label }}</option>
-                      </select>
-                    </td>
-                    <td class="mono tiny">
-                      <span v-if="declOf(s.name, t.name).shadowed" class="warn-text"
-                            title="同目录下另一个文件声明了同一个工具，网关用的是那一份">未生效</span>
-                      <span v-else-if="declOf(s.name, t.name).source === 'console'" class="muted">已声明</span>
-                    </td>
-                  </tr>
+                  <template v-for="t in tests[s.name].tools" :key="t.name">
+                    <tr :class="{ dimmed: s.tools?.length && !s.tools.includes(t.name) }">
+                      <td class="mono" :title="t.description">{{ t.name }}</td>
+                      <td>
+                        <select class="input sel" :value="declOf(s.name, t.name).produces"
+                                :aria-label="t.name + ' 产出什么'"
+                                @change="saveDecl(s.name, t.name, { produces: $event.target.value })">
+                          <option value="">未声明</option>
+                          <option v-for="k in kinds" :key="k.value" :value="k.value">{{ k.label }}</option>
+                        </select>
+                      </td>
+                      <td>
+                        <select class="input sel" :value="declOf(s.name, t.name).side_effect"
+                                :aria-label="t.name + ' 的副作用'"
+                                @change="saveDecl(s.name, t.name, { side_effect: $event.target.value })">
+                          <option value="">未声明</option>
+                          <option v-for="e in effects" :key="e.value" :value="e.value">{{ e.label }}</option>
+                        </select>
+                      </td>
+                      <td class="decl-actions">
+                        <button type="button" class="btn btn-mini" @click="toggleDecl(s.name, t)">
+                          {{ declOpen[declKey(s.name, t.name)] ? '收起' : '编辑' }}
+                        </button>
+                        <span v-if="declOf(s.name, t.name).shadowed" class="warn-text tiny"
+                              title="同目录下另一个文件声明了同一个工具，网关用的是那一份">未生效</span>
+                        <span v-else-if="declOf(s.name, t.name).source === 'console'" class="muted tiny">已声明</span>
+                      </td>
+                    </tr>
+                    <tr v-if="declOpen[declKey(s.name, t.name)]" class="decl-detail-row">
+                      <td colspan="4">
+                        <div class="decl-detail">
+                          <label class="field detail-wide">
+                            <span class="label">模型描述</span>
+                            <textarea v-model="declDrafts[declKey(s.name, t.name)].description" class="textarea" rows="2" />
+                          </label>
+                          <label class="field">
+                            <span class="label">适用场景（每行一个）</span>
+                            <textarea v-model="declDrafts[declKey(s.name, t.name)].use_cases" class="textarea" rows="3" />
+                          </label>
+                          <label class="field">
+                            <span class="label">示例（每行一个）</span>
+                            <textarea v-model="declDrafts[declKey(s.name, t.name)].examples" class="textarea" rows="3" />
+                          </label>
+                          <label class="field">
+                            <span class="label">反例（每行一个）</span>
+                            <textarea v-model="declDrafts[declKey(s.name, t.name)].anti_examples" class="textarea" rows="3" />
+                          </label>
+                          <label class="field">
+                            <span class="label">能力包 suites（每行一个）</span>
+                            <textarea v-model="declDrafts[declKey(s.name, t.name)].suites" class="textarea mono" rows="3" placeholder="promql" />
+                          </label>
+                          <div class="detail-actions detail-wide">
+                            <span class="hint">这些字段参与 Top Tools 打分；清空表示撤销控制台覆盖。</span>
+                            <button type="button" class="btn btn-primary" :disabled="declSaving[declKey(s.name, t.name)]"
+                              @click="saveDeclDetails(s.name, t.name)">
+                              <span v-if="declSaving[declKey(s.name, t.name)]" class="spinner" /> 保存元数据
+                            </button>
+                          </div>
+                        </div>
+                      </td>
+                    </tr>
+                  </template>
                 </tbody>
               </table>
               <div v-if="declError" class="error-bar"><Icon name="alert" :size="14" /> {{ declError }}</div>
@@ -467,9 +540,33 @@ async function testForm() {
 .decls td { padding: 3px 8px 3px 0; border-bottom: 1px solid var(--hairline); vertical-align: middle; }
 .decls tr.dimmed { opacity: 0.5; }
 .decls .sel { width: auto; min-width: 116px; padding: 2px var(--sp-2); height: 28px; }
+.decl-actions { display: flex; align-items: center; gap: var(--sp-2); }
+.decl-detail-row > td { padding: var(--sp-3) 0 var(--sp-4); }
+.decl-detail {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--sp-3);
+  padding: var(--sp-3);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+.detail-wide { grid-column: 1 / -1; }
+.detail-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+}
 /* Colour is not the only signal — the word says it, the colour reinforces it. */
 .decls .warn-text { color: var(--warning); }
 .tiny { font-size: 11px; }
+
+@media (max-width: 720px) {
+  .decl-detail { grid-template-columns: 1fr; }
+  .detail-wide { grid-column: auto; }
+  .decls { display: block; overflow-x: auto; }
+}
 
 .badge-bad {
   background: var(--danger-tint);

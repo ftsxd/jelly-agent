@@ -2,6 +2,7 @@
 import { computed, onMounted, ref } from 'vue'
 import Icon from '../components/Icon.vue'
 import { api } from '../api'
+import { relTime } from '../time'
 
 const stats = ref(null)
 const loading = ref(true)
@@ -73,6 +74,15 @@ async function saveInstruction() {
     savingInstruction.value = false
   }
 }
+
+// 观测有多久了。页面说"实测"，就得说清是何时的实测——保存完元数据之后，
+// 最新的观测仍然早于那次改动，直到下一轮真的跑起来。
+// 除 1000：协议上是毫秒（和任务中心的 ts 一致），relTime 吃的是秒。
+// 直接传毫秒会永远显示"刚刚"——now - unix 是个大负数，被 max(0,·) 吃掉。
+const measuredAgo = computed(() => {
+  const ms = prompt.value?.tools_measured_at || 0
+  return ms ? relTime(Math.floor(ms / 1000)) : ''
+})
 
 const promptParts = computed(() => (prompt.value?.parts || []).filter((p) => !p.assembled))
 const assembled = computed(() => (prompt.value?.parts || []).find((p) => p.assembled) || null)
@@ -308,8 +318,8 @@ function errKinds(t) {
             </button>
           </h2>
           <p class="muted note">
-            每次模型调用都会重发这部分，与用户问什么无关。它不出现在 Provider 报的单个
-            输入 token 数里，所以一次运行贵得莫名时，通常先看这里。
+            系统指令每次都会重发；工具集合会随本轮准入结果变化。工具统计优先按最近一次
+            真正发给模型的完整 schema（含参数）估算，尚无运行样本时才按元数据估算。
           </p>
           <!-- 显示的是哪个 agent 的提示词。以前不管跑的是谁都显示内置基础指令，
                而带协调者的部署根本不会发那一段。 -->
@@ -324,7 +334,13 @@ function errKinds(t) {
           </div>
           <div class="pm-totals">
             <span>系统指令 <b class="mono">{{ fmt(prompt.totals.system_tokens) }}</b></span>
-            <span>工具描述 <b class="mono">{{ fmt(prompt.totals.tools_tokens) }}</b></span>
+            <span>工具 schema <b class="mono">{{ fmt(prompt.totals.tools_tokens) }}</b>
+              <!-- 说"实测"就得说是何时的实测：这份观测可能早于你刚做的改动，
+                   而那正是最容易误判的时刻。 -->
+              <small class="muted">
+                {{ prompt.tools_measured ? `按 ${measuredAgo} 的实发估算` : '按元数据估算（还没跑过）' }}
+              </small>
+            </span>
             <span>固定合计 <b class="mono">{{ fmt(prompt.totals.fixed_tokens) }}</b></span>
             <span>工具数 <b class="mono">{{ prompt.totals.tools }}</b><template v-if="prompt.totals.max_tools"> / 上限 {{ prompt.totals.max_tools }}</template></span>
           </div>

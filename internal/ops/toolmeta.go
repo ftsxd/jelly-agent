@@ -225,6 +225,7 @@ type Candidate struct {
 	Matched    bool   `json:"matched,omitempty"`
 	Reason     string `json:"reason,omitempty"`
 	Baseline   bool   `json:"baseline,omitempty"`
+	Required   bool   `json:"required,omitempty"`
 	Fallback   bool   `json:"fallback,omitempty"`
 	Suppressed string `json:"suppressed,omitempty"` // set when dropped, says why
 }

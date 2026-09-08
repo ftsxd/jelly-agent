@@ -193,6 +193,21 @@ func TestBaselineIsNotRememberedAsAStandingTool(t *testing.T) {
 	}
 }
 
+// Required tools are the operator's declaration of an agent's minimum viable
+// capability. A low budget may remove matched, remembered, or filler tools,
+// but it must not reinterpret that declaration as a preference.
+func TestRequiredToolsSurviveAdmissionEvenWhenTheyExceedBudget(t *testing.T) {
+	cat := catalogue("query_instant", "query_range", "padding")
+	a := newAdmissions()
+	got := a.admit("s1", pick{
+		required: []string{"query_instant", "query_range"},
+		filler:   []string{"padding"},
+	}, cat, 1)
+	if !slices.Equal(got, []string{"query_instant", "query_range"}) {
+		t.Errorf("got %v, want both required tools and no padding", got)
+	}
+}
+
 // A tool that has been retired must not hold a slot. The catalogue is the
 // authority on what exists; a name missing from it cannot be resolved by the
 // caller, so the slot buys nothing — and with a budget of one it produced an

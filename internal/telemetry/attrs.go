@@ -128,8 +128,12 @@ func EstimateConfigTokens(cfg *genai.GenerateContentConfig) (systemTokens, tools
 			// the honest measure — the declaration's Go representation is not
 			// what gets billed.
 			toolsTokens += tokens.Estimate(fn.Name) + tokens.Estimate(fn.Description)
-			if fn.Parameters != nil {
-				if b, err := json.Marshal(fn.Parameters); err == nil {
+			parameters := any(fn.Parameters)
+			if fn.ParametersJsonSchema != nil {
+				parameters = fn.ParametersJsonSchema
+			}
+			if parameters != nil {
+				if b, err := json.Marshal(parameters); err == nil {
 					toolsTokens += tokens.Estimate(string(b))
 				}
 			}

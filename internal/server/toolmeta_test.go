@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -85,6 +87,35 @@ func TestDeclaringAToolFromTheConsole(t *testing.T) {
 	}
 	if got.Produces != "metric_series" || got.Source != "console" {
 		t.Errorf("declaration = %+v", got)
+	}
+}
+
+func TestConsoleEditsSelectionMetadata(t *testing.T) {
+	s := newTestServer(t)
+	dir := t.TempDir()
+	s.engine().Config().Tools.MetadataDir = dir
+
+	body := `{"name":"query_range","server":"n9e-mcp",` +
+		`"description":"查询一段时间的监控指标",` +
+		`"use_cases":["查询指标曲线","按集群 ID 查询"],` +
+		`"examples":["查看集群 CPU 使用率"],` +
+		`"anti_examples":["只读取仪表盘配置"],` +
+		`"suites":["promql","metrics"]}`
+	if w := do(t, s, "POST", "/api/tools/metadata", body); w.Code != http.StatusOK {
+		t.Fatalf("save status = %d: %s", w.Code, w.Body.String())
+	}
+
+	got := declOnDisk(t, dir, "n9e-mcp", "query_range")
+	if got.Description != "查询一段时间的监控指标" ||
+		!slices.Equal(got.UseCases, []string{"查询指标曲线", "按集群 ID 查询"}) ||
+		!slices.Equal(got.Examples, []string{"查看集群 CPU 使用率"}) ||
+		!slices.Equal(got.AntiExamples, []string{"只读取仪表盘配置"}) ||
+		!slices.Equal(got.Suites, []string{"promql", "metrics"}) {
+		t.Fatalf("selection metadata did not round trip: %+v", got)
+	}
+	listed := declFromAPI(t, s, "query_range")
+	if listed.Description != got.Description || !slices.Equal(listed.Suites, got.Suites) {
+		t.Errorf("API = %+v, disk = %+v", listed, got)
 	}
 }
 
@@ -489,7 +520,7 @@ func TestTheSaveAnswersWithWhatTookEffect(t *testing.T) {
 	// And it agrees with the list, which is the property that matters: the
 	// page shows one of them and then the other.
 	listed := declFromAPI(t, s, "query_range")
-	if listed != saved.Tool {
+	if !reflect.DeepEqual(listed, saved.Tool) {
 		t.Errorf("保存返回 %+v，列表返回 %+v——同一个工具两种说法", saved.Tool, listed)
 	}
 }
