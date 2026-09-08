@@ -387,7 +387,14 @@ func foldTasks(sessionID string, frames []map[string]any, infoOf func(string) To
 			// Same purpose continues the step. Not the same tool: two ways of
 			// asking one monitoring system are one piece of work, and that is
 			// the case the old grouping split.
-			same := b.cur != nil && b.cur.Phase == phase && b.cur.Label == label
+			//
+			// Same agent, though. A step is attributed to one agent and shown
+			// under its name, so letting a coordinator's call and a
+			// specialist's merge would file one of them under the other's
+			// name — and the handover, which is the most interesting thing
+			// that happened in a delegated run, would leave no mark at all.
+			same := b.cur != nil && b.cur.Phase == phase && b.cur.Label == label &&
+				b.cur.Agent == agent
 			if !same {
 				b.cur = &Step{
 					ID: "s" + strconv.Itoa(len(b.steps)+1), Index: len(b.steps),

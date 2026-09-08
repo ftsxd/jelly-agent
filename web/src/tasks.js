@@ -254,3 +254,30 @@ export async function loadTaskList(gate, fetch, sink) {
   sink.data(r.value)
   return true
 }
+
+/**
+ * handoverAt says whether a step is where the work changed hands.
+ *
+ * A delegated run's most interesting moment is the handover — the coordinator
+ * decided this was not its job — and it left no mark on the flow: every card
+ * looked the same and the agent's name was buried in the step detail, one
+ * click away. This surfaces it on the card that starts the new agent's work.
+ *
+ * Answered by comparing with the previous step rather than from the transfer
+ * frame, because a transfer produces no step of its own (it does no work), and
+ * inventing one would put an empty box in a flow that is meant to read as what
+ * actually happened.
+ */
+export function handoverAt(steps, index) {
+  const step = (steps || [])[index]
+  if (!step?.agent) return ''
+  const prev = index > 0 ? steps[index - 1] : null
+  // The first step names its agent too, when there is more than one in play:
+  // otherwise a run that delegates immediately shows no agent anywhere.
+  if (!prev) return anyOtherAgent(steps, step.agent) ? step.agent : ''
+  return prev.agent && prev.agent !== step.agent ? step.agent : ''
+}
+
+function anyOtherAgent(steps, agent) {
+  return (steps || []).some((s) => s.agent && s.agent !== agent)
+}

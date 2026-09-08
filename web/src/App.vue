@@ -72,6 +72,40 @@ async function logout() {
   authenticated.value = false
   mustChange.value = false
 }
+
+// 平时改密码。以前只有首次登录被强制改密时才有这个表单，之后界面上就再没有
+// 入口了——端点一直在，能到达它的只有命令行。
+const changing = ref(false)
+const changeDone = ref('')
+
+function openChange() {
+  password.value = ''
+  newPassword.value = ''
+  confirmPassword.value = ''
+  loginError.value = ''
+  changeDone.value = ''
+  changing.value = true
+}
+
+async function submitChange() {
+  loginError.value = ''
+  if (newPassword.value !== confirmPassword.value) {
+    loginError.value = '两次输入的新密码不一致'
+    return
+  }
+  try {
+    await api.changePassword(password.value, newPassword.value)
+    password.value = ''
+    newPassword.value = ''
+    confirmPassword.value = ''
+    changing.value = false
+    // 说一声改成功了。静默关闭会让人不确定到底有没有生效，然后再改一遍。
+    changeDone.value = '密码已更新'
+    setTimeout(() => { changeDone.value = '' }, 4000)
+  } catch (err) {
+    loginError.value = err.message
+  }
+}
 </script>
 
 <template>
@@ -163,9 +197,31 @@ async function logout() {
           <span class="mono">{{ online ? '已连接' : '离线' }}</span>
         </div>
         <span v-if="health" class="mono dim ver">v{{ health.version }}</span>
+        <button class="logout" title="修改管理员密码" @click="openChange">改密</button>
         <button class="logout" title="退出管理员登录" @click="logout">退出</button>
       </div>
+      <div v-if="changeDone" class="pw-done">{{ changeDone }}</div>
     </aside>
+
+    <!-- 修改密码。做成浮层而不是塞进侧栏：三个输入框在 200px 宽的栏里没法用。 -->
+    <div v-if="changing" class="pw-mask" @click.self="changing = false">
+      <form class="auth-card pw-card" @submit.prevent="submitChange">
+        <h1>修改管理员密码</h1>
+        <p class="dim">改完之后当前登录仍然有效；其他设备上的会话不受影响。</p>
+        <label>当前密码<input v-model="password" class="input" type="password"
+                          autocomplete="current-password" required /></label>
+        <label>新密码<input v-model="newPassword" class="input" type="password"
+                        autocomplete="new-password" minlength="12" required /></label>
+        <label>确认新密码<input v-model="confirmPassword" class="input" type="password"
+                          autocomplete="new-password" minlength="12" required /></label>
+        <p class="dim tiny">至少 12 个字符。</p>
+        <p v-if="loginError" class="auth-error">{{ loginError }}</p>
+        <div class="pw-actions">
+          <button class="btn" type="button" @click="changing = false">取消</button>
+          <button class="btn btn-primary" type="submit">保存</button>
+        </div>
+      </form>
+    </div>
 
     <main class="content">
       <RouterView v-slot="{ Component }">
@@ -348,6 +404,11 @@ async function logout() {
 .auth-brand h1 {
   color: var(--text);
 }
+.pw-mask { position: fixed; inset: 0; z-index: 50; display: grid; place-items: center;
+           background: rgba(0, 0, 0, 0.35); padding: var(--sp-4); }
+.pw-card { width: min(420px, 100%); margin: 0; }
+.pw-actions { display: flex; justify-content: flex-end; gap: var(--sp-2); }
+.pw-done { padding: var(--sp-2) var(--sp-3); font-size: 12px; color: var(--accent); }
 .auth-card h1 { margin: 0; font-size: 20px; }
 .auth-card p { margin: 0; line-height: 1.6; }
 .auth-card label { display: grid; gap: var(--sp-2); font-size: 13px; color: var(--text-dim); }

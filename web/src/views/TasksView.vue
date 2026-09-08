@@ -26,9 +26,9 @@ import { absTime, relTime } from '../time'
 import { fmtBytes, prettyJSON } from '../format'
 import { renderMarkdown } from '../markdown'
 import {
-  anyLive, artifactState, artifactsOfStep, emptyReason, isLive, loadTaskList,
-  needsAttention, resultOf, selectionStore, statusOf, stepOfArtifact,
-  stepSummary, toggleStep, typeLabel,
+  anyLive, artifactState, artifactsOfStep, emptyReason, handoverAt, isLive,
+  loadTaskList, needsAttention, resultOf, selectionStore, statusOf,
+  stepOfArtifact, stepSummary, toggleStep, typeLabel,
 } from '../tasks'
 
 const router = useRouter()
@@ -410,7 +410,7 @@ function continueChat(id) {
             </div>
             <ol v-if="(detail.steps || []).length" class="steps">
               <li
-                v-for="s in detail.steps"
+                v-for="(s, i) in detail.steps"
                 :key="s.id"
                 class="step"
                 :class="{ on: selectedStep?.id === s.id, ['s-' + statusOf(s.status).tone]: true }"
@@ -421,6 +421,11 @@ function continueChat(id) {
                 @keydown.enter="pickStep(s)"
               >
                 <span class="step-n mono">{{ String(s.index + 1).padStart(2, '0') }}</span>
+                <!-- 换手：协调者判断这件事不归自己做的那一刻。转交本身不产生
+                     步骤（它不干活），所以标在接手方的第一张卡上。 -->
+                <span v-if="handoverAt(detail.steps, i)" class="step-agent">
+                  <Icon name="bot" :size="11" /> {{ handoverAt(detail.steps, i) }}
+                </span>
                 <span class="step-label">{{ s.label }}</span>
                 <span class="step-status">
                   <Icon :name="statusOf(s.status).icon" :size="11" />
@@ -597,7 +602,13 @@ function continueChat(id) {
 .body { flex: 1; display: grid; grid-template-columns: 320px 1fr; overflow: hidden; }
 .list { border-right: 1px solid var(--border); overflow-y: auto; padding: var(--sp-3);
         display: flex; flex-direction: column; gap: var(--sp-2); }
-.detail { overflow-y: auto; padding: var(--sp-5); display: flex; flex-direction: column; gap: var(--sp-4); }
+.detail { overflow-y: auto; padding: var(--sp-5); display: flex; flex-direction: column; gap: var(--sp-4);
+          /* 没有这一行，横向滚动永远不会发生。grid item 的 min-width 默认是
+             auto，也就是「不小于内容的最小宽度」，而流程条里的卡片是
+             flex: 0 0 auto、不可收缩的，于是整条的宽度成了这一栏的下限：
+             栏被撑破、后面的步骤被裁掉，.steps 上的 overflow-x 根本没机会
+             生效。 */
+          min-width: 0; }
 
 .task { display: flex; flex-direction: column; gap: var(--sp-2); padding: var(--sp-3);
         border: 1px solid var(--border); border-radius: var(--radius-sm);
@@ -631,9 +642,14 @@ function continueChat(id) {
 .block-head { display: flex; align-items: baseline; justify-content: space-between; }
 .block-title { font-size: 13px; font-weight: 600; }
 
+.block { min-width: 0; }
 .steps { display: flex; gap: var(--sp-2); list-style: none; margin: 0; padding: 0;
-         overflow-x: auto; padding-bottom: var(--sp-1); }
-.step { flex: 0 0 auto; min-width: 148px; display: flex; flex-direction: column; gap: 4px;
+         overflow-x: auto; overscroll-behavior-x: contain;
+         /* 滚动条常驻可见，否则触控板用户看不出这里还能往右滑。 */
+         scrollbar-width: thin;
+         padding-bottom: var(--sp-2); }
+.step { flex: 0 0 auto; min-width: 148px; max-width: 240px;
+        display: flex; flex-direction: column; gap: 4px;
         padding: var(--sp-3); border: 1px solid var(--border); border-radius: var(--radius-sm);
         background: var(--surface); cursor: pointer; }
 .step:hover { border-color: var(--border-strong); }
@@ -686,7 +702,12 @@ function continueChat(id) {
 .sd-name { font-size: 13px; font-weight: 600; }
 .sd-note { font-size: 13px; color: var(--text-dim); }
 .step-sum { display: -webkit-box; -webkit-line-clamp: 2; line-clamp: 2;
-            -webkit-box-orient: vertical; overflow: hidden; }
+            -webkit-box-orient: vertical; overflow: hidden;
+            /* 卡片有 max-width，长句子必须能断行，否则一个不换行的
+               URL 或指标名照样把卡片顶宽。 */
+            overflow-wrap: anywhere; }
+.step-agent { font-size: 11px; color: var(--primary); display: inline-flex;
+              align-items: center; gap: 3px; }
 .call { display: flex; flex-direction: column; gap: 4px; padding: var(--sp-2) 0;
         border-top: 1px solid var(--hairline); }
 .call-head { display: flex; align-items: center; gap: var(--sp-2); }

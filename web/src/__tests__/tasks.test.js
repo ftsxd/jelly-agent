@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import {
-  anyLive, artifactState, artifactsOfStep, emptyReason, isLive, loadTaskList,
-  needsAttention, resultKey, resultOf, selectionStore, statusOf, stepOfArtifact,
-  stepSummary, taskOfSession, toggleStep, typeLabel,
+  anyLive, artifactState, artifactsOfStep, emptyReason, handoverAt, isLive,
+  loadTaskList, needsAttention, resultKey, resultOf, selectionStore, statusOf,
+  stepOfArtifact, stepSummary, taskOfSession, toggleStep, typeLabel,
 } from '../tasks'
 import { latestOnly } from '../latest'
 
@@ -305,5 +305,44 @@ describe('loadTaskList', () => {
     expect(seen.errors).toEqual(['后端挂了'])
     expect(seen.data).toEqual([])
     expect(seen.loading).toEqual([true, false])
+  })
+})
+
+describe('handoverAt', () => {
+  // A delegated run's most interesting moment is the handover, and it left no
+  // mark on the flow: every card looked the same and the agent's name was
+  // buried in the step detail, one click away.
+  const steps = [
+    { id: 's1', agent: 'OrchestrationAgent' },
+    { id: 's2', agent: 'MetricsQuery' },
+    { id: 's3', agent: 'MetricsQuery' },
+    { id: 's4', agent: 'OrchestrationAgent' },
+  ]
+
+  it('marks the card where the work changed hands', () => {
+    expect(handoverAt(steps, 1)).toBe('MetricsQuery')
+    expect(handoverAt(steps, 3)).toBe('OrchestrationAgent')
+  })
+
+  it('says nothing while the same agent keeps working', () => {
+    expect(handoverAt(steps, 2)).toBe('')
+  })
+
+  it('names the first agent too, so a run that delegates at once still shows one', () => {
+    expect(handoverAt(steps, 0)).toBe('OrchestrationAgent')
+  })
+
+  // A single-agent run has no handover to report, and labelling every card
+  // with the same name would be noise.
+  it('stays quiet in a single-agent run', () => {
+    const solo = [{ id: 's1', agent: 'root' }, { id: 's2', agent: 'root' }]
+    expect(handoverAt(solo, 0)).toBe('')
+    expect(handoverAt(solo, 1)).toBe('')
+  })
+
+  it('survives steps with no agent at all', () => {
+    expect(handoverAt([{ id: 's1' }], 0)).toBe('')
+    expect(handoverAt([], 0)).toBe('')
+    expect(handoverAt(undefined, 0)).toBe('')
   })
 })

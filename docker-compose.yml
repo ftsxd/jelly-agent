@@ -1,3 +1,7 @@
+# 应用本身。可观测后端在下面的 obs profile 里，默认不启动。
+#
+#   docker compose up -d                    只跑 agent（连你已有的 collector）
+#   docker compose --profile obs up -d      顺带起一套本地的 traces/metrics/logs
 services:
   jelly-agent:
     image: jelly-agent:local
@@ -6,4 +10,26 @@ services:
       - "6185:6185"
     volumes:
       - ./data:/data
+    environment:
+      # config.yaml 里的 ${OTEL_ENDPOINT} 会被展开成这个值，所以同一份配置
+      # 在宿主机上指向你的 collector、在 compose 里指向下面那个容器，不用改文件。
+      # 详见 tracing.endpoint 的写法（docs/observability.md）。
+      OTEL_ENDPOINT: ${OTEL_ENDPOINT:-lgtm:4317}
+    restart: unless-stopped
+
+  # traces + metrics + logs 一个容器搞定：Tempo / Prometheus / Loki + Grafana。
+  #
+  # 选它而不是 Jaeger all-in-one，是因为 tracing.capture_content 打开后，
+  # 提示词与回复是走 OTel 的 *logs* 通道发出去的（gen_ai.system.message /
+  # gen_ai.choice），后端没有 logs pipeline 就会拒收，表现为 stderr 上不断
+  # 重试的导出错误。Jaeger 只收 traces。
+  lgtm:
+    image: grafana/otel-lgtm:latest
+    profiles: ["obs"]
+    ports:
+      - "3000:3000"   # Grafana，数据源已预置好
+      - "4317:4317"   # OTLP gRPC —— tracing.protocol: grpc 对应这个
+      - "4318:4318"   # OTLP HTTP —— tracing.protocol: http 对应这个
+    volumes:
+      - ./data/lgtm:/data
     restart: unless-stopped

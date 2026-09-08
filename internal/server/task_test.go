@@ -635,3 +635,27 @@ func TestAnAnswerClearsOnlyItsOwnRunsFailure(t *testing.T) {
 // asks only when nothing cheaper has settled the question.
 func noRecords() bool   { return false }
 func someRecords() bool { return true }
+
+// 协调者跑一步、专家跑同一类的一步，不能并成一条：步骤是挂在某个 agent 名下
+// 展示的，并了就会把一个人的活记在另一个人头上，而换手——委派运行里最值得看
+// 的那一刻——一点痕迹都不留。
+func TestAStepDoesNotSpanTwoAgents(t *testing.T) {
+	callBy := func(agent, callID string, ts int64) map[string]any {
+		return fr(frameToolCall, "round", "r1", "call_id", callID,
+			"name", "query_instant", "ts", ts, "agent", agent,
+			"args", map[string]any{})
+	}
+	got := foldTasks("web-1", []map[string]any{
+		callBy("OrchestrationAgent", "c1", 10),
+		result("r1", "c1", true, 11, map[string]any{"summary": "ok"}),
+		callBy("MetricsQuery", "c2", 20),
+		result("r1", "c2", true, 21, map[string]any{"summary": "ok"}),
+	}, infos(nil), nil)[0]
+
+	if len(got.Steps) != 2 {
+		t.Fatalf("步骤 = %d 条，两个 agent 的活被并成一条了: %v", len(got.Steps), labels(got))
+	}
+	if got.Steps[0].Agent != "OrchestrationAgent" || got.Steps[1].Agent != "MetricsQuery" {
+		t.Errorf("归属错了: %q / %q", got.Steps[0].Agent, got.Steps[1].Agent)
+	}
+}
