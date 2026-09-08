@@ -30,6 +30,50 @@ async function load() {
   }
 }
 
+// Which agent's prompt is on screen. Empty means "no agent selected", which is
+// what a single-agent turn runs with; the server falls back to default_agent
+// on first load so the page opens on what a turn would actually use.
+const agentView = ref(null)
+async function pickAgent(name) {
+  agentView.value = name
+  editingInstruction.value = false
+  try {
+    prompt.value = await api.prompt('', name)
+  } catch (e) {
+    error.value = e.message
+  }
+}
+
+// Editing the base instruction. Only the base — an agent's own belongs to that
+// agent and is edited on the Agent page, which is what the template says when
+// the shown text is one.
+const editingInstruction = ref(false)
+const instructionDraft = ref('')
+const savingInstruction = ref(false)
+const instructionError = ref('')
+
+function startEditInstruction(text) {
+  instructionDraft.value = text || ''
+  instructionError.value = ''
+  editingInstruction.value = true
+  openPart.value = '指令'
+}
+
+async function saveInstruction() {
+  if (savingInstruction.value) return
+  savingInstruction.value = true
+  instructionError.value = ''
+  try {
+    await api.saveInstruction(instructionDraft.value)
+    editingInstruction.value = false
+    prompt.value = await api.prompt('', agentView.value ?? '')
+  } catch (e) {
+    instructionError.value = e.message
+  } finally {
+    savingInstruction.value = false
+  }
+}
+
 const promptParts = computed(() => (prompt.value?.parts || []).filter((p) => !p.assembled))
 const assembled = computed(() => (prompt.value?.parts || []).find((p) => p.assembled) || null)
 // Truncating a JSON result mid-structure leaves the model unable to use it,
@@ -267,6 +311,17 @@ function errKinds(t) {
             每次模型调用都会重发这部分，与用户问什么无关。它不出现在 Provider 报的单个
             输入 token 数里，所以一次运行贵得莫名时，通常先看这里。
           </p>
+          <!-- 显示的是哪个 agent 的提示词。以前不管跑的是谁都显示内置基础指令，
+               而带协调者的部署根本不会发那一段。 -->
+          <div v-if="prompt.agents?.length" class="pm-agent">
+            <label class="muted tiny">查看</label>
+            <select class="input sel" :value="prompt.agent || ''" @change="pickAgent($event.target.value)">
+              <option value="">基础指令（未指定 agent 时）</option>
+              <option v-for="a in prompt.agents" :key="a" :value="a">{{ a }}</option>
+            </select>
+            <span v-if="prompt.own" class="muted tiny">这个 agent 有自己的指令</span>
+            <span v-else-if="prompt.agent" class="muted tiny">沿用基础指令</span>
+          </div>
           <div class="pm-totals">
             <span>系统指令 <b class="mono">{{ fmt(prompt.totals.system_tokens) }}</b></span>
             <span>工具描述 <b class="mono">{{ fmt(prompt.totals.tools_tokens) }}</b></span>
@@ -279,9 +334,26 @@ function errKinds(t) {
               <div v-for="p in promptParts" :key="p.name" class="pm-part">
                 <button class="pm-head" @click="openPart = openPart === p.name ? '' : p.name">
                   <span class="pm-name">{{ p.name }}</span>
+                  <!-- 只有基础指令能在这页改。某个 agent 自己的指令属于那个
+                       agent，在 Agent 页面改；在这里改会让人以为改的是眼前
+                       这段，其实动的是别的地方。 -->
+                  <button v-if="p.name === '指令' && !prompt.own" class="btn btn-mini"
+                          @click.stop="startEditInstruction(p.text)">编辑</button>
+                  <span v-else-if="p.name === '指令'" class="muted tiny">在 Agent 页面改</span>
                   <span class="mono dim">{{ fmt(p.tokens) }} tok</span>
                 </button>
-                <pre v-if="openPart === p.name" class="mono pm-text">{{ p.text }}</pre>
+                <template v-if="p.name === '指令' && editingInstruction">
+                  <textarea v-model="instructionDraft" class="textarea mono pm-edit" rows="8"
+                            placeholder="留空恢复内置默认" />
+                  <div class="pm-actions">
+                    <button class="btn btn-mini" @click="editingInstruction = false" :disabled="savingInstruction">取消</button>
+                    <button class="btn btn-mini btn-primary" @click="saveInstruction" :disabled="savingInstruction">
+                      <span v-if="savingInstruction" class="spinner" /> 保存
+                    </button>
+                  </div>
+                  <div v-if="instructionError" class="error-bar">{{ instructionError }}</div>
+                </template>
+                <pre v-else-if="openPart === p.name" class="mono pm-text">{{ p.text }}</pre>
               </div>
               <div v-if="assembled" class="pm-part">
                 <button class="pm-head" @click="openPart = openPart === '__all' ? '' : '__all'">
@@ -705,6 +777,12 @@ function errKinds(t) {
   font-size: 12px;
   line-height: 1.6;
 }
+.pm-agent { display: flex; align-items: center; gap: var(--sp-2);
+            margin: var(--sp-2) 0 var(--sp-3); }
+.pm-agent .sel { width: auto; min-width: 200px; height: 28px; padding: 2px var(--sp-2); }
+.pm-edit { width: 100%; margin-top: var(--sp-2); min-height: 140px; }
+.pm-actions { display: flex; justify-content: flex-end; gap: var(--sp-2);
+              margin-top: var(--sp-2); }
 .pm-totals {
   display: flex;
   flex-wrap: wrap;

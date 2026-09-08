@@ -163,6 +163,17 @@ type Config struct {
 	Platforms []PlatformBot                `mapstructure:"platforms" yaml:"platforms,omitempty"`
 	Schedules []ScheduleTask               `mapstructure:"schedules" yaml:"schedules,omitempty"`
 
+	// Instruction replaces the built-in base system instruction.
+	//
+	// It is the instruction every agent starts from: the one a named agent
+	// inherits when its own is empty, and the only one in single-agent mode.
+	// Empty ⇒ engine.RootInstruction, so an untouched deployment is unchanged.
+	//
+	// Editable because the built-in text describes a general assistant, and a
+	// deployment that is an ops-diagnosis agent needs to say so — rebuilding a
+	// binary to change a sentence in the prompt is not a workflow.
+	Instruction string `mapstructure:"instruction" yaml:"instruction,omitempty"`
+
 	// DefaultAgent names the agent the CLI/web run when none is specified. Empty
 	// ⇒ the built-in single "root" agent (backward compatible).
 	DefaultAgent string `mapstructure:"default_agent" yaml:"default_agent,omitempty"`
@@ -409,8 +420,9 @@ func Save(c *Config, path string) error {
 		Schedules       []ScheduleTask               `yaml:"schedules,omitempty"`
 		DefaultAgent    string                       `yaml:"default_agent,omitempty"`
 		Agents          []AgentDef                   `yaml:"agents,omitempty"`
+		Instruction     string                       `yaml:"instruction,omitempty"`
 	}
-	p := payload{DefaultProvider: c.DefaultProvider, Providers: c.Providers, MCP: c.MCP, Platforms: c.Platforms, Schedules: c.Schedules, SkillVars: c.SkillVars, DefaultAgent: c.DefaultAgent, Agents: c.Agents}
+	p := payload{Instruction: c.Instruction, DefaultProvider: c.DefaultProvider, Providers: c.Providers, MCP: c.MCP, Platforms: c.Platforms, Schedules: c.Schedules, SkillVars: c.SkillVars, DefaultAgent: c.DefaultAgent, Agents: c.Agents}
 	if c.Web != (Web{}) {
 		web := c.Web
 		p.Web = &web

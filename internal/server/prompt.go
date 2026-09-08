@@ -17,6 +17,7 @@ package server
 
 import (
 	"net/http"
+	"strings"
 
 	"github.com/jelly-agent/jelly-agent/internal/config"
 
@@ -48,7 +49,14 @@ type promptToolDTO struct {
 // handlePrompt reports the fixed part of the prompt and what it costs.
 func (s *Server) handlePrompt(w http.ResponseWriter, r *http.Request) {
 	eng := s.engine()
-	parts, err := eng.SystemPrompt(r.URL.Query().Get("provider"))
+	// Which agent's prompt. Empty falls back to the configured default, so the
+	// page opens on what a turn would actually use rather than on the built-in
+	// base that a deployment with a coordinator never sends.
+	agent := strings.TrimSpace(r.URL.Query().Get("agent"))
+	if agent == "" {
+		agent = eng.Config().DefaultAgent
+	}
+	parts, err := eng.SystemPrompt(r.URL.Query().Get("provider"), agent)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -90,9 +98,20 @@ func (s *Server) handlePrompt(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
+	// Which agent this is the prompt for, and whether the text shown is that
+	// agent's own or the base it inherits. The page offers to edit it, and
+	// those two edit different things.
+	agents := make([]string, 0, len(eng.Config().Agents))
+	for _, a := range eng.Config().Agents {
+		agents = append(agents, a.Name)
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"parts": out,
-		"tools": toolsOut,
+		"parts":         out,
+		"tools":         toolsOut,
+		"agent":         agent,
+		"agents":        agents,
+		"own":           agent != "" && eng.InstructionFor(agent) != eng.BaseInstruction(),
+		"base_editable": true,
 		"totals": map[string]int{
 			"system_tokens":  systemTokens,
 			"tools_tokens":   toolsTokens,
@@ -129,4 +148,44 @@ func historyBudget(cfg *config.Config) int {
 		return 0
 	}
 	return *cfg.History.MaxTokens
+}
+
+// promptInput sets the base system instruction.
+type promptInput struct {
+	Instruction string `json:"instruction"`
+}
+
+// handleSaveInstruction rewrites the base system instruction in config.
+//
+// The base one, not an agent's: an agent's lives on the agent and is edited on
+// the Agent page. This is the text every agent starts from and the only one a
+// single-agent deployment ever uses — the built-in describes a general
+// assistant, and a deployment that is an ops-diagnosis agent has to be able to
+// say so without rebuilding a binary.
+//
+// An empty value clears the override and restores the built-in default, which
+// is the only way back once something has been written.
+func (s *Server) handleSaveInstruction(w http.ResponseWriter, r *http.Request) {
+	var in promptInput
+	if err := decodeJSON(r, &in); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	path, err := s.writeTargetPath()
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	raw, err := loadRawOrEmpty(path)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	raw.Instruction = strings.TrimSpace(in.Instruction)
+	if err := s.persist(w, raw, path); err != nil {
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok": true, "saved_to": path, "instruction": s.engine().BaseInstruction(),
+	})
 }

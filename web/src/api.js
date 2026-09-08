@@ -66,7 +66,17 @@ export const api = {
   // live stream sends, so replay and live share one reducer.
   // The fixed part of every prompt and what it costs. Answers "what do we
   // inject?", which the per-turn token figure cannot.
-  prompt: (provider = '') => jget(`/api/prompt${provider ? `?provider=${encodeURIComponent(provider)}` : ''}`),
+  // agent is which agent's prompt to show; '' is the no-agent (single-agent)
+  // case and the server falls back to default_agent when the key is absent.
+  prompt: (provider = '', agent = null) => {
+    const q = new URLSearchParams()
+    if (provider) q.set('provider', provider)
+    if (agent !== null) q.set('agent', agent)
+    const s = q.toString()
+    return jget(`/api/prompt${s ? `?${s}` : ''}`)
+  },
+  // The base instruction only. An agent's own is saved through saveAgent.
+  saveInstruction: (instruction) => jput('/api/prompt/instruction', { instruction }),
   sessionTimeline: (id, signal) => jget(`/api/sessions/${encodeURIComponent(id)}/timeline`, signal),
 
   // The task centre. A task is one invocation, so its id is the session and

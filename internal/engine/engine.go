@@ -63,8 +63,11 @@ const (
 	AppName = "jelly-agent"
 	UserID  = "local-user"
 
-	// RootInstruction is the static base instruction. L1 core memory is
-	// prepended to it each turn via the InstructionProvider (PLAN §10.1).
+	// RootInstruction is the built-in base instruction, used when the config
+	// does not supply one. L1 core memory is prepended to it each turn via the
+	// InstructionProvider (PLAN §10.1). Read it through BaseInstruction, never
+	// directly — the whole point of the config field is that a deployment can
+	// say what it actually is instead of "一个用 Go + ADK-Go 构建的助手".
 	RootInstruction = "你是 jelly-agent，一个用 Go + ADK-Go 构建的助手。" +
 		"需要实时或外部信息时调用 web_search 工具，再用中文简洁作答。" +
 		"当用户表达偏好、身份或重要约定，值得跨会话记住时，调用 remember 工具；" +
@@ -365,7 +368,7 @@ func (e *Engine) undeclaredFallback() gateway.Fallback {
 // it. Rebuilding it in the handler would mean two functions that have to agree
 // about what the model sees, and the one that answers "what do we inject?"
 // would be the one nobody notices drifting.
-func (e *Engine) SystemPrompt(provider string) (parts []PromptPart, err error) {
+func (e *Engine) SystemPrompt(provider, agent string) (parts []PromptPart, err error) {
 	core, err := e.Core()
 	if err != nil {
 		return nil, err
@@ -373,7 +376,14 @@ func (e *Engine) SystemPrompt(provider string) (parts []PromptPart, err error) {
 	mem, user := core.Snapshot()
 	allow := e.cfg.Skills.AllowScripts
 
-	parts = append(parts, PromptPart{Name: "指令", Text: RootInstruction})
+	// The instruction of the agent being asked about, not the base one.
+	//
+	// This page answers "what do we inject", and it used to answer for the
+	// built-in constant whatever was actually running. A deployment with a
+	// coordinator that has its own instruction was shown a prompt the model
+	// never receives, under a heading that says 发给模型的原文.
+	instruction := e.InstructionFor(agent)
+	parts = append(parts, PromptPart{Name: "指令", Text: instruction})
 	// Listed in the order it is injected, so the page reads the way the model
 	// receives it. The environment block is first because it is what the rest
 	// is reasoned against — and because an operator looking at this page is
@@ -393,9 +403,39 @@ func (e *Engine) SystemPrompt(provider string) (parts []PromptPart, err error) {
 			parts = append(parts, PromptPart{Name: "技能目录", Text: cat})
 		}
 	}
-	full := e.systemInstruction(core, RootInstruction, allow)
+	full := e.systemInstruction(core, instruction, allow)
 	parts = append(parts, PromptPart{Name: "完整拼装", Text: full, Assembled: true})
 	return parts, nil
+}
+
+// BaseInstruction is the instruction every agent starts from: the configured
+// one, or the built-in default when the config says nothing.
+func (e *Engine) BaseInstruction() string {
+	if e.cfg != nil {
+		if s := strings.TrimSpace(e.cfg.Instruction); s != "" {
+			return s
+		}
+	}
+	return RootInstruction
+}
+
+// InstructionFor is the instruction a named agent actually runs with: its own
+// when it declares one, the base otherwise. An unknown or empty name is
+// single-agent mode, which is the base.
+func (e *Engine) InstructionFor(agent string) string {
+	agent = strings.TrimSpace(agent)
+	if agent != "" && e.cfg != nil {
+		for _, def := range e.cfg.Agents {
+			if def.Name != agent {
+				continue
+			}
+			if s := strings.TrimSpace(def.Instruction); s != "" {
+				return s
+			}
+			break
+		}
+	}
+	return e.BaseInstruction()
 }
 
 // PromptPart is one contribution to the system instruction.
@@ -967,7 +1007,7 @@ func (e *Engine) buildAgentTree(name string, core *memory.Core, withSearch bool,
 
 	instruction := def.Instruction
 	if strings.TrimSpace(instruction) == "" {
-		instruction = RootInstruction
+		instruction = e.BaseInstruction()
 	}
 	desc := def.Description
 	if desc == "" {
@@ -1000,7 +1040,7 @@ func (e *Engine) BuildAgentWith(provider string, mcpNames []string) (agent.Agent
 	}
 
 	a, prov, err := e.buildNode("root", "jelly-agent root agent with web search and core memory.",
-		provider, RootInstruction, toolsets, nil, core, search != nil)
+		provider, e.BaseInstruction(), toolsets, nil, core, search != nil)
 	if err != nil {
 		if search != nil {
 			search.Close()
