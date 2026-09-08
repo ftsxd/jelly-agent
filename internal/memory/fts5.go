@@ -11,11 +11,12 @@ import (
 	// Pure-Go SQLite driver (modernc.org/sqlite), registered as "sqlite".
 	// FTS5 (incl. the trigram tokenizer) is compiled in, so no CGO is needed —
 	// this keeps the single-binary deployment goal.
-	_ "github.com/glebarez/go-sqlite"
 
 	adkmemory "google.golang.org/adk/memory"
 	"google.golang.org/adk/session"
 	"google.golang.org/genai"
+
+	"github.com/jelly-agent/jelly-agent/internal/storage"
 )
 
 const (
@@ -53,27 +54,16 @@ type Search struct {
 var _ adkmemory.Service = (*Search)(nil)
 
 // NewSearch opens the FTS5 index on the shared state.db at dbPath, creating the
-// virtual table if needed. A non-positive topK falls back to the default. The
-// connection pool is capped at one connection so the per-connection PRAGMAs
-// (WAL + busy_timeout) hold for every query and coexist with the session
-// store's separate GORM connection to the same file. Call Close when done.
+// virtual table if needed. A non-positive topK falls back to the default.
+// Connection settings are internal/storage's — see there for why a handle on
+// this shared file needs them. Call Close when done.
 func NewSearch(dbPath string, topK int) (*Search, error) {
 	if topK <= 0 {
 		topK = defaultTopK
 	}
-	db, err := sql.Open("sqlite", dbPath)
+	db, err := storage.Open(dbPath)
 	if err != nil {
-		return nil, fmt.Errorf("open memory index %s: %w", dbPath, err)
-	}
-	// One connection keeps the PRAGMAs below effective for all queries.
-	db.SetMaxOpenConns(1)
-	// WAL lets our reader/writer coexist with the session store's connection;
-	// busy_timeout waits out brief write locks instead of erroring immediately.
-	for _, pragma := range []string{"PRAGMA journal_mode=WAL", "PRAGMA busy_timeout=5000"} {
-		if _, err := db.Exec(pragma); err != nil {
-			db.Close()
-			return nil, fmt.Errorf("set %q: %w", pragma, err)
-		}
+		return nil, err
 	}
 	if _, err := db.Exec(createFTS); err != nil {
 		db.Close()

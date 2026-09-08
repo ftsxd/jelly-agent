@@ -9,11 +9,11 @@ package schedule
 import (
 	"database/sql"
 	"fmt"
-	"os"
-	"path/filepath"
 	"time"
 
 	"github.com/jelly-agent/jelly-agent/internal/session"
+
+	"github.com/jelly-agent/jelly-agent/internal/storage"
 )
 
 // Run is one execution of a scheduled task.
@@ -57,24 +57,10 @@ CREATE TABLE IF NOT EXISTS schedule_runs (
 //
 // Same idiom as internal/record.migrate and internal/metrics.addMissingColumns.
 func migrate(db *sql.DB) error {
-	for _, col := range []struct{ name, ddl string }{
-		{"session_id", "ALTER TABLE schedule_runs ADD COLUMN session_id TEXT NOT NULL DEFAULT ''"},
-		{"invocation_id", "ALTER TABLE schedule_runs ADD COLUMN invocation_id TEXT NOT NULL DEFAULT ''"},
-	} {
-		var n int
-		if err := db.QueryRow(
-			`SELECT count(*) FROM pragma_table_info('schedule_runs') WHERE name = ?`, col.name,
-		).Scan(&n); err != nil {
-			return fmt.Errorf("schedule: inspect %s: %w", col.name, err)
-		}
-		if n > 0 {
-			continue
-		}
-		if _, err := db.Exec(col.ddl); err != nil {
-			return fmt.Errorf("schedule: add %s: %w", col.name, err)
-		}
-	}
-	return nil
+	return storage.EnsureColumns(db, "schedule_runs", []storage.Column{
+		{Name: "session_id", DDL: "ALTER TABLE schedule_runs ADD COLUMN session_id TEXT NOT NULL DEFAULT ''"},
+		{Name: "invocation_id", DDL: "ALTER TABLE schedule_runs ADD COLUMN invocation_id TEXT NOT NULL DEFAULT ''"},
+	})
 }
 
 // Record writes one finished run.
@@ -155,17 +141,17 @@ func open() (*sql.DB, error) {
 	if err != nil {
 		return nil, err
 	}
-	// Created rather than assumed: this store used to rely on some other
-	// component having made the directory first, which is true in a running
+	// storage.Open creates the parent directory: this store used to rely on
+	// some other component having made it first, which is true in a running
 	// server and false in anything that starts with only this package.
-	if dir := filepath.Dir(p); dir != "" {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			return nil, fmt.Errorf("schedule: create db dir: %w", err)
-		}
-	}
-	db, err := sql.Open("sqlite", p)
+	//
+	// It also gains the settings this opener never had. It was the one of the
+	// seven that set no PRAGMAs at all, so its connection to the shared
+	// state.db had no busy_timeout — a brief write lock from any other store
+	// failed a schedule write outright instead of waiting it out.
+	db, err := storage.Open(p)
 	if err != nil {
-		return nil, fmt.Errorf("open schedule db: %w", err)
+		return nil, fmt.Errorf("schedule: %w", err)
 	}
 	if _, err := db.Exec(schema); err != nil {
 		db.Close()

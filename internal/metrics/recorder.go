@@ -4,15 +4,14 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
 	"sync"
 	"time"
 
 	// Pure-Go SQLite driver, registered as "sqlite" — the same driver and the
 	// same state.db the session store and the FTS5 index already use, so this
 	// adds no new file and no new dependency.
-	_ "github.com/glebarez/go-sqlite"
+
+	"github.com/jelly-agent/jelly-agent/internal/storage"
 )
 
 // maxArgsChars bounds the stored argument JSON. Arguments are kept for
@@ -78,30 +77,9 @@ func NewRecorder(dbPath string) (*Recorder, error) {
 	if dbPath == "" {
 		return nil, fmt.Errorf("metrics: empty db path")
 	}
-	if dir := filepath.Dir(dbPath); dir != "" {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			return nil, fmt.Errorf("metrics: create db dir: %w", err)
-		}
-	}
-	db, err := sql.Open("sqlite", dbPath)
+	db, err := storage.Open(dbPath)
 	if err != nil {
-		return nil, fmt.Errorf("metrics: open %s: %w", dbPath, err)
-	}
-	// One writer at a time; the session store, the FTS5 index and the schedule
-	// store each hold their own handle on this same file, so keeping this pool
-	// at one connection avoids piling up writers.
-	db.SetMaxOpenConns(1)
-	// Same settings the other openers in this repo use: WAL lets this writer
-	// coexist with the session store's connection, and busy_timeout waits out a
-	// brief write lock instead of failing the insert outright. Without these,
-	// recording a tool call fails with "database is locked" whenever the
-	// session store happens to be flushing — losing exactly the rows a busy
-	// run produces.
-	for _, pragma := range []string{"PRAGMA journal_mode=WAL", "PRAGMA busy_timeout=5000"} {
-		if _, err := db.Exec(pragma); err != nil {
-			db.Close()
-			return nil, fmt.Errorf("metrics: %s: %w", pragma, err)
-		}
+		return nil, fmt.Errorf("metrics: %w", err)
 	}
 	if _, err := db.Exec(schema); err != nil {
 		db.Close()
@@ -122,26 +100,11 @@ func NewRecorder(dbPath string) (*Recorder, error) {
 // running fine. Each column is added separately and a duplicate-column error
 // is the expected outcome on an up-to-date database.
 func addMissingColumns(db *sql.DB) error {
-	for _, col := range []struct{ name, ddl string }{
-		{"evidence_id", "ALTER TABLE tool_calls ADD COLUMN evidence_id TEXT NOT NULL DEFAULT ''"},
-		{"replayed", "ALTER TABLE tool_calls ADD COLUMN replayed INTEGER NOT NULL DEFAULT 0"},
-		{"retrievable", "ALTER TABLE tool_calls ADD COLUMN retrievable INTEGER NOT NULL DEFAULT 0"},
-	} {
-		var count int
-		err := db.QueryRow(
-			`SELECT count(*) FROM pragma_table_info('tool_calls') WHERE name = ?`, col.name,
-		).Scan(&count)
-		if err != nil {
-			return fmt.Errorf("metrics: inspect column %s: %w", col.name, err)
-		}
-		if count > 0 {
-			continue
-		}
-		if _, err := db.Exec(col.ddl); err != nil {
-			return fmt.Errorf("metrics: add column %s: %w", col.name, err)
-		}
-	}
-	return nil
+	return storage.EnsureColumns(db, "tool_calls", []storage.Column{
+		{Name: "evidence_id", DDL: "ALTER TABLE tool_calls ADD COLUMN evidence_id TEXT NOT NULL DEFAULT ''"},
+		{Name: "replayed", DDL: "ALTER TABLE tool_calls ADD COLUMN replayed INTEGER NOT NULL DEFAULT 0"},
+		{Name: "retrievable", DDL: "ALTER TABLE tool_calls ADD COLUMN retrievable INTEGER NOT NULL DEFAULT 0"},
+	})
 }
 
 // Record appends one row. A nil Recorder is a no-op, so callers that failed to

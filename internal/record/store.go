@@ -42,9 +42,10 @@ import (
 	// register that name, and a second registration panics the process at
 	// init — which is what happened when this file first imported the other
 	// one.
-	_ "github.com/glebarez/go-sqlite"
 
 	"github.com/jelly-agent/jelly-agent/internal/ops"
+
+	"github.com/jelly-agent/jelly-agent/internal/storage"
 )
 
 // Upstream reports whether the tool had already shortened its own output.
@@ -204,24 +205,9 @@ func Open(dbPath string) (*Store, error) {
 			return nil, fmt.Errorf("record: create db dir: %w", err)
 		}
 	}
-	db, err := sql.Open("sqlite", dbPath)
+	db, err := storage.Open(dbPath)
 	if err != nil {
-		return nil, fmt.Errorf("record: open %s: %w", dbPath, err)
-	}
-	// Same settings as the other openers on this file: one writer, WAL so this
-	// handle coexists with the session store's, and a busy timeout so a brief
-	// write lock waits instead of failing. Unlike the metrics recorder, a
-	// failure here is not something to shrug off — see Put.
-	db.SetMaxOpenConns(1)
-	for _, pragma := range []string{
-		`PRAGMA journal_mode=WAL`,
-		`PRAGMA busy_timeout=5000`,
-		`PRAGMA synchronous=NORMAL`,
-	} {
-		if _, err := db.Exec(pragma); err != nil {
-			db.Close()
-			return nil, fmt.Errorf("record: %s: %w", pragma, err)
-		}
+		return nil, fmt.Errorf("record: %w", err)
 	}
 	if _, err := db.Exec(schema); err != nil {
 		db.Close()
@@ -248,22 +234,11 @@ func Open(dbPath string) (*Store, error) {
 // nothing, while a DROP COLUMN on a table holding real payloads is a rewrite
 // with no upside.
 func migrate(db *sql.DB) error {
-	for _, col := range []struct{ name, ddl string }{
-		{"seq", "ALTER TABLE tool_results ADD COLUMN seq INTEGER NOT NULL DEFAULT 0"},
-		{"expired_at", "ALTER TABLE tool_results ADD COLUMN expired_at TEXT NOT NULL DEFAULT ''"},
-	} {
-		var n int
-		if err := db.QueryRow(
-			`SELECT count(*) FROM pragma_table_info('tool_results') WHERE name = ?`, col.name,
-		).Scan(&n); err != nil {
-			return fmt.Errorf("inspect %s: %w", col.name, err)
-		}
-		if n > 0 {
-			continue
-		}
-		if _, err := db.Exec(col.ddl); err != nil {
-			return fmt.Errorf("add %s: %w", col.name, err)
-		}
+	if err := storage.EnsureColumns(db, "tool_results", []storage.Column{
+		{Name: "seq", DDL: "ALTER TABLE tool_results ADD COLUMN seq INTEGER NOT NULL DEFAULT 0"},
+		{Name: "expired_at", DDL: "ALTER TABLE tool_results ADD COLUMN expired_at TEXT NOT NULL DEFAULT ''"},
+	}); err != nil {
+		return err
 	}
 
 	// Rows written before seq existed all default to zero, which the unique

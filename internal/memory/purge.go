@@ -2,26 +2,15 @@ package memory
 
 import (
 	"database/sql"
-	"fmt"
 	"strings"
+
+	"github.com/jelly-agent/jelly-agent/internal/storage"
 )
 
 // openIndexDB opens the shared state.db for the L2 index maintenance helpers
-// below, mirroring NewSearch's connection settings (single conn + WAL +
-// busy_timeout). Caller closes.
+// below. Caller closes.
 func openIndexDB(dbPath string) (*sql.DB, error) {
-	db, err := sql.Open("sqlite", dbPath)
-	if err != nil {
-		return nil, fmt.Errorf("open memory index %s: %w", dbPath, err)
-	}
-	db.SetMaxOpenConns(1)
-	for _, pragma := range []string{"PRAGMA journal_mode=WAL", "PRAGMA busy_timeout=5000"} {
-		if _, err := db.Exec(pragma); err != nil {
-			db.Close()
-			return nil, fmt.Errorf("set %q: %w", pragma, err)
-		}
-	}
-	return db, nil
+	return storage.Open(dbPath)
 }
 
 // tolerateMissing returns nil when err is a "no such table" error — the L2 index

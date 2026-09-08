@@ -7,7 +7,8 @@ import (
 
 	// Pure-Go SQLite driver (modernc.org/sqlite), registered as "sqlite" — the
 	// same driver the memory index uses, so both can open the shared state.db.
-	_ "github.com/glebarez/go-sqlite"
+
+	"github.com/jelly-agent/jelly-agent/internal/storage"
 )
 
 // SessionMeta is a lightweight session row for the list UI: id, event count and
@@ -19,10 +20,10 @@ type SessionMeta struct {
 	LastUpdate int64
 }
 
-// openDB opens the shared state.db for short read queries, mirroring the
-// memory index's settings (single conn + WAL + busy_timeout) so it coexists with
-// the session store's writer. Used for both the read projections and the delete
-// helpers. An empty path resolves to DefaultDBPath. Caller closes the returned DB.
+// openDB opens the shared state.db for short read queries, on the settings
+// internal/storage applies so this handle coexists with the session store's
+// writer. Used for both the read projections and the delete helpers. An empty
+// path resolves to DefaultDBPath. Caller closes the returned DB.
 func openDB(dbPath string) (*sql.DB, error) {
 	if dbPath == "" {
 		p, err := DefaultDBPath()
@@ -31,18 +32,7 @@ func openDB(dbPath string) (*sql.DB, error) {
 		}
 		dbPath = p
 	}
-	db, err := sql.Open("sqlite", dbPath)
-	if err != nil {
-		return nil, fmt.Errorf("open session db %s: %w", dbPath, err)
-	}
-	db.SetMaxOpenConns(1)
-	for _, pragma := range []string{"PRAGMA journal_mode=WAL", "PRAGMA busy_timeout=5000"} {
-		if _, err := db.Exec(pragma); err != nil {
-			db.Close()
-			return nil, fmt.Errorf("set %q: %w", pragma, err)
-		}
-	}
-	return db, nil
+	return storage.Open(dbPath)
 }
 
 // ListPage returns one page of sessions for app/user, newest first (update_time

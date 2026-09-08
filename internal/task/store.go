@@ -15,12 +15,12 @@ package task
 import (
 	"database/sql"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/jelly-agent/jelly-agent/internal/session"
+
+	"github.com/jelly-agent/jelly-agent/internal/storage"
 )
 
 const schema = `
@@ -134,34 +134,9 @@ func open(dbPath string) (*sql.DB, error) {
 			return nil, err
 		}
 	}
-	if dir := filepath.Dir(p); dir != "" {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			return nil, fmt.Errorf("task: create db dir: %w", err)
-		}
-	}
-	db, err := sql.Open("sqlite", p)
+	db, err := storage.Open(p)
 	if err != nil {
-		return nil, fmt.Errorf("task: open db: %w", err)
-	}
-	// The same settings every other opener on this file uses, and for the same
-	// reason: this database is shared with the session store, the delivery
-	// store and the metrics recorder, all of which are writing while a turn
-	// runs. Without WAL a reader blocks the writer; without a busy timeout a
-	// brief write lock fails the call outright, and the call here is the one
-	// that records which task a run belongs to — losing it silently splits a
-	// continuation off into a task of its own. One connection, because a
-	// second one would queue behind the first for no gain on a file this
-	// small.
-	db.SetMaxOpenConns(1)
-	for _, pragma := range []string{
-		`PRAGMA journal_mode=WAL`,
-		`PRAGMA busy_timeout=5000`,
-		`PRAGMA synchronous=NORMAL`,
-	} {
-		if _, err := db.Exec(pragma); err != nil {
-			db.Close()
-			return nil, fmt.Errorf("task: %s: %w", pragma, err)
-		}
+		return nil, fmt.Errorf("task: %w", err)
 	}
 	if _, err := db.Exec(schema); err != nil {
 		db.Close()
