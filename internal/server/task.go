@@ -447,15 +447,22 @@ func foldTasks(sessionID string, frames []map[string]any, infoOf func(string) To
 			}
 
 		case frameText:
-			// Sub-agent prose is part of the work, not the conclusion.
-			if branch, _ := f["branch"].(string); branch != "" {
-				continue
-			}
 			text, _ := f["text"].(string)
 			if strings.TrimSpace(text) == "" {
 				continue
 			}
 			final, _ := f["final"].(bool)
+			// Depth used to decide this: root-level text was the conclusion,
+			// anything from a sub-agent was working notes. That holds right up
+			// until a coordinator delegates and then says nothing more, which
+			// is the normal shape of one — transfer_to_agent hands the turn
+			// over and the specialist's reply IS what the user received. The
+			// task then had no reply at all and no 形成结论 step, while the
+			// answer sat in the timeline looking like a note.
+			//
+			// So the server's own final flag decides instead, at any depth.
+			// Narration is not marked final, so the split it was protecting —
+			// notes stay in their step, conclusions become one — is intact.
 			if !final {
 				// Narration: the model said what it was about to do and then
 				// did it. It belongs to the step it introduced, and it must

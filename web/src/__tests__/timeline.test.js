@@ -378,3 +378,66 @@ describe('缓存指标', () => {
     expect(s.usage.cached).toBe(4480)
   })
 })
+
+// A coordinator that delegates and then says nothing more is the normal shape
+// of one: transfer_to_agent hands the turn over and the specialist's reply is
+// what the user received. Depth alone said "no root-level text, so no answer",
+// and the bubble did not render — the reply sat in the timeline looking like a
+// working note, and the turn ended on a token count.
+describe('finalAnswer with a delegating coordinator', () => {
+  const run = (frames) => {
+    const s = emptyTimeline()
+    for (const f of frames) applyFrame(s, f)
+    return s
+  }
+
+  it('takes the sub-agent reply when the root never spoke', () => {
+    const s = run([
+      { type: 'agent_transfer', from: 'OrchestrationAgent', to: 'MetricsQuery', ts: 1 },
+      { type: 'text', text: '让我确认有哪些指标。', agent: 'MetricsQuery',
+        branch: 'OrchestrationAgent.MetricsQuery', round: 'r1', final: false, ts: 2 },
+      { type: 'tool_call', name: 'query_instant', call_id: 'c1', agent: 'MetricsQuery',
+        branch: 'OrchestrationAgent.MetricsQuery', round: 'r1', ts: 3 },
+      { type: 'tool_result', call_id: 'c1', ok: true, response: { n: 1 }, ts: 4 },
+      { type: 'text', text: '近 3 天 CPU 峰值 28.7%。', agent: 'MetricsQuery',
+        branch: 'OrchestrationAgent.MetricsQuery', round: 'r1', final: true, ts: 5 },
+    ])
+    const answer = finalAnswer(s)
+    expect(answer).not.toBeNull()
+    expect(answer.text).toBe('近 3 天 CPU 峰值 28.7%。')
+    // And it leaves the timeline, so it is not shown twice.
+    expect(timelineSteps(s)).not.toContain(answer)
+  })
+
+  it('leaves the sub-agent narration in the timeline', () => {
+    const s = run([
+      { type: 'text', text: '让我确认有哪些指标。', agent: 'MetricsQuery',
+        branch: 'OrchestrationAgent.MetricsQuery', round: 'r1', final: false, ts: 1 },
+      { type: 'tool_call', name: 'query_instant', call_id: 'c1', agent: 'MetricsQuery',
+        branch: 'OrchestrationAgent.MetricsQuery', round: 'r1', ts: 2 },
+      { type: 'text', text: '峰值 28.7%。', agent: 'MetricsQuery',
+        branch: 'OrchestrationAgent.MetricsQuery', round: 'r1', final: true, ts: 3 },
+    ])
+    const notes = timelineSteps(s).filter((x) => x.kind === 'text')
+    expect(notes).toHaveLength(1)
+    expect(notes[0].text).toBe('让我确认有哪些指标。')
+  })
+
+  // The single-agent case must be untouched: the two rules agree there.
+  it('still takes the root reply in a single-agent run', () => {
+    const s = run([
+      { type: 'tool_call', name: 'query_range', call_id: 'c1', round: 'r1', ts: 1 },
+      { type: 'tool_result', call_id: 'c1', ok: true, response: {}, ts: 2 },
+      { type: 'text', text: '查完了。', round: 'r1', final: true, ts: 3 },
+    ])
+    expect(finalAnswer(s).text).toBe('查完了。')
+  })
+
+  // Frames projected before the flag existed carry no `final` at all.
+  it('falls back to root-level text when nothing is marked final', () => {
+    const s = run([
+      { type: 'text', text: '旧会话的回答', round: 'r1', ts: 1 },
+    ])
+    expect(finalAnswer(s).text).toBe('旧会话的回答')
+  })
+})

@@ -354,12 +354,17 @@ func TestLongArgumentsAreBounded(t *testing.T) {
 	}
 }
 
-// Sub-agent prose is part of the work, never the conclusion.
-func TestASubAgentsProseIsNotTheReply(t *testing.T) {
+// A sub-agent's narration is part of the work, never the conclusion.
+//
+// Narration is the model saying what it is about to do and then doing it. It
+// belongs to the step it introduced; promoting it would put a task's working
+// notes where its answer goes.
+func TestASubAgentsNarrationIsNotTheReply(t *testing.T) {
 	got := foldTasks("web-1", []map[string]any{
 		call("r1", "c1", "get_logs", 10),
-		result("r1", "c1", true, 11, map[string]any{"summary": "ok"}),
-		fr(frameText, "round", "r1", "branch", "root.logs", "text", "子 agent 的话", "ts", int64(20), "final", true),
+		fr(frameText, "round", "r1", "branch", "root.logs", "text", "先看看日志。",
+			"ts", int64(11), "final", false),
+		result("r1", "c1", true, 12, map[string]any{"summary": "ok"}),
 	}, infos(nil), nil)[0]
 
 	if got.Reply != "" {
@@ -367,6 +372,35 @@ func TestASubAgentsProseIsNotTheReply(t *testing.T) {
 	}
 	if countLabel(got, "形成结论") != 0 {
 		t.Error("a conclusion step was invented for a run that never concluded")
+	}
+}
+
+// But a sub-agent's answer is the answer.
+//
+// A coordinator that delegates and then says nothing more is the normal shape
+// of one: transfer_to_agent hands the turn over, and what the specialist says
+// is what the user received. Requiring root-level text left such a task with
+// no reply at all and no 形成结论 step, while the answer sat among the working
+// notes — on screen the turn just ended on a token count.
+func TestACoordinatorsDelegatedAnswerIsTheReply(t *testing.T) {
+	got := foldTasks("web-1", []map[string]any{
+		fr(frameUserMessage, "text", "查一下 CPU", "ts", int64(1)),
+		fr(frameAgentTransfer, "round", "r1", "from", "OrchestrationAgent",
+			"to", "MetricsQuery", "ts", int64(2)),
+		call("r1", "c1", "query_instant", 10),
+		result("r1", "c1", true, 11, map[string]any{"summary": "1 条曲线"}),
+		fr(frameText, "round", "r1", "branch", "OrchestrationAgent.MetricsQuery",
+			"text", "近 3 天 CPU 峰值 28.7%。", "ts", int64(20), "final", true),
+	}, infos(nil), nil)[0]
+
+	if got.Reply != "近 3 天 CPU 峰值 28.7%。" {
+		t.Errorf("reply = %q；协调者委派后自己不再说话，专家那句就是用户收到的回答", got.Reply)
+	}
+	if countLabel(got, "形成结论") != 1 {
+		t.Errorf("形成结论 步骤 = %d 个，应当有 1 个", countLabel(got, "形成结论"))
+	}
+	if got.Status != TaskCompleted {
+		t.Errorf("status = %q", got.Status)
 	}
 }
 

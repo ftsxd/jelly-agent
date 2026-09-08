@@ -88,12 +88,18 @@ export function applyFrame(state, frame) {
       textStep(state, frame).text += frame.text || ''
       break
 
-    case 'text':
+    case 'text': {
       // Replay's whole-block form. Assigned rather than appended so that a
       // page which already streamed the deltas does not end up with the answer
       // twice.
-      textStep(state, frame).text = frame.text || ''
+      const step = textStep(state, frame)
+      step.text = frame.text || ''
+      // The server already worked out whether this text was the turn's answer
+      // or narration alongside a tool call. Carrying it means the two surfaces
+      // — this reducer and the task centre's fold — decide by the same rule.
+      step.final = frame.final === true
       break
+    }
 
     case 'thought':
       state.steps.push({
@@ -203,7 +209,7 @@ function textStep(state, frame) {
     if (s.kind === 'tool' || s.kind === 'transfer') break
   }
   const step = {
-    id: stepId(), kind: 'text', text: '',
+    id: stepId(), kind: 'text', text: '', final: false,
     agent, round, turn: frame.turn || 0,
     branch: frame.branch || '', ts: frame.ts || 0, depth: depthOf(frame, state),
   }
@@ -263,12 +269,29 @@ function settleTool(state, frame) {
 }
 
 /**
- * The reply to show as the main answer bubble: the last root-level text.
+ * The reply to show as the main answer bubble.
  *
- * Sub-agent prose stays in the timeline as nested blocks. Without this split
- * the answer and its working notes render as one undifferentiated wall.
+ * The last text the server marked final, at whatever depth. Sub-agent prose
+ * still stays in the timeline as nested blocks — narration is not marked final
+ * — so the split that keeps the answer from being one undifferentiated wall is
+ * intact.
+ *
+ * Depth used to be the whole rule: root-level text was the answer, anything
+ * nested was working notes. That holds right up until a coordinator delegates
+ * and then says nothing more, which is the normal shape of one:
+ * transfer_to_agent hands the turn over and the specialist's reply IS what the
+ * user received. There was no root-level text at all, so the bubble simply did
+ * not render — the answer sat in the timeline looking like a working note, and
+ * the turn ended on a token count.
+ *
+ * The depth-0 fallback stays for anything projected before the final flag
+ * existed, and for the single-agent case where the two rules agree anyway.
  */
 export function finalAnswer(state) {
+  for (let i = state.steps.length - 1; i >= 0; i -= 1) {
+    const s = state.steps[i]
+    if (s.kind === 'text' && s.final) return s
+  }
   for (let i = state.steps.length - 1; i >= 0; i -= 1) {
     const s = state.steps[i]
     if (s.kind === 'text' && s.depth === 0) return s
