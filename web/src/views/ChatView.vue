@@ -446,9 +446,18 @@ function authorOf(m) {
 .bubble {
   padding: var(--sp-3) var(--sp-4);
   border-radius: var(--radius);
+  /* Newlines are preserved for the plain-text bubbles — a user's own message,
+     and an agent's before it is rendered. Not for a rendered one: markdown
+     output already carries its own block elements, and pre-wrap turns the
+     newlines *between* those tags into real blank lines. That is what made the
+     chat's copy of a reply twice as tall as the task centre's copy of the same
+     text, with the table's header floating off from its body. */
   white-space: pre-wrap;
   word-break: break-word;
   border: 1px solid var(--border);
+}
+.bubble.md {
+  white-space: normal;
 }
 .bubble.user {
   /* A flat tint with the accent as its edge. The gradient fill plus gradient

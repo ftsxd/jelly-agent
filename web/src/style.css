@@ -427,6 +427,12 @@ button:active {
  *
  * v-html 注入的 HTML 拿不到 scoped 样式的属性，所以这里也不能放进任何
  * 组件的 <style scoped>：放进去就得写 :deep()，而两份 :deep() 必然漂移。
+ *
+ * 一个坑，两处都踩过：容器上的 white-space: pre-wrap 会毁掉渲染结果。
+ * markdown 输出自带块级元素，pre-wrap 会把标签*之间*的换行也变成真实空行，
+ * 于是同一段文本在一处紧凑、在另一处高出一倍，表格头还会和表体脱开。
+ * 这里关不掉它——scoped 样式带属性选择器，优先级高于全局的 .md——必须由
+ * 容器自己关：对话页是 .bubble.md { white-space: normal }。
  */
 .md p {
   margin: 0 0 0.6em;
