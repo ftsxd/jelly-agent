@@ -133,3 +133,7 @@ func (sqliteDialect) isMissingTable(err error) bool {
 func (sqliteDialect) columns(db *DB, table string) ([]string, error) {
 	return scanStrings(db, `SELECT name FROM pragma_table_info(?) ORDER BY name`, table)
 }
+
+func (sqliteDialect) columnTypes(db *DB, table string) (map[string]string, error) {
+	return scanPairs(db, `SELECT name, type FROM pragma_table_info(?)`, table)
+}

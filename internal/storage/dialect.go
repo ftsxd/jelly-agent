@@ -29,6 +29,8 @@ type dialect interface {
 	// columns lists a table's column names, for comparing one dialect's
 	// schema against another's.
 	columns(db *DB, table string) ([]string, error)
+	// columnTypes maps a table's column names to this dialect's type names.
+	columnTypes(db *DB, table string) (map[string]string, error)
 	// isMissingTable classifies "that table does not exist".
 	isMissingTable(err error) bool
 	// epochSeconds renders a timestamp column as whole seconds since the

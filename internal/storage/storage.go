@@ -295,3 +295,31 @@ func scanStrings(db *DB, query string, args ...any) ([]string, error) {
 	}
 	return out, rows.Err()
 }
+
+// ColumnTypes maps a table's columns to the type names this database reports.
+//
+// For copying rows between databases without a third definition of the schema.
+// The migrator reads what the target actually has rather than carrying its own
+// list — the DDL a store runs and migrations/postgres/0001_init.sql are already
+// two definitions, and a copier with a third would drift from both.
+func ColumnTypes(db *DB, table string) (map[string]string, error) {
+	return db.dialect.columnTypes(db, table)
+}
+
+// scanPairs collects a two-column result into a map.
+func scanPairs(db *DB, query string, args ...any) (map[string]string, error) {
+	rows, err := db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]string{}
+	for rows.Next() {
+		var k, v string
+		if err := rows.Scan(&k, &v); err != nil {
+			return nil, err
+		}
+		out[k] = v
+	}
+	return out, rows.Err()
+}

@@ -310,6 +310,57 @@ task_runs.only_in_pg   只在 PostgreSQL 上有 —— 某个 store 的 DDL 少�
 ADK 那四张表不在比较范围内：两边都由 GORM AutoMigrate 从同一套模型建，
 不会像两份手写定义那样漂。
 
+## 把现有数据搬过去
+
+```bash
+# 1. 目标库建表
+psql "$DSN" -f migrations/postgres/0001_init.sql
+
+# 2. 看看会搬多少，不写任何东西
+jelly migrate --from ~/.jelly-agent/state.db --dry-run
+
+# 3. 停掉服务，再搬
+jelly migrate --from ~/.jelly-agent/state.db
+```
+
+**服务必须先停。** 命令不加锁，边搬边写会漏掉搬运过程中新写入的行——不过它
+搬完会核对行数，那种情况会被报出来，不会静悄悄地少。
+
+**可以重跑。** 每条插入都是 `ON CONFLICT DO NOTHING`，中途断了直接再来一次。
+
+**回滚是把 `storage.dsn` 改回去**，源库自始至终没被改动。但注意时间窗口：
+搬完之后服务在新库上写下的东西，回滚时不会回到源库。
+
+### 搬什么、不搬什么
+
+九张表：ADK 的 `sessions` / `events` / `app_states` / `user_states`，加上
+`tool_results` / `tool_result_seq` / `tool_calls` / `task_runs` /
+`schedule_runs`。顺序有讲究——events 引用 sessions。
+
+**`memory_fts` 不搬。** 它是从 events 重建的派生索引，每个会话的下一轮对话
+会自动重建，搬过去只是把马上要被覆盖的旧行搬一遍。
+
+`tool_result_seq` 搬是为了**精确**而不是为了**正确**：目标库没有它的话，
+`record.Open` 会按每个会话的 `MAX(seq)` 重新播种，句柄照样不会撞，只是丢掉
+重放烧掉的号、空洞合上。
+
+### 它为什么是 Go 命令而不是一段 SQL
+
+三个理由，都写在 `internal/migrate` 的包注释里：
+
+- **类型差异是真的。** SQLite 用 0/1 存布尔、用文本存时间；PG 两样都有真类型。
+  dump-and-load 得把同样的转换在 SQL 里再写一遍。
+- **schema 已经有两份定义了**（各 store 的 DDL、这个迁移文件）。一个自带列
+  清单的搬运器会是第三份，而且会和两边都漂。这个搬运器**从目标库实际读列名
+  和类型**。
+- **核对得和搬运在一起。** 没法核对的迁移就是没法信任的迁移。
+
+### 实测
+
+拿一个真实的 2MB `state.db` 端到端跑过：2 个会话、16 条事件、13 条产物
+（含一条 82,540 字节的）、66 条调用记录，全部搬过去，行数核对通过，
+服务在新库上起来零错误。
+
 ## 还没验的一项
 
 **热路径延迟**：`timeline.go` 的投影和 `taskapi.go` 的分页。这一条要等
