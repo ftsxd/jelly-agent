@@ -1,0 +1,66 @@
+{
+  "settings": {
+    "number_of_shards": 1,
+    "number_of_replicas": 0,
+    "analysis": {
+      "analyzer": {
+        "jelly_cjk": {
+          "type": "custom",
+          "tokenizer": "standard",
+          "filter": [
+            "cjk_width",
+            "lowercase",
+            "cjk_bigram"
+          ]
+        }
+      }
+    }
+  },
+  "mappings": {
+    "dynamic": "strict",
+    "_source": {
+      "excludes": [
+        "content"
+      ]
+    },
+    "properties": {
+      "content": {
+        "type": "text",
+        "analyzer": "jelly_cjk",
+        "search_analyzer": "jelly_cjk",
+        "store": false
+      },
+      "app_name": {
+        "type": "keyword"
+      },
+      "user_id": {
+        "type": "keyword"
+      },
+      "session_id": {
+        "type": "keyword"
+      },
+      "invocation_id": {
+        "type": "keyword"
+      },
+      "call_id": {
+        "type": "keyword"
+      },
+      "seq": {
+        "type": "long"
+      },
+      "tool": {
+        "type": "keyword"
+      },
+      "server": {
+        "type": "keyword"
+      },
+      "bytes": {
+        "type": "long"
+      },
+      "at": {
+        "type": "date",
+        "format": "strict_date_optional_time||epoch_millis"
+      }
+    }
+  }
+}

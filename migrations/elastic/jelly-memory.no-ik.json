@@ -1,0 +1,49 @@
+{
+  "settings": {
+    "number_of_shards": 1,
+    "number_of_replicas": 0,
+    "refresh_interval": "1s",
+    "analysis": {
+      "analyzer": {
+        "jelly_cjk": {
+          "type": "custom",
+          "tokenizer": "standard",
+          "filter": [
+            "cjk_width",
+            "lowercase",
+            "cjk_bigram"
+          ]
+        }
+      }
+    }
+  },
+  "mappings": {
+    "dynamic": "strict",
+    "properties": {
+      "content": {
+        "type": "text",
+        "analyzer": "jelly_cjk",
+        "search_analyzer": "jelly_cjk"
+      },
+      "event_id": {
+        "type": "keyword"
+      },
+      "session_id": {
+        "type": "keyword"
+      },
+      "author": {
+        "type": "keyword"
+      },
+      "app_name": {
+        "type": "keyword"
+      },
+      "user_id": {
+        "type": "keyword"
+      },
+      "ts": {
+        "type": "date",
+        "format": "strict_date_optional_time||epoch_millis"
+      }
+    }
+  }
+}
