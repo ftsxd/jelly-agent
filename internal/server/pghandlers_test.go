@@ -43,7 +43,7 @@ func newPostgresServer(t *testing.T) (*Server, string) {
 	eng.SetMetrics(tr)
 
 	// ADK owns sessions and events, and creates them on first open.
-	if _, err := jellysession.New(dsn); err != nil {
+	if _, _, err := jellysession.New(dsn); err != nil {
 		t.Fatalf("session service: %v", err)
 	}
 	return New(eng, nil), dsn
@@ -145,7 +145,7 @@ func dropADKTables(t *testing.T, dsn string) {
 		}
 	}
 	t.Cleanup(func() {
-		if _, err := jellysession.New(dsn); err != nil {
+		if _, _, err := jellysession.New(dsn); err != nil {
 			t.Logf("恢复 ADK 表失败: %v", err)
 		}
 	})

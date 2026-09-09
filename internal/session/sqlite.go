@@ -44,27 +44,31 @@ func DefaultDBPath() (string, error) {
 // The tables here belong to ADK. AutoMigrate creates them, and there is
 // deliberately no hand-written DDL for them anywhere in this repo — see
 // session.EnsureSchema.
-func New(ref string) (adksession.Service, error) {
+func New(ref string) (adksession.Service, func() error, error) {
 	if ref == "" {
 		p, err := DefaultDBPath()
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		ref = p
 	}
-	kind, err := storage.KindOf(ref)
+	// The pool is this repo's, not GORM's.
+	//
+	// Handing the driver a DSN lets it open its own connection with no limit
+	// set — one more unbounded pool against a server whose own default
+	// max_connections is 100, and one nothing can close, because ADK's Service
+	// interface has no Close. Opening it here means it obeys the same policy
+	// as every other handle and the caller gets something to release.
+	db, err := storage.Open(ref)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	var dialector gorm.Dialector
-	switch kind {
+	switch db.Kind() {
 	case storage.KindPostgres:
-		dialector = postgres.Open(ref)
+		dialector = postgres.New(postgres.Config{Conn: db.Native()})
 	default:
-		if err := os.MkdirAll(filepath.Dir(ref), 0o755); err != nil {
-			return nil, fmt.Errorf("create db dir: %w", err)
-		}
-		dialector = sqlite.Open(ref)
+		dialector = &sqlite.Dialector{Conn: db.Native()}
 	}
 
 	// Silence GORM's default logger: it logs ErrRecordNotFound for the
@@ -73,11 +77,13 @@ func New(ref string) (adksession.Service, error) {
 		Logger: logger.Default.LogMode(logger.Silent),
 	})
 	if err != nil {
+		db.Close()
 		// Not ref: a PostgreSQL URL may carry a password.
-		return nil, fmt.Errorf("open session db (%s): %w", kind, err)
+		return nil, nil, fmt.Errorf("open session db (%s): %w", db.Kind(), err)
 	}
 	if err := database.AutoMigrate(svc); err != nil {
-		return nil, fmt.Errorf("migrate session db: %w", err)
+		db.Close()
+		return nil, nil, fmt.Errorf("migrate session db: %w", err)
 	}
-	return svc, nil
+	return svc, db.Close, nil
 }

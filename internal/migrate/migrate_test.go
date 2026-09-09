@@ -2,8 +2,11 @@ package migrate_test
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -161,7 +164,7 @@ func seedSQLite(t *testing.T, path string) seedResult {
 	t.Helper()
 	ctx := context.Background()
 
-	svc, err := jellysession.New(path)
+	svc, _, err := jellysession.New(path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -230,7 +233,7 @@ func seedSQLite(t *testing.T, path string) seedResult {
 // copy of the schema instead of the one deployments run.
 func freshPostgres(t *testing.T, dsn string) *storage.DB {
 	t.Helper()
-	if _, err := jellysession.New(dsn); err != nil { // ADK's four tables
+	if _, _, err := jellysession.New(dsn); err != nil { // ADK's four tables
 		t.Fatal(err)
 	}
 	db, err := storage.Open(dsn)
@@ -310,13 +313,14 @@ func TestVerifyReportsARowCountDifference(t *testing.T) {
 	}
 }
 
-// A column the source has and the target does not must be skipped, not fail
-// the copy.
+// A column the source has and the target does not stops the copy, by name.
 //
-// This is what lets a migration run while the two schema definitions are one
-// commit apart — and without it the copier builds an INSERT naming a column
-// the target has never heard of, which fails the whole table.
-func TestColumnOnlyInTheSourceIsSkipped(t *testing.T) {
+// Copying the rest and saying nothing is silent data loss on the one operation
+// nobody re-runs to check: the source is about to stop being read, and the
+// value in that column is then gone. The two schema definitions being one
+// commit apart is a real situation, and the answer is to say so — the fix is
+// usually one line in migrations/postgres/0001_init.sql.
+func TestColumnOnlyInTheSourceStopsTheCopy(t *testing.T) {
 	dsn := os.Getenv("JELLY_PG_DSN")
 	if dsn == "" {
 		t.Skip("set JELLY_PG_DSN")
@@ -337,9 +341,22 @@ func TestColumnOnlyInTheSourceIsSkipped(t *testing.T) {
 	}
 	dst := freshPostgres(t, dsn)
 
-	rep, err := migrate.Run(ctx, src, dst, migrate.Options{})
+	_, err = migrate.Run(ctx, src, dst, migrate.Options{})
+	var dropped *migrate.DroppedColumnsError
+	if !errors.As(err, &dropped) {
+		t.Fatalf("多出来的列被静默丢掉了: %v", err)
+	}
+	if dropped.Table != "task_runs" || !slices.Contains(dropped.Columns, "only_here") {
+		t.Errorf("报告的不是那一列: %+v", dropped)
+	}
+	if !strings.Contains(dropped.Error(), "0001_init.sql") {
+		t.Errorf("错误没告诉人怎么修: %s", dropped)
+	}
+
+	// And it can be overridden, for somebody who has looked at the list.
+	rep, err := migrate.Run(ctx, src, dst, migrate.Options{AllowDroppingColumns: true})
 	if err != nil {
-		t.Fatalf("多出一列就让整张表迁不动了: %v", err)
+		t.Fatalf("显式放行之后还是失败: %v", err)
 	}
 	if rep.Copied["task_runs"] != 1 {
 		t.Errorf("task_runs 复制了 %d 行，want 1", rep.Copied["task_runs"])

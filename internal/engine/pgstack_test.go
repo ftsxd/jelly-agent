@@ -50,7 +50,7 @@ func TestEveryStoreWorksAgainstPostgres(t *testing.T) {
 	})
 
 	t.Run("ADK 的会话服务能建表并写读", func(t *testing.T) {
-		svc, err := jellysession.New(dsn)
+		svc, _, err := jellysession.New(dsn)
 		if err != nil {
 			t.Fatalf("session service: %v", err)
 		}

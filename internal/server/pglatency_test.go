@@ -129,7 +129,7 @@ func seedForLatency(t *testing.T, ref string, sessions, eventsEach, resultsEach 
 	t.Helper()
 	ctx := context.Background()
 
-	svc, err := jellysession.New(ref)
+	svc, _, err := jellysession.New(ref)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -113,6 +113,22 @@ func IsUniqueViolation(err error) bool {
 	return sqliteDialect{}.isUniqueViolation(err) || postgresDialect{}.isUniqueViolation(err)
 }
 
+// Native hands out the underlying database/sql handle, and the only caller
+// that may take it is internal/session.
+//
+// The rule everywhere else is that a native handle is never held outside this
+// package, because a query issued on one skips the rebind — and `?` is
+// SQLite's own placeholder, so that mistake is green in every test and fails
+// only against PostgreSQL. ADK's session store is the exception on purpose: it
+// takes a GORM dialector and writes its own SQL, so rebind does not apply to
+// it at all.
+//
+// What it does need is this package's pool policy. Left to open its own
+// connection from a DSN, GORM applies no limit — one more unbounded pool
+// against a server whose default max_connections is 100, and one nothing can
+// close because ADK's Service interface has no Close.
+func (d *DB) Native() *sql.DB { return d.db }
+
 // Kind names the database this handle is on.
 //
 // For the one difference that is not a spelling difference. Placeholders and

@@ -14,8 +14,9 @@ import (
 
 func newMigrateCmd() *cobra.Command {
 	var (
-		from   string
-		dryRun bool
+		from      string
+		dryRun    bool
+		allowDrop bool
 	)
 	cmd := &cobra.Command{
 		Use:   "migrate",
@@ -62,11 +63,20 @@ func newMigrateCmd() *cobra.Command {
 			}
 			defer src.Close()
 
-			// ADK's four tables are created by its own AutoMigrate, not by the
-			// migration file, so the target needs the service opened once
+			// ADK's four tables are created by its own AutoMigrate, not by
+			// the migration file, so the target needs the service opened once
 			// before anything can be copied into them.
-			if _, err := jellysession.New(cfg.Storage.DSN); err != nil {
-				return fmt.Errorf("在目标库上准备 ADK 的会话表: %w", err)
+			//
+			// Not on a dry run. Opening it runs AutoMigrate, which creates
+			// those tables — a command whose entire promise is "writes
+			// nothing" was leaving four tables behind on a database somebody
+			// ran it against to decide whether to migrate at all.
+			if !dryRun {
+				_, closeSvc, err := jellysession.New(cfg.Storage.DSN)
+				if err != nil {
+					return fmt.Errorf("在目标库上准备 ADK 的会话表: %w", err)
+				}
+				defer closeSvc()
 			}
 			dst, err := storage.Open(cfg.Storage.DSN)
 			if err != nil {
@@ -77,7 +87,8 @@ func newMigrateCmd() *cobra.Command {
 			w := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
 			fmt.Fprintln(w, "表\t复制\t已存在")
 			rep, err := migrate.Run(cmd.Context(), src, dst, migrate.Options{
-				DryRun: dryRun,
+				DryRun:               dryRun,
+				AllowDroppingColumns: allowDrop,
 				Progress: func(table string, copied, skipped int64) {
 					fmt.Fprintf(w, "%s\t%d\t%d\n", table, copied, skipped)
 					w.Flush()
@@ -115,5 +126,7 @@ func newMigrateCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&from, "from", "", "源状态库（路径或 DSN）")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "只统计，不写入")
+	cmd.Flags().BoolVar(&allowDrop, "allow-dropping-columns", false,
+		"源库有目标库没有的列时照搬其余的，丢掉那些列的值（默认是拒绝并报出列名）")
 	return cmd
 }

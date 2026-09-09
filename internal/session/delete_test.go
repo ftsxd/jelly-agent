@@ -14,7 +14,7 @@ import (
 // leftovers.
 func TestDeleteSessionsCascadesEvents(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "state.db")
-	svc, err := New(dbPath)
+	svc, _, err := New(dbPath)
 	if err != nil {
 		t.Fatalf("session store: %v", err)
 	}

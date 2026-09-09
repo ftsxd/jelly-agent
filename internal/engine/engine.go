@@ -162,9 +162,10 @@ type Engine struct {
 	// runs AutoMigrate — 857µs against a SQLite file and 733ms against
 	// PostgreSQL, where the migration inspects the catalogue for four tables
 	// over the wire. That was 85% of what a session timeline cost.
-	sessionOnce sync.Once
-	sessionSvc  adksession.Service
-	sessionErr  error
+	sessionOnce  sync.Once
+	sessionSvc   adksession.Service
+	sessionClose func() error
+	sessionErr   error
 
 	// promptByAgent is the last exact fixed prompt shape observed at the model
 	// boundary. The console cannot reconstruct MCP schemas from metadata: the
@@ -305,6 +306,15 @@ func (e *Engine) Close() {
 	if e.recordStore != nil {
 		if err := e.recordStore.Close(); err != nil {
 			slog.Warn("关闭产物存储失败", logging.Err(err))
+		}
+	}
+	// ADK's Service has no Close, so the pool behind it is released through
+	// the handle this package opened for it. Without that a config reload
+	// abandons one more pool — the same leak the delivery store had, on the
+	// connection every page goes through.
+	if e.sessionClose != nil {
+		if err := e.sessionClose(); err != nil {
+			slog.Warn("关闭会话存储失败", logging.Err(err))
 		}
 	}
 	if e.stateDB != nil {
@@ -1580,7 +1590,7 @@ func (e *Engine) StateRef() string { return e.stateRef }
 // a GORM database, not per-request state.
 func (e *Engine) NewSessionService() (adksession.Service, error) {
 	e.sessionOnce.Do(func() {
-		e.sessionSvc, e.sessionErr = jellysession.New(e.stateRef)
+		e.sessionSvc, e.sessionClose, e.sessionErr = jellysession.New(e.stateRef)
 	})
 	return e.sessionSvc, e.sessionErr
 }

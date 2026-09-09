@@ -33,10 +33,11 @@ func newSessionListCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			svc, err := jellysession.New(cfg.Storage.DSN)
+			svc, closeSvc, err := jellysession.New(cfg.Storage.DSN)
 			if err != nil {
 				return err
 			}
+			defer closeSvc()
 			resp, err := svc.List(cmd.Context(), &adksession.ListRequest{AppName: appName, UserID: userID})
 			if err != nil {
 				return fmt.Errorf("list sessions: %w", err)

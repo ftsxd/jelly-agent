@@ -18,6 +18,7 @@ package migrate
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/jelly-agent/jelly-agent/internal/storage"
 )
@@ -58,12 +59,33 @@ type Report struct {
 	Note    string
 }
 
+// DroppedColumnsError says the source has columns the target does not.
+//
+// Its own type so a caller can tell this apart from a failure — it is not that
+// the copy went wrong, it is that finishing it would lose data, and the fix is
+// usually one line in the migration file.
+type DroppedColumnsError struct {
+	Table   string
+	Columns []string
+}
+
+func (e *DroppedColumnsError) Error() string {
+	return fmt.Sprintf("%s 有目标库没有的列 %s —— 照搬会丢掉这些列的值。"+
+		"把它们加进 migrations/postgres/0001_init.sql 再跑；"+
+		"确实不要这些值，用 --allow-dropping-columns",
+		e.Table, strings.Join(e.Columns, ", "))
+}
+
 // Options bound one run.
 type Options struct {
 	// BatchSize is how many rows go in one INSERT. Zero takes the default.
 	BatchSize int
 	// DryRun counts what would be copied without writing anything.
 	DryRun bool
+	// AllowDroppingColumns copies what both sides have and discards the rest,
+	// instead of refusing. For the case where somebody has looked at the list
+	// and decided those values are not worth keeping.
+	AllowDroppingColumns bool
 	// Progress, when set, is called after each table.
 	Progress func(table string, copied, skipped int64)
 }

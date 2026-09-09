@@ -36,13 +36,28 @@ func copyTable(ctx context.Context, src, dst *storage.DB, table string, opts Opt
 	}
 
 	cols := make([]string, 0, len(srcCols))
+	var dropped []string
 	for _, c := range srcCols {
 		if _, ok := dstTypes[c]; ok {
 			cols = append(cols, c)
+			continue
 		}
+		dropped = append(dropped, c)
 	}
 	if len(cols) == 0 {
 		return 0, 0, fmt.Errorf("两边没有共同的列")
+	}
+	if len(dropped) > 0 && !opts.AllowDroppingColumns {
+		// Refused, not skipped.
+		//
+		// Copying the other columns and saying nothing is silent data loss on
+		// the one operation nobody re-runs to check: the source is about to
+		// stop being read, and the value in that column is then gone. The two
+		// schema definitions being one commit apart is a real situation, and
+		// the answer to it is to say so and let somebody decide — usually by
+		// adding the column to migrations/postgres/0001_init.sql, which takes
+		// a minute, rather than by discovering it a week later.
+		return 0, 0, &DroppedColumnsError{Table: table, Columns: dropped}
 	}
 
 	quoted := strings.Join(cols, ",")

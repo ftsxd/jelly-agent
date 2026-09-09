@@ -30,7 +30,7 @@ func TestSearchAgainstPostgres(t *testing.T) {
 	exclusive(t, dsn)
 	ctx := context.Background()
 
-	svc, err := jellysession.New(dsn)
+	svc, _, err := jellysession.New(dsn)
 	if err != nil {
 		t.Fatalf("session service: %v", err)
 	}

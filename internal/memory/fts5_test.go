@@ -172,7 +172,7 @@ func TestSearchCoexistsWithSessionDB(t *testing.T) {
 	ctx := context.Background()
 
 	// Open and migrate the ADK session store on the shared file first.
-	svc, err := jellysession.New(dbPath)
+	svc, _, err := jellysession.New(dbPath)
 	if err != nil {
 		t.Fatalf("session store: %v", err)
 	}
