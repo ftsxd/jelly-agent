@@ -65,9 +65,9 @@ func NewSearch(dbPath string, topK int) (*Search, error) {
 	if err != nil {
 		return nil, err
 	}
-	if _, err := db.Exec(createFTS); err != nil {
+	if err := storage.ApplySchema(db, createFTS, "memory_fts"); err != nil {
 		db.Close()
-		return nil, fmt.Errorf("create memory_fts: %w", err)
+		return nil, err
 	}
 	return &Search{db: db, topK: topK}, nil
 }
@@ -105,10 +105,9 @@ func (s *Search) AddSessionToMemory(ctx context.Context, sess session.Session) e
 	})
 }
 
-// SearchMemory returns up to topK indexed entries whose text matches the query,
-// scoped to the request's (app, user). Queries of ≥3 runes use FTS5 trigram
-// MATCH (ranked by relevance); shorter queries fall back to a recency-ordered
-// LIKE scan, since trigram cannot index fewer than 3 characters.
+// SearchMemory returns up to topK indexed entries whose text matches the
+// query, scoped to the request's (app, user). Which query answers it depends
+// on the database — see matching.
 func (s *Search) SearchMemory(ctx context.Context, req *adkmemory.SearchRequest) (*adkmemory.SearchResponse, error) {
 	resp := &adkmemory.SearchResponse{}
 	query := strings.TrimSpace(req.Query)
@@ -116,23 +115,7 @@ func (s *Search) SearchMemory(ctx context.Context, req *adkmemory.SearchRequest)
 		return resp, nil
 	}
 
-	var (
-		rows *sql.Rows
-		err  error
-	)
-	if utf8.RuneCountInString(query) < 3 {
-		rows, err = s.db.QueryContext(ctx,
-			`SELECT content, event_id, author, ts FROM memory_fts
-			 WHERE app_name = ? AND user_id = ? AND content LIKE ? ESCAPE '\'
-			 ORDER BY ts DESC LIMIT ?`,
-			req.AppName, req.UserID, "%"+escapeLike(query)+"%", s.topK)
-	} else {
-		rows, err = s.db.QueryContext(ctx,
-			`SELECT content, event_id, author, ts FROM memory_fts
-			 WHERE app_name = ? AND user_id = ? AND content MATCH ?
-			 ORDER BY rank LIMIT ?`,
-			req.AppName, req.UserID, ftsMatchQuery(query), s.topK)
-	}
+	rows, err := s.matching(ctx, req, query)
 	if err != nil {
 		return nil, fmt.Errorf("search memory: %w", err)
 	}
@@ -152,6 +135,56 @@ func (s *Search) SearchMemory(ctx context.Context, req *adkmemory.SearchRequest)
 		})
 	}
 	return resp, rows.Err()
+}
+
+// matching runs the query this dialect can answer.
+//
+// The two are not one query spelled two ways. SQLite indexes the text with
+// FTS5's trigram tokenizer and ranks with its own `rank`; PostgreSQL has no
+// FTS5, so the migration builds an ordinary table with a GIN trigram index and
+// the search is ILIKE ranked by pg_trgm's similarity(). Same tokenization,
+// same behaviour, different implementations — hiding that behind a shared
+// string would mean nobody could tell which one was running.
+//
+// They share one limit and express it differently. A trigram index cannot
+// answer a query shorter than three characters: SQLite has to route those away
+// from FTS5 MATCH, which refuses them outright, while PostgreSQL's ILIKE
+// answers them and simply loses the index. On a derived index rebuilt per
+// session an unindexed scan is affordable; it is also why real segmentation
+// (zhparser, or an FTS engine) would be an improvement rather than a fix.
+func (s *Search) matching(ctx context.Context, req *adkmemory.SearchRequest, query string) (*sql.Rows, error) {
+	short := utf8.RuneCountInString(query) < 3
+	like := "%" + escapeLike(query) + "%"
+
+	if s.db.Kind() == storage.KindPostgres {
+		// One query for any length, unlike SQLite below.
+		//
+		// The three-character floor is the index's, not the query's: ILIKE
+		// answers a two-character query perfectly well, the GIN trigram index
+		// just cannot accelerate it, so it becomes a scan. SQLite has to
+		// branch because its long path is FTS5 MATCH, which genuinely refuses
+		// anything shorter. Keeping a matching branch here looked symmetric
+		// and was untestable — the two produced identical results, which is
+		// the definition of a branch that should not exist.
+		return s.db.QueryContext(ctx,
+			`SELECT content, event_id, author, ts FROM memory_fts
+			 WHERE app_name = ? AND user_id = ? AND content ILIKE ? ESCAPE '\'
+			 ORDER BY similarity(content, ?) DESC, ts DESC LIMIT ?`,
+			req.AppName, req.UserID, like, query, s.topK)
+	}
+
+	if short {
+		return s.db.QueryContext(ctx,
+			`SELECT content, event_id, author, ts FROM memory_fts
+			 WHERE app_name = ? AND user_id = ? AND content LIKE ? ESCAPE '\'
+			 ORDER BY ts DESC LIMIT ?`,
+			req.AppName, req.UserID, like, s.topK)
+	}
+	return s.db.QueryContext(ctx,
+		`SELECT content, event_id, author, ts FROM memory_fts
+		 WHERE app_name = ? AND user_id = ? AND content MATCH ?
+		 ORDER BY rank LIMIT ?`,
+		req.AppName, req.UserID, ftsMatchQuery(query), s.topK)
 }
 
 // plainText joins the user-visible text of an event's parts, dropping reasoning

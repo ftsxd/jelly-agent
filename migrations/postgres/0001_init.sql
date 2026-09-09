@@ -179,7 +179,9 @@ CREATE TABLE memory_fts (
   author     text NOT NULL DEFAULT '',
   app_name   text NOT NULL,
   user_id    text NOT NULL,
-  ts         timestamptz NOT NULL,
+  -- text，和 tool_results.at 一样：Go 侧写 RFC3339 文本、读回来也按文本解析。
+  -- 见上面「撤回的一条」。
+  ts         text NOT NULL,
   content    text NOT NULL,
 
   -- 主键和访问模式对齐：重建时按 session_id 整段删除，这里正好走主键前缀，

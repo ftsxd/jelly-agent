@@ -35,10 +35,21 @@ writing the row cannot come apart」。MySQL 以 **error 1093** 拒绝这种语�
 原本打算把 memory 检索和大产物搜索放 ES。逐条看下来，两个都不值得：
 
 **memory 检索**：现在用 FTS5 的 trigram 分词器。PG 的 `pg_trgm` 是同一个
-东西，而且在 `contrib` 里、装 PG 就有。**行为和今天完全一致**，包括那个已知
-限制（查询要 ≥3 个字）。ES 的 IK 是真分词、确实更好，但那是提升不是补齐，
-而今天没人抱怨过检索质量。真要提升，路是加 `zhparser` / `pg_bigm` 扩展，
-不必换数据库。
+东西，而且在 `contrib` 里、装 PG 就有。ES 的 IK 是真分词、确实更好，但那是
+提升不是补齐。真要提升，路是加 `zhparser` / `pg_bigm` 扩展，不必换数据库。
+
+**但两边不是同一条查询**（`internal/memory/fts5.go` 的 `matching`）：
+
+| | SQLite | PostgreSQL |
+|---|---|---|
+| 索引 | FTS5 虚拟表，trigram 分词器 | 普通表 + `GIN (content gin_trgm_ops)` |
+| 命中 | `content MATCH ?` | `content ILIKE ?` |
+| 排序 | FTS5 的 `rank` | `similarity(content, ?) DESC` |
+| <3 字 | 必须绕开 —— MATCH 直接拒 | 同一条查询照常答，只是索引加速不了 |
+
+这个差异**没有藏在共同抽象后面**，代码里显式分支：占位符和 `strftime` 是同
+一条查询的两种拼写，调用方不该看见；全文检索是两套实现，假装成一套会让人
+不知道跑的是哪个。
 
 **大产物搜索**：`record.Search`（`internal/record/search.go:86`）是**正则 +
 行号 + 上下文行**流式扫的。ES 的 highlight 做不到这几件——没有正则、没有

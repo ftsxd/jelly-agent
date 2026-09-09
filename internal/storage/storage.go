@@ -113,6 +113,20 @@ func IsUniqueViolation(err error) bool {
 	return sqliteDialect{}.isUniqueViolation(err) || postgresDialect{}.isUniqueViolation(err)
 }
 
+// Kind names the database this handle is on.
+//
+// For the one difference that is not a spelling difference. Placeholders and
+// strftime are the same query written two ways, and callers should never see
+// them; full-text search is two different implementations — SQLite's FTS5
+// MATCH with its own rank, PostgreSQL's ILIKE over a GIN trigram index with
+// similarity() — and pretending otherwise would hide which one is running.
+func (d *DB) Kind() Kind {
+	if _, ok := d.dialect.(postgresDialect); ok {
+		return KindPostgres
+	}
+	return KindSQLite
+}
+
 // IsMissingTable reports whether err is "that table does not exist".
 //
 // Several callers tolerate it: a store whose schema has not been created yet
