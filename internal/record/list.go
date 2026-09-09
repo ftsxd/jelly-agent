@@ -15,9 +15,11 @@ package record
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
-	"strings"
 	"time"
+
+	"github.com/jelly-agent/jelly-agent/internal/storage"
 )
 
 // Item describes one stored delivery. No payload, by design.
@@ -127,35 +129,54 @@ func (s *Store) RecordedRuns(ctx context.Context, appName, userID string, sessio
 	if s == nil || s.db == nil || len(sessionIDs) == 0 {
 		return out, nil
 	}
-	args := make([]any, 0, len(sessionIDs)+2)
-	args = append(args, appName, userID)
-	holes := make([]string, 0, len(sessionIDs))
+	kept := make([]string, 0, len(sessionIDs))
 	for _, id := range sessionIDs {
-		if id == "" {
-			continue
+		if id != "" {
+			kept = append(kept, id)
 		}
-		holes = append(holes, "?")
-		args = append(args, id)
 	}
-	if len(holes) == 0 {
+	if len(kept) == 0 {
 		return out, nil
 	}
-	rows, err := s.db.QueryContext(ctx, `
+
+	// Chunked to stay under the placeholder limit, and deliberately not in a
+	// transaction.
+	//
+	// It was one statement, so it was one snapshot; several statements under
+	// READ COMMITTED are several. What that costs here is that a delivery
+	// written between two chunks may or may not be counted — on a page that
+	// re-reads every three seconds, and whose answer is "did this run store
+	// anything". A read-only repeatable-read transaction would fix an
+	// inconsistency nobody can observe, and hold a snapshot open to do it.
+	err := storage.ForEachChunk(kept, func(chunk []string) error {
+		args := make([]any, 0, len(chunk)+2)
+		args = append(args, appName, userID)
+		for _, id := range chunk {
+			args = append(args, id)
+		}
+		rows, err := s.db.QueryContext(ctx, `
 		SELECT DISTINCT session_id, invocation_id FROM tool_results
-		WHERE app_name=? AND user_id=? AND session_id IN (`+strings.Join(holes, ",")+`)`, args...)
-	if err != nil {
-		return out, fmt.Errorf("record: recorded runs: %w", err)
-	}
-	defer rows.Close()
+		WHERE app_name=? AND user_id=? AND session_id IN (`+storage.Placeholders(len(chunk))+`)`, args...)
+		if err != nil {
+			return fmt.Errorf("record: recorded runs: %w", err)
+		}
+		defer rows.Close()
+		return scanRuns(rows, out)
+	})
+	return out, err
+}
+
+// scanRuns folds one chunk's rows into the result.
+func scanRuns(rows *sql.Rows, out map[string]map[string]bool) error {
 	for rows.Next() {
 		var session, invocation string
 		if err := rows.Scan(&session, &invocation); err != nil {
-			return out, err
+			return err
 		}
 		if out[session] == nil {
 			out[session] = map[string]bool{}
 		}
 		out[session][invocation] = true
 	}
-	return out, rows.Err()
+	return rows.Err()
 }

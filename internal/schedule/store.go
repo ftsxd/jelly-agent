@@ -7,7 +7,6 @@
 package schedule
 
 import (
-	"database/sql"
 	"fmt"
 	"time"
 
@@ -56,7 +55,7 @@ CREATE TABLE IF NOT EXISTS schedule_runs (
 // keep the old shape forever.
 //
 // Same idiom as internal/record.migrate and internal/metrics.addMissingColumns.
-func migrate(db *sql.DB) error {
+func migrate(db *storage.DB) error {
 	return storage.EnsureColumns(db, "schedule_runs", []storage.Column{
 		{Name: "session_id", DDL: "ALTER TABLE schedule_runs ADD COLUMN session_id TEXT NOT NULL DEFAULT ''"},
 		{Name: "invocation_id", DDL: "ALTER TABLE schedule_runs ADD COLUMN invocation_id TEXT NOT NULL DEFAULT ''"},
@@ -136,7 +135,7 @@ func List(task string, limit, offset int) ([]Run, int, error) {
 // The schema and the migration run here, once per connection, rather than
 // inline in every query — which is where they used to be, and why the table
 // could never gain a column.
-func open() (*sql.DB, error) {
+func open() (*storage.DB, error) {
 	p, err := session.DefaultDBPath()
 	if err != nil {
 		return nil, err

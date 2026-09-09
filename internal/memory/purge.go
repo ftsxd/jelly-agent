@@ -1,7 +1,7 @@
 package memory
 
 import (
-	"database/sql"
+	"context"
 	"strings"
 
 	"github.com/jelly-agent/jelly-agent/internal/storage"
@@ -9,7 +9,7 @@ import (
 
 // openIndexDB opens the shared state.db for the L2 index maintenance helpers
 // below. Caller closes.
-func openIndexDB(dbPath string) (*sql.DB, error) {
+func openIndexDB(dbPath string) (*storage.DB, error) {
 	return storage.Open(dbPath)
 }
 
@@ -38,18 +38,31 @@ func PurgeSessions(dbPath string, ids []string) (int, error) {
 	}
 	defer db.Close()
 
-	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",")
-	args := make([]any, len(ids))
-	for i, id := range ids {
-		args[i] = id
-	}
-	res, err := db.Exec(
-		`DELETE FROM memory_fts WHERE session_id IN (`+placeholders+`)`, args...)
+	// Chunked to stay under the placeholder limit, and all of it in one
+	// transaction: this runs alongside the session and task purges, and a
+	// half-purged index leaves searchable text for a session that is gone.
+	n := 0
+	err = db.InTx(context.Background(), func(tx *storage.Tx) error {
+		return storage.ForEachChunk(ids, func(chunk []string) error {
+			args := make([]any, len(chunk))
+			for i, id := range chunk {
+				args[i] = id
+			}
+			res, err := tx.Exec(
+				`DELETE FROM memory_fts WHERE session_id IN (`+storage.Placeholders(len(chunk))+`)`,
+				args...)
+			if err != nil {
+				return err
+			}
+			c, _ := res.RowsAffected()
+			n += int(c)
+			return nil
+		})
+	})
 	if err != nil {
 		return 0, tolerateMissing(err)
 	}
-	n, _ := res.RowsAffected()
-	return int(n), nil
+	return n, nil
 }
 
 // PurgeOrphanIndex removes L2 index rows whose session no longer exists —

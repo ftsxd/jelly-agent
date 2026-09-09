@@ -192,7 +192,7 @@ const seqIndex = `CREATE UNIQUE INDEX IF NOT EXISTS idx_tool_results_seq
 // operate yet. Everything here is portable SQL: no SQLite-only types, no
 // reliance on rowid, and the key is ours rather than an autoincrement.
 type Store struct {
-	db *sql.DB
+	db *storage.DB
 }
 
 // Open creates or migrates the table at dbPath.
@@ -233,7 +233,7 @@ func Open(dbPath string) (*Store, error) {
 // wrote. It is left in place rather than dropped: a vestigial column costs
 // nothing, while a DROP COLUMN on a table holding real payloads is a rewrite
 // with no upside.
-func migrate(db *sql.DB) error {
+func migrate(db *storage.DB) error {
 	if err := storage.EnsureColumns(db, "tool_results", []storage.Column{
 		{Name: "seq", DDL: "ALTER TABLE tool_results ADD COLUMN seq INTEGER NOT NULL DEFAULT 0"},
 		{Name: "expired_at", DDL: "ALTER TABLE tool_results ADD COLUMN expired_at TEXT NOT NULL DEFAULT ''"},
@@ -335,7 +335,7 @@ const putAttempts = 4
 // deliveries sharing a handle — which is what the loop above retries.
 func (s *Store) put(ctx context.Context, r Record, sum [32]byte) (int, error) {
 	var seq int
-	err := storage.InTx(ctx, s.db, func(tx *sql.Tx) error {
+	err := s.db.InTx(ctx, func(tx *storage.Tx) error {
 		if _, err := tx.ExecContext(ctx, `
 		INSERT INTO tool_results
 			(app_name,user_id,session_id,invocation_id,call_id,seq,tool,server,at,bytes,sha256,upstream,payload)

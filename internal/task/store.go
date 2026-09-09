@@ -13,7 +13,7 @@
 package task
 
 import (
-	"database/sql"
+	"context"
 	"fmt"
 	"strings"
 	"time"
@@ -126,7 +126,7 @@ func OfSession(dbPath, sessionID string) (map[string]string, error) {
 // and a store that resolves its own path ignores it. Two handlers already had
 // this bug; a test writing links into the developer's real database is how
 // this one surfaced. Empty still means the shared default.
-func open(dbPath string) (*sql.DB, error) {
+func open(dbPath string) (*storage.DB, error) {
 	p := dbPath
 	if p == "" {
 		var err error
@@ -175,11 +175,29 @@ func DeleteSessions(dbPath string, ids []string) (int, error) {
 	}
 	defer db.Close()
 
-	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(kept)), ",")
-	res, err := db.Exec(`DELETE FROM task_runs WHERE session_id IN (`+placeholders+`)`, kept...)
+	// Chunked, because a single IN (…) is a wall: SQLite refuses past 32,766
+	// placeholders and PostgreSQL's protocol past 65,535, while the id list
+	// comes straight from the client with no bound on its length.
+	//
+	// All the chunks in one transaction, because this is part of a purge the
+	// caller reports as irreversible (server.purgeSessionTraces). Half a purge
+	// leaves task rows pointing at events that are gone.
+	n := 0
+	err = db.InTx(context.Background(), func(tx *storage.Tx) error {
+		return storage.ForEachChunk(kept, func(chunk []any) error {
+			res, err := tx.Exec(
+				`DELETE FROM task_runs WHERE session_id IN (`+storage.Placeholders(len(chunk))+`)`,
+				chunk...)
+			if err != nil {
+				return fmt.Errorf("task: delete runs of %d sessions: %w", len(chunk), err)
+			}
+			c, _ := res.RowsAffected()
+			n += int(c)
+			return nil
+		})
+	})
 	if err != nil {
-		return 0, fmt.Errorf("task: delete runs of %d sessions: %w", len(kept), err)
+		return 0, err
 	}
-	n, _ := res.RowsAffected()
-	return int(n), nil
+	return n, nil
 }

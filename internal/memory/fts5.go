@@ -47,7 +47,7 @@ const (
 // query, scoped to one (app, user). It satisfies google.golang.org/adk/memory's
 // Service interface so it can be wired into runner.Config.MemoryService.
 type Search struct {
-	db   *sql.DB
+	db   *storage.DB
 	topK int
 }
 
@@ -80,37 +80,29 @@ func (s *Search) Close() error { return s.db.Close() }
 // every turn keeps the index current without duplicating entries. Events with
 // no plain text (tool calls, pure-reasoning turns) are skipped.
 func (s *Search) AddSessionToMemory(ctx context.Context, sess session.Session) error {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("begin memory tx: %w", err)
-	}
-	defer tx.Rollback() //nolint:errcheck // no-op after a successful Commit
-
-	if _, err := tx.ExecContext(ctx, `DELETE FROM memory_fts WHERE session_id = ?`, sess.ID()); err != nil {
-		return fmt.Errorf("clear prior session rows: %w", err)
-	}
-
-	const insert = `INSERT INTO memory_fts(content, event_id, session_id, author, app_name, user_id, ts)
+	return s.db.InTx(ctx, func(tx *storage.Tx) error {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM memory_fts WHERE session_id = ?`, sess.ID()); err != nil {
+			return fmt.Errorf("clear prior session rows: %w", err)
+		}
+		const insert = `INSERT INTO memory_fts(content, event_id, session_id, author, app_name, user_id, ts)
 		VALUES (?, ?, ?, ?, ?, ?, ?)`
-	for ev := range sess.Events().All() {
-		if ev.Content == nil {
-			continue
+		for ev := range sess.Events().All() {
+			if ev.Content == nil {
+				continue
+			}
+			text := plainText(ev.Content.Parts)
+			if text == "" {
+				continue
+			}
+			if _, err := tx.ExecContext(ctx, insert,
+				text, ev.ID, sess.ID(), ev.Author, sess.AppName(), sess.UserID(),
+				ev.Timestamp.UTC().Format(time.RFC3339),
+			); err != nil {
+				return fmt.Errorf("index event %s: %w", ev.ID, err)
+			}
 		}
-		text := plainText(ev.Content.Parts)
-		if text == "" {
-			continue
-		}
-		if _, err := tx.ExecContext(ctx, insert,
-			text, ev.ID, sess.ID(), ev.Author, sess.AppName(), sess.UserID(),
-			ev.Timestamp.UTC().Format(time.RFC3339),
-		); err != nil {
-			return fmt.Errorf("index event %s: %w", ev.ID, err)
-		}
-	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit memory tx: %w", err)
-	}
-	return nil
+		return nil
+	})
 }
 
 // SearchMemory returns up to topK indexed entries whose text matches the query,

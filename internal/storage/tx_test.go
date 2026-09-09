@@ -2,14 +2,13 @@ package storage
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 	"path/filepath"
 	"testing"
 )
 
-func scratch(t *testing.T) *sql.DB {
+func scratch(t *testing.T) *DB {
 	t.Helper()
 	db, err := Open(filepath.Join(t.TempDir(), "state.db"))
 	if err != nil {
@@ -23,7 +22,7 @@ func scratch(t *testing.T) *sql.DB {
 	return db
 }
 
-func rows(t *testing.T, db *sql.DB) int {
+func rows(t *testing.T, db *DB) int {
 	t.Helper()
 	var n int
 	if err := db.QueryRow(`SELECT count(*) FROM seqs`).Scan(&n); err != nil {
@@ -34,7 +33,7 @@ func rows(t *testing.T, db *sql.DB) int {
 
 func TestInTxCommitsOnSuccess(t *testing.T) {
 	db := scratch(t)
-	err := InTx(context.Background(), db, func(tx *sql.Tx) error {
+	err := db.InTx(context.Background(), func(tx *Tx) error {
 		_, err := tx.Exec(`INSERT INTO seqs VALUES ('a', 1)`)
 		return err
 	})
@@ -51,7 +50,7 @@ func TestInTxRollsBackEveryStatementOnFailure(t *testing.T) {
 	// a failure in the second must not leave the first behind.
 	db := scratch(t)
 	boom := errors.New("boom")
-	err := InTx(context.Background(), db, func(tx *sql.Tx) error {
+	err := db.InTx(context.Background(), func(tx *Tx) error {
 		if _, err := tx.Exec(`INSERT INTO seqs VALUES ('a', 1)`); err != nil {
 			return err
 		}
@@ -71,11 +70,11 @@ func TestInTxRollsBackEveryStatementOnFailure(t *testing.T) {
 func TestInTxReportsACommitFailure(t *testing.T) {
 	// A fn that returns nil is not the same as a transaction that landed.
 	db := scratch(t)
-	err := InTx(context.Background(), db, func(tx *sql.Tx) error {
+	err := db.InTx(context.Background(), func(tx *Tx) error {
 		if _, err := tx.Exec(`INSERT INTO seqs VALUES ('a', 1)`); err != nil {
 			return err
 		}
-		return tx.Rollback() // commit will now fail
+		return tx.tx.Rollback() // commit will now fail
 	})
 	if err == nil {
 		t.Fatal("a transaction that could not commit was reported as success")

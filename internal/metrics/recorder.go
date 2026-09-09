@@ -1,7 +1,6 @@
 package metrics
 
 import (
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"sync"
@@ -44,7 +43,7 @@ type ToolCall struct {
 // possibility of losing exactly the rows a crash makes most interesting.
 type Recorder struct {
 	mu sync.Mutex
-	db *sql.DB
+	db *storage.DB
 }
 
 const schema = `
@@ -99,7 +98,7 @@ func NewRecorder(dbPath string) (*Recorder, error) {
 // before it — and the insert fails at runtime, on a machine that has been
 // running fine. Each column is added separately and a duplicate-column error
 // is the expected outcome on an up-to-date database.
-func addMissingColumns(db *sql.DB) error {
+func addMissingColumns(db *storage.DB) error {
 	return storage.EnsureColumns(db, "tool_calls", []storage.Column{
 		{Name: "evidence_id", DDL: "ALTER TABLE tool_calls ADD COLUMN evidence_id TEXT NOT NULL DEFAULT ''"},
 		{Name: "replayed", DDL: "ALTER TABLE tool_calls ADD COLUMN replayed INTEGER NOT NULL DEFAULT 0"},

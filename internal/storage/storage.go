@@ -1,63 +1,72 @@
 // Package storage opens the databases this process shares.
 //
-// It exists because the same twenty lines were copied into six openers —
+// It exists because the same twenty lines were copied into seven openers —
 // driver name, pool size, PRAGMAs, and a column probe — and every one of those
 // twenty lines is a thing SQLite does differently from any other database. As
-// long as they are spread across internal/record, internal/metrics,
-// internal/memory, internal/task and internal/session, "support MySQL" means
-// finding and changing all six, and getting one of them subtly wrong means one
-// store behaves differently from the rest on a Tuesday.
+// long as they were spread across internal/record, internal/metrics,
+// internal/memory, internal/task, internal/schedule and internal/session,
+// "support PostgreSQL" meant finding and changing all seven, and getting one
+// of them subtly wrong meant one store behaving differently from the rest on a
+// Tuesday.
 //
-// So the dialect-specific knowledge is exactly four things, and they all live
-// here:
+// Dialect-specific knowledge is exactly five things, and they all live here:
 //
 //  1. which driver to load, and how a reference names a database
-//  2. how big the connection pool may be
-//  3. what has to be set on a fresh connection (PRAGMAs, for SQLite)
-//  4. how to ask whether a table already has a column
+//  2. what a placeholder looks like
+//  3. how big the connection pool may be
+//  4. what has to be set on a fresh connection (PRAGMAs, for SQLite)
+//  5. how to ask whether a table has a column, and how a uniqueness clash
+//     announces itself
 //
-// Callers get Open and EnsureColumns and never name a driver.
+// Callers get DB, Tx, Open and EnsureColumns, write their queries with `?`,
+// and never name a driver.
 package storage
 
 import (
-	"context"
 	"database/sql"
 	"fmt"
 	"os"
 	"path/filepath"
-
-	_ "github.com/glebarez/go-sqlite" // registers the "sqlite" driver
 )
 
 // Open returns a configured handle to the database ref names.
 //
 // Today ref is a filesystem path and the database is SQLite; the parent
 // directory is created if it does not exist, because every caller wanted that
-// and half of them had their own copy of it. When a networked database is
-// added, ref grows a scheme and this is the only function that has to learn
+// and only three of them had their own copy of it. When a networked database
+// is added, ref grows a scheme and this is the only function that learns
 // about it.
 //
-// The caller closes the handle. Note that six callers opening the same path
-// today get six independent pools onto one file — see connLimit.
-func Open(ref string) (*sql.DB, error) {
+// The caller closes the handle.
+func Open(ref string) (*DB, error) {
 	if ref == "" {
 		return nil, fmt.Errorf("storage: empty database reference")
 	}
+	d := dialect(sqliteDialect{})
 	if dir := filepath.Dir(ref); dir != "" && dir != "." {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return nil, fmt.Errorf("storage: create db dir %s: %w", dir, err)
 		}
 	}
-	db, err := sql.Open(driverName, ref)
+	native, err := sql.Open(d.driver(), ref)
 	if err != nil {
 		return nil, fmt.Errorf("storage: open %s: %w", ref, err)
 	}
-	if err := configure(db); err != nil {
-		db.Close()
+	if err := d.configure(native); err != nil {
+		native.Close()
 		return nil, err
 	}
-	return db, nil
+	return &DB{db: native, dialect: d}, nil
 }
+
+// IsUniqueViolation reports whether err is a uniqueness clash — a UNIQUE index
+// or a PRIMARY KEY rejecting a row that is already there.
+//
+// Not for retrying. Sequence numbers are handed out by a counter that blocks
+// rather than collides, so a clash on one means an invariant is broken — a
+// counter behind its table, or a second writer on the old path — and the
+// caller uses this to say so instead of returning a bare driver error.
+func IsUniqueViolation(err error) bool { return sqliteDialect{}.isUniqueViolation(err) }
 
 // Column is one column a table is expected to have, and the DDL that adds it.
 type Column struct {
@@ -75,9 +84,9 @@ type Column struct {
 //
 // Adding is skipped rather than attempted-and-tolerated: a duplicate-column
 // error is not distinguishable, across dialects, from the errors worth seeing.
-func EnsureColumns(db *sql.DB, table string, cols []Column) error {
+func EnsureColumns(db *DB, table string, cols []Column) error {
 	for _, col := range cols {
-		has, err := hasColumn(db, table, col.Name)
+		has, err := db.dialect.hasColumn(db, table, col.Name)
 		if err != nil {
 			return fmt.Errorf("storage: inspect %s.%s: %w", table, col.Name, err)
 		}
@@ -91,52 +100,62 @@ func EnsureColumns(db *sql.DB, table string, cols []Column) error {
 	return nil
 }
 
-// IsUniqueViolation reports whether err is a uniqueness clash — a UNIQUE index
-// or a PRIMARY KEY rejecting a row that is already there.
+// ChunkSize is how many placeholders one statement may carry.
 //
-// Exported because a caller allocating a number under contention needs to tell
-// "somebody else took it, try again" apart from every other failure, and the
-// answer is a dialect-specific error code. Deciding it by matching on the
-// message means the decision changes when the database does.
-func IsUniqueViolation(err error) bool { return isUniqueViolation(err) }
+// Every database caps it: SQLite refuses at 32,767 (measured, not quoted — the
+// documented default has changed twice), PostgreSQL's wire protocol stops at
+// 65,535. A list of session ids comes straight from the client with no bound
+// on its length, so a single IN (…) is a wall somebody eventually hits, and it
+// fails the whole delete rather than part of it.
+//
+// Well under the lower cap, because a statement is not the only thing carrying
+// parameters and a margin costs nothing at these sizes.
+const ChunkSize = 900
 
-// InTx runs fn inside a transaction, committing when it returns nil and rolling
-// back otherwise.
+// ForEachChunk calls fn with successive slices of items, none longer than
+// ChunkSize, stopping at the first error.
 //
-// The rollback is the reason this exists. Every hand-rolled version of it in
-// this repo is correct, and each one had to remember `defer tx.Rollback()`,
-// remember that the deferred rollback is a no-op after Commit, and remember to
-// return the commit error. The version that forgets one of those does not fail
-// a test — it leaks a transaction under an error path nobody exercises, and on
-// a networked database a leaked transaction holds locks.
-func InTx(ctx context.Context, db *sql.DB, fn func(*sql.Tx) error) error {
-	tx, err := db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("storage: begin: %w", err)
-	}
-	defer tx.Rollback() //nolint:errcheck // a no-op once Commit has succeeded
-	if err := fn(tx); err != nil {
-		return err
-	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("storage: commit: %w", err)
+// Deliberately not opening a transaction. Whether the chunks have to agree
+// with each other is the caller's question, not this function's: a delete
+// wants an ordinary transaction so it is all-or-nothing, while a read that was
+// one statement and became several needs a read-only repeatable-read one to
+// keep its snapshot — and some callers need neither. Composing the two
+// primitives says which was chosen; folding them together would hide it.
+func ForEachChunk[T any](items []T, fn func([]T) error) error {
+	for start := 0; start < len(items); start += ChunkSize {
+		end := min(start+ChunkSize, len(items))
+		if err := fn(items[start:end]); err != nil {
+			return err
+		}
 	}
 	return nil
+}
+
+// Placeholders is "?,?,…" for n values, for building an IN (…) list.
+func Placeholders(n int) string {
+	if n <= 0 {
+		return ""
+	}
+	b := make([]byte, 0, n*2)
+	for i := range n {
+		if i > 0 {
+			b = append(b, ',')
+		}
+		b = append(b, '?')
+	}
+	return string(b)
 }
 
 // RetryOnConflict runs fn until it succeeds, gives up, or fails for a reason
 // retrying cannot fix.
 //
-// The reason it can fix is a uniqueness clash while allocating: two writers
-// read the same "next" value and one of them loses. That is the index doing
-// its job, and the loser only needs to look again — its data is fine.
-//
-// Worth stating plainly: on SQLite this cannot happen. One connection per
-// handle and one writer per database mean the two readers never overlap, so
-// this loop runs exactly once, always. It is here for a networked database
-// with a real connection pool, where the overlap is ordinary. Which also means
-// the loop's own behaviour is not covered by running the stores against
-// SQLite — hence this being a function that can be tested without one.
+// Retained only so this commit changes no behaviour while several hundred call
+// sites move onto the wrapper. It goes away with the sequence counter: once
+// numbers are handed out by something that blocks rather than collides, a
+// uniqueness clash means an invariant is broken, and retrying it four times
+// hides the signal instead of recovering from it — worse, when the allocation
+// and the write share a transaction the rollback returns the counter too, so
+// every retry asks for the same number again.
 func RetryOnConflict[T any](attempts int, fn func() (T, error)) (T, error) {
 	if attempts < 1 {
 		attempts = 1

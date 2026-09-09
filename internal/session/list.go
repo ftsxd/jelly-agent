@@ -24,7 +24,7 @@ type SessionMeta struct {
 // internal/storage applies so this handle coexists with the session store's
 // writer. Used for both the read projections and the delete helpers. An empty
 // path resolves to DefaultDBPath. Caller closes the returned DB.
-func openDB(dbPath string) (*sql.DB, error) {
+func openDB(dbPath string) (*storage.DB, error) {
 	if dbPath == "" {
 		p, err := DefaultDBPath()
 		if err != nil {

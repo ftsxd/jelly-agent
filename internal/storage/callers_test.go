@@ -26,6 +26,12 @@ func TestDialectKnowledgeLivesOnlyInThisPackage(t *testing.T) {
 		{"pragma_table_info", "use storage.EnsureColumns; this is SQLite-only syntax"},
 		{"SetMaxOpenConns", "the pool policy is a dialect decision"},
 		{"glebarez/go-sqlite", "the driver is registered by internal/storage"},
+		// Holding a native handle is how a query reaches the database without
+		// being rebound. `?` is SQLite's own placeholder, so the mistake runs
+		// green in every test here and fails only against PostgreSQL, in
+		// production — there is no other way to catch it.
+		{"*sql.DB", "hold a *storage.DB; a native handle skips the rebind"},
+		{"*sql.Tx", "hold a *storage.Tx; a native handle skips the rebind"},
 	}
 
 	root := filepath.Join("..", "..", "internal")
