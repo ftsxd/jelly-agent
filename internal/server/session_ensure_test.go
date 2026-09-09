@@ -133,5 +133,5 @@ func scheduleTaskFixture() config.ScheduleTask {
 
 func listSessionIDs(t *testing.T, s *Server) ([]string, error) {
 	t.Helper()
-	return jellysession.AllIDs(s.engine().SessionDBPath(), engine.AppName, engine.UserID)
+	return jellysession.AllIDs(stateDBOf(t, s), engine.AppName, engine.UserID)
 }

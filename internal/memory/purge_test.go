@@ -24,7 +24,7 @@ func TestPurgeSessions(t *testing.T) {
 		t.Fatal("precondition: expected a hit before purge")
 	}
 
-	n, err := PurgeSessions(dbPath, []string{"s1"})
+	n, err := PurgeSessions(stateDB(t, dbPath), []string{"s1"})
 	if err != nil {
 		t.Fatalf("PurgeSessions: %v", err)
 	}
@@ -40,10 +40,10 @@ func TestPurgeSessions(t *testing.T) {
 // helpers must be no-ops on a database without the memory_fts table.
 func TestPurgeToleratesMissingTable(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "empty.db")
-	if n, err := PurgeSessions(dbPath, []string{"x"}); err != nil || n != 0 {
+	if n, err := PurgeSessions(stateDB(t, dbPath), []string{"x"}); err != nil || n != 0 {
 		t.Errorf("PurgeSessions on empty db = (%d, %v), want (0, nil)", n, err)
 	}
-	if n, err := PurgeOrphanIndex(dbPath); err != nil || n != 0 {
+	if n, err := PurgeOrphanIndex(stateDB(t, dbPath)); err != nil || n != 0 {
 		t.Errorf("PurgeOrphanIndex on empty db = (%d, %v), want (0, nil)", n, err)
 	}
 }

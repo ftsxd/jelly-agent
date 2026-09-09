@@ -35,7 +35,7 @@ func TestLinkingRunsToATask(t *testing.T) {
 
 	// Nothing linked: every run is its own task, which is the common case and
 	// the only case for anything written before this table existed.
-	got, err := OfSession(db, "web-1")
+	got, err := OfSession(stateDB(t, db), "web-1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -43,10 +43,10 @@ func TestLinkingRunsToATask(t *testing.T) {
 		t.Errorf("an empty store reported links: %v", got)
 	}
 
-	if err := Link(db, "web-1/inv-1", "web-1", "inv-2"); err != nil {
+	if err := Link(stateDB(t, db), "web-1/inv-1", "web-1", "inv-2"); err != nil {
 		t.Fatal(err)
 	}
-	got, err = OfSession(db, "web-1")
+	got, err = OfSession(stateDB(t, db), "web-1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -55,16 +55,16 @@ func TestLinkingRunsToATask(t *testing.T) {
 	}
 
 	// Idempotent: a retry or a reconnect must not create a second membership.
-	if err := Link(db, "web-1/inv-1", "web-1", "inv-2"); err != nil {
+	if err := Link(stateDB(t, db), "web-1/inv-1", "web-1", "inv-2"); err != nil {
 		t.Fatal(err)
 	}
-	got, _ = OfSession(db, "web-1")
+	got, _ = OfSession(stateDB(t, db), "web-1")
 	if len(got) != 1 {
 		t.Errorf("re-linking created %d rows", len(got))
 	}
 
 	// Another session's links are not this one's.
-	if other, _ := OfSession(db, "web-2"); len(other) != 0 {
+	if other, _ := OfSession(stateDB(t, db), "web-2"); len(other) != 0 {
 		t.Errorf("cross-session leak: %v", other)
 	}
 }
@@ -74,7 +74,7 @@ func TestLinkRejectsIncompleteIdentities(t *testing.T) {
 	for _, tc := range [][3]string{
 		{"", "s", "i"}, {"t", "", "i"}, {"t", "s", ""},
 	} {
-		if err := Link(db, tc[0], tc[1], tc[2]); err == nil {
+		if err := Link(stateDB(t, db), tc[0], tc[1], tc[2]); err == nil {
 			t.Errorf("Link(%q,%q,%q) was accepted", tc[0], tc[1], tc[2])
 		}
 	}
@@ -84,8 +84,8 @@ func TestLinkRejectsIncompleteIdentities(t *testing.T) {
 // A store that resolves its own path ignores it — which is how a test came to
 // write links into the developer's real database.
 func TestTheDatabasePathIsHonoured(t *testing.T) {
-	a := filepath.Join(t.TempDir(), "a.db")
-	b := filepath.Join(t.TempDir(), "b.db")
+	a := stateDB(t, filepath.Join(t.TempDir(), "a.db"))
+	b := stateDB(t, filepath.Join(t.TempDir(), "b.db"))
 	if err := Link(a, "web-1/inv-1", "web-1", "inv-2"); err != nil {
 		t.Fatal(err)
 	}
@@ -106,7 +106,7 @@ func TestTheDatabasePathIsHonoured(t *testing.T) {
 // continuation off into a task of its own.
 func TestLinkingWhileAnotherWriterHoldsTheFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.db")
-	if err := Link(path, "s/inv-1", "s", "inv-1"); err != nil {
+	if err := Link(stateDB(t, path), "s/inv-1", "s", "inv-1"); err != nil {
 		t.Fatal(err) // create the file and the schema first
 	}
 
@@ -134,7 +134,7 @@ func TestLinkingWhileAnotherWriterHoldsTheFile(t *testing.T) {
 	}
 
 	done := make(chan error, 1)
-	go func() { done <- Link(path, "s/inv-1", "s", "inv-2") }()
+	go func() { done <- Link(stateDB(t, path), "s/inv-1", "s", "inv-2") }()
 
 	// Long enough that a caller without a busy timeout has already given up.
 	time.Sleep(200 * time.Millisecond)
@@ -145,7 +145,7 @@ func TestLinkingWhileAnotherWriterHoldsTheFile(t *testing.T) {
 		t.Fatalf("另一个写入方持锁时 Link 失败: %v", err)
 	}
 
-	got, err := OfSession(path, "s")
+	got, err := OfSession(stateDB(t, path), "s")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -163,7 +163,7 @@ func TestLinkingWhileAnotherWriterHoldsTheFile(t *testing.T) {
 // mode is a property of the file and can be read back.
 func TestTheStoreOpensTheSharedFileInWAL(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.db")
-	if err := Link(path, "s/inv-1", "s", "inv-1"); err != nil {
+	if err := Link(stateDB(t, path), "s/inv-1", "s", "inv-1"); err != nil {
 		t.Fatal(err)
 	}
 	db, err := sql.Open("sqlite", path)
@@ -189,17 +189,17 @@ func TestTheStoreOpensTheSharedFileInWAL(t *testing.T) {
 // downstream could have made sense of the result either.
 func TestARunCannotJoinAnotherSessionsTask(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.db")
-	if err := Link(path, "web-b/inv-1", "web-a", "inv-9"); err == nil {
+	if err := Link(stateDB(t, path), "web-b/inv-1", "web-a", "inv-9"); err == nil {
 		t.Fatal("跨会话的任务归属被接受了")
 	}
-	if got, err := OfSession(path, "web-a"); err != nil || len(got) != 0 {
+	if got, err := OfSession(stateDB(t, path), "web-a"); err != nil || len(got) != 0 {
 		t.Errorf("被拒绝的归属仍然写进了库: %v, %v", got, err)
 	}
 	// Its own session is fine, which is the whole normal path.
-	if err := Link(path, "web-a/inv-1", "web-a", "inv-2"); err != nil {
+	if err := Link(stateDB(t, path), "web-a/inv-1", "web-a", "inv-2"); err != nil {
 		t.Fatalf("同会话的续跑被拒绝了: %v", err)
 	}
-	if got, _ := OfSession(path, "web-a"); got["inv-2"] != "web-a/inv-1" {
+	if got, _ := OfSession(stateDB(t, path), "web-a"); got["inv-2"] != "web-a/inv-1" {
 		t.Errorf("links = %v", got)
 	}
 }
@@ -217,12 +217,12 @@ func TestDeleteSessionsRemovesEveryNamedSession(t *testing.T) {
 		{"s2", "i1"},
 		{"s3", "i1"}, // not named below; must survive
 	} {
-		if err := Link(path, ID(s.session, s.inv), s.session, s.inv); err != nil {
+		if err := Link(stateDB(t, path), ID(s.session, s.inv), s.session, s.inv); err != nil {
 			t.Fatal(err)
 		}
 	}
 
-	n, err := DeleteSessions(path, []string{"s1", "s2"})
+	n, err := DeleteSessions(stateDB(t, path), []string{"s1", "s2"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -238,7 +238,7 @@ func TestDeleteSessionsRemovesEveryNamedSession(t *testing.T) {
 
 func TestDeleteSessionsIgnoresBlanksAndEmptyInput(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.db")
-	if err := Link(path, ID("s1", "i1"), "s1", "i1"); err != nil {
+	if err := Link(stateDB(t, path), ID("s1", "i1"), "s1", "i1"); err != nil {
 		t.Fatal(err)
 	}
 	// A row whose session_id is the empty string — the column's default, so
@@ -247,14 +247,14 @@ func TestDeleteSessionsIgnoresBlanksAndEmptyInput(t *testing.T) {
 
 	// An empty id must not become a placeholder, because IN ('') would delete
 	// exactly that row.
-	n, err := DeleteSessions(path, []string{"", ""})
+	n, err := DeleteSessions(stateDB(t, path), []string{"", ""})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if n != 0 {
 		t.Errorf("deleted %d rows for a list of blanks", n)
 	}
-	if n, err := DeleteSessions(path, nil); err != nil || n != 0 {
+	if n, err := DeleteSessions(stateDB(t, path), nil); err != nil || n != 0 {
 		t.Errorf("empty list: %d, %v", n, err)
 	}
 	if left := remaining(t, path); len(left) != 2 {

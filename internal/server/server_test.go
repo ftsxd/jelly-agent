@@ -13,6 +13,8 @@ import (
 	"github.com/jelly-agent/jelly-agent/internal/engine"
 	"github.com/jelly-agent/jelly-agent/internal/metrics"
 	"golang.org/x/crypto/bcrypt"
+
+	"github.com/jelly-agent/jelly-agent/internal/storage"
 )
 
 // newTestServer builds an API-only server over an engine whose memory lives in a
@@ -352,4 +354,19 @@ func TestSPAFallback(t *testing.T) {
 	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "ok") {
 		t.Fatalf("api route shadowed by SPA: code=%d", w.Code)
 	}
+}
+
+// stateDBOf is the server's shared handle on the state database.
+//
+// A helper because tests reach into these stores directly to set up or assert,
+// and they take a handle now rather than a path: they used to open one per
+// call, free against a local file and a full connection handshake against
+// PostgreSQL.
+func stateDBOf(t *testing.T, s *Server) *storage.DB {
+	t.Helper()
+	db, err := s.engine().StateDB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return db
 }

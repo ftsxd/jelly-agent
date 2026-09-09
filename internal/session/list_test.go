@@ -44,7 +44,7 @@ func TestListPageAndAllIDs(t *testing.T) {
 		time.Sleep(3 * time.Millisecond) // ensure strictly increasing update_time
 	}
 
-	page, total, err := ListPage(dbPath, app, user, 2, 0)
+	page, total, err := ListPage(stateDB(t, dbPath), app, user, 2, 0)
 	if err != nil {
 		t.Fatalf("ListPage: %v", err)
 	}
@@ -65,7 +65,7 @@ func TestListPageAndAllIDs(t *testing.T) {
 	}
 
 	// Second page continues the order without overlap.
-	page2, _, err := ListPage(dbPath, app, user, 2, 2)
+	page2, _, err := ListPage(stateDB(t, dbPath), app, user, 2, 2)
 	if err != nil {
 		t.Fatalf("ListPage page2: %v", err)
 	}
@@ -74,7 +74,7 @@ func TestListPageAndAllIDs(t *testing.T) {
 	}
 
 	// AllIDs returns every id, newest first.
-	ids, err := AllIDs(dbPath, app, user)
+	ids, err := AllIDs(stateDB(t, dbPath), app, user)
 	if err != nil {
 		t.Fatalf("AllIDs: %v", err)
 	}

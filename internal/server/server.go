@@ -17,6 +17,10 @@ import (
 	"github.com/jelly-agent/jelly-agent/internal/engine"
 	"github.com/jelly-agent/jelly-agent/internal/memory"
 	jellysession "github.com/jelly-agent/jelly-agent/internal/session"
+
+	"github.com/jelly-agent/jelly-agent/internal/storage"
+
+	"github.com/jelly-agent/jelly-agent/internal/logging"
 )
 
 // Server wires the engine and embedded frontend assets to an HTTP handler. The
@@ -62,14 +66,21 @@ func New(eng *engine.Engine, staticFS fs.FS) *Server {
 	// Resolved from the engine rather than defaulted, for the same reason the
 	// delete path is: a deployment with its own database must not have its
 	// housekeeping run against a different one.
-	dbPath := eng.SessionDBPath()
-	if n, err := jellysession.PurgeOrphanEvents(dbPath); err == nil && n > 0 {
-		slog.Info("清理孤儿会话事件", "rows", n)
-	}
-	// Same for the L2 search index: drop rows whose session was deleted before
-	// the index was purged alongside it, so load_memory can't surface them.
-	if n, err := memory.PurgeOrphanIndex(dbPath); err == nil && n > 0 {
-		slog.Info("清理孤儿检索索引", "rows", n)
+	if db, err := eng.StateDB(); err != nil {
+		// Best-effort, and the only place that says so out loud: a database
+		// that will not open is reported by every handler that needs it, so
+		// failing construction here would trade a degraded console for none.
+		slog.Warn("状态数据库打不开，跳过启动清理", logging.Err(err))
+	} else {
+		if n, err := jellysession.PurgeOrphanEvents(db); err == nil && n > 0 {
+			slog.Info("清理孤儿会话事件", "rows", n)
+		}
+		// Same for the L2 search index: drop rows whose session was deleted
+		// before the index was purged alongside it, so load_memory can't
+		// surface them.
+		if n, err := memory.PurgeOrphanIndex(db); err == nil && n > 0 {
+			slog.Info("清理孤儿检索索引", "rows", n)
+		}
 	}
 	s := &Server{eng: eng, static: staticFS, auth: newAuthManager()}
 	s.attachScheduleTools(eng)
@@ -88,6 +99,24 @@ func (s *Server) engine() *engine.Engine {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.eng
+}
+
+// stateDB is the shared handle on the state database, or an error a handler
+// can answer with.
+//
+// A helper rather than each handler repeating it, because the failure is the
+// same everywhere: the database could not be opened, which is a 500 and not
+// something a request can recover from. The handle itself is opened once for
+// the process — the stores that live in this database used to open one per
+// call, which costs nothing against a local file and a full connection
+// handshake against PostgreSQL.
+func (s *Server) stateDB(w http.ResponseWriter) (*storage.DB, bool) {
+	db, err := s.engine().StateDB()
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "打不开状态数据库: "+err.Error())
+		return nil, false
+	}
+	return db, true
 }
 
 // reload re-reads config from disk and swaps in a fresh engine, so subsequent

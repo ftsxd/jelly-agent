@@ -176,9 +176,9 @@ MySQL 会以 error 1093 拒绝这条语句（INSERT 的子查询引用了目标�
 
 所以短期内看到 Seq Scan 不是索引坏了，是数据量还没到。
 
-## 接线时必须一起解决的：句柄不能每次调用现开
+## 句柄生命周期（已解决）
 
-七个 store 里有四个是**每次调用现开一个句柄再关掉**（`open()` → `defer
+七个 store 里曾有四个是**每次调用现开一个句柄再关掉**（`open()` → `defer
 db.Close()`）：`internal/task`、`internal/session/list`、
 `internal/memory/purge`、`internal/schedule`。
 
@@ -187,19 +187,28 @@ db.Close()`）：`internal/task`、`internal/session/list`、
 
 | | 每次 `SELECT 1` |
 |---|---|
-| 每次调用现开句柄（这四个 store 的现状） | **9.337 ms** |
-| 复用已有句柄（record / metrics / memory-fts 的做法） | **579 µs** |
+| 每次调用现开句柄 | **9.337 ms** |
+| 复用已有句柄 | **579 µs** |
 | | **16 倍** |
 
-具体后果：`session.ListPage` 在每次会话页加载时付一次；
-`handleDeleteSessions` 连着调三个清理函数，就是三次握手，纯开销 28ms。
+`session.ListPage` 在每次会话页加载时付一次；`handleDeleteSessions` 连着调
+三个清理函数就是三次握手。
 
-所以这不是「接完再优化」，是接线的一部分——否则第一次跑 PG 会慢得离谱，
-而人会去查错的地方。两条路：把这四个 store 改成持有句柄（和另外三个一样），
-或者在 `storage` 里按 DSN 共享句柄。前者更干净，后者改动小。
+现在这四个 store 都改成接收 `*storage.DB`，句柄由 `engine.StateDB()` 持有，
+整个进程一个。守卫测试盯着 `defer db.Close()` 不让它长回来。
 
-顺带一件相关的：`postgresConnLimit` 现在设成 4，因为七个 store 各开一个池，
-乘七是 28，而 PG 默认 `max_connections` 是 100。句柄共享之后这个数就该重定。
+顺带修掉的：
+
+- 这些 opener 每次调用都跑一遍 `CREATE TABLE IF NOT EXISTS`（`schedule` 还
+  多跑两次 migrate 探测）。对已存在的表是空操作，但仍然是往返。现在各包
+  暴露 `EnsureSchema`，开句柄时统一跑一次。
+- `schedule.open()` 调的是 `session.DefaultDBPath()`，**忽略配置的路径** ——
+  一个把状态库挪了位置的部署，排程历史会被悄悄写到默认位置。接收共享句柄
+  从结构上消除了这个问题。
+
+`postgresConnLimit` 现在仍是 4：`record` / `metrics` / `memory-fts` 三个
+store 还各自持有自己的句柄，所以进程仍有四个池。把它们也收到
+`engine.StateDB()` 之后这个数要重定。
 
 ## 还没验的一项
 

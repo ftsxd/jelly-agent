@@ -16,7 +16,11 @@ func TestAChatCannotClaimAnotherSessionsTask(t *testing.T) {
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400: %s", w.Code, w.Body.String())
 	}
-	links, err := task.OfSession(s.engine().SessionDBPath(), "web-mine")
+	db, err := s.engine().StateDB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	links, err := task.OfSession(db, "web-mine")
 	if err != nil {
 		t.Fatal(err)
 	}

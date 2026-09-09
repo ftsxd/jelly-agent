@@ -38,7 +38,7 @@ func TestDeleteSessionsCascadesEvents(t *testing.T) {
 	mk("keep", 2)
 	mk("drop", 3)
 
-	deleted, err := DeleteSessions(dbPath, app, user, []string{"drop", "missing"})
+	deleted, err := DeleteSessions(stateDB(t, dbPath), app, user, []string{"drop", "missing"})
 	if err != nil {
 		t.Fatalf("DeleteSessions: %v", err)
 	}
@@ -47,7 +47,7 @@ func TestDeleteSessionsCascadesEvents(t *testing.T) {
 	}
 
 	// "drop" and its events are gone; "keep" untouched.
-	rows, total, err := ListPage(dbPath, app, user, 50, 0)
+	rows, total, err := ListPage(stateDB(t, dbPath), app, user, 50, 0)
 	if err != nil {
 		t.Fatalf("ListPage: %v", err)
 	}
@@ -59,21 +59,18 @@ func TestDeleteSessionsCascadesEvents(t *testing.T) {
 	}
 
 	// No orphans should remain (delete removed drop's events).
-	if n, err := PurgeOrphanEvents(dbPath); err != nil || n != 0 {
+	if n, err := PurgeOrphanEvents(stateDB(t, dbPath)); err != nil || n != 0 {
 		t.Errorf("PurgeOrphanEvents after clean delete = (%d, %v), want (0, nil)", n, err)
 	}
 
 	// Simulate a legacy orphan: delete only the session row, leaving events.
-	db, err := openDB(dbPath)
-	if err != nil {
-		t.Fatalf("openDB: %v", err)
-	}
+	db := stateDB(t, dbPath)
 	if _, err := db.Exec(`DELETE FROM sessions WHERE id = ?`, "keep"); err != nil {
 		t.Fatalf("orphan setup: %v", err)
 	}
 	db.Close()
 
-	n, err := PurgeOrphanEvents(dbPath)
+	n, err := PurgeOrphanEvents(stateDB(t, dbPath))
 	if err != nil {
 		t.Fatalf("PurgeOrphanEvents: %v", err)
 	}

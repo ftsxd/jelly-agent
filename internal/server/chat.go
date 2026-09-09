@@ -148,7 +148,13 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 				// a log and not worth failing a turn the user is watching —
 				// and the status then belongs under its own id, because that
 				// is where the unlinked run will be displayed.
-				if err := task.Link(eng.SessionDBPath(), req.TaskID, sessionID, round); err != nil {
+				db, dbErr := eng.StateDB()
+				if dbErr != nil {
+					err = dbErr
+				} else {
+					err = task.Link(db, req.TaskID, sessionID, round)
+				}
+				if err != nil {
 					slog.Warn("任务归属未能记录，本次运行会显示为独立任务",
 						"task", req.TaskID, "session", sessionID, logging.Err(err))
 				} else {

@@ -158,7 +158,11 @@ func (s *Server) handleToolResultSearch(w http.ResponseWriter, r *http.Request) 
 // that never existed answer the same 404: telling them apart would tell a
 // caller which conversations used to be here.
 func (s *Server) sessionStillThere(w http.ResponseWriter, id string) bool {
-	ok, err := jellysession.Exists(s.engine().SessionDBPath(), engine.AppName, engine.UserID, id)
+	db, got := s.stateDB(w)
+	if !got {
+		return false
+	}
+	ok, err := jellysession.Exists(db, engine.AppName, engine.UserID, id)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return false

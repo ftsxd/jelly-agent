@@ -10,8 +10,6 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/jelly-agent/jelly-agent/internal/session"
-
 	"github.com/jelly-agent/jelly-agent/internal/storage"
 )
 
@@ -67,14 +65,8 @@ func migrate(db *storage.DB) error {
 // sessionID and invocationID may be empty — a run that failed before the agent
 // started has neither, and an empty string is the honest answer rather than a
 // fabricated id that would resolve to nothing.
-func Record(task string, started time.Time, status, output, message, sessionID, invocationID string) error {
-	db, err := open()
-	if err != nil {
-		return err
-	}
-	defer db.Close()
-
-	if _, err = db.Exec(`INSERT INTO schedule_runs
+func Record(db *storage.DB, task string, started time.Time, status, output, message, sessionID, invocationID string) error {
+	if _, err := db.Exec(`INSERT INTO schedule_runs
 		(task,started_at,finished_at,status,output,error,session_id,invocation_id)
 		VALUES(?,?,?,?,?,?,?,?)`,
 		task, started, time.Now(), status, output, message, sessionID, invocationID); err != nil {
@@ -82,24 +74,18 @@ func Record(task string, started time.Time, status, output, message, sessionID, 
 	}
 	// Keep one month of operational history. The newest records remain available
 	// in the dashboard while unattended schedules cannot grow state.db forever.
-	_, err = db.Exec(`DELETE FROM schedule_runs WHERE finished_at < ?`, time.Now().AddDate(0, 0, -30))
+	_, err := db.Exec(`DELETE FROM schedule_runs WHERE finished_at < ?`, time.Now().AddDate(0, 0, -30))
 	return err
 }
 
 // List returns a page of runs, newest first, optionally for one task.
-func List(task string, limit, offset int) ([]Run, int, error) {
+func List(db *storage.DB, task string, limit, offset int) ([]Run, int, error) {
 	if limit <= 0 {
 		limit = 50
 	}
 	if offset < 0 {
 		offset = 0
 	}
-	db, err := open()
-	if err != nil {
-		return nil, 0, err
-	}
-	defer db.Close()
-
 	where, args := "", []any{}
 	if task != "" {
 		where, args = " WHERE task=?", []any{task}
@@ -135,30 +121,16 @@ func List(task string, limit, offset int) ([]Run, int, error) {
 // The schema and the migration run here, once per connection, rather than
 // inline in every query — which is where they used to be, and why the table
 // could never gain a column.
-func open() (*storage.DB, error) {
-	p, err := session.DefaultDBPath()
-	if err != nil {
-		return nil, err
-	}
-	// storage.Open creates the parent directory: this store used to rely on
-	// some other component having made it first, which is true in a running
-	// server and false in anything that starts with only this package.
-	//
-	// It also gains the settings this opener never had. It was the one of the
-	// seven that set no PRAGMAs at all, so its connection to the shared
-	// state.db had no busy_timeout — a brief write lock from any other store
-	// failed a schedule write outright instead of waiting it out.
-	db, err := storage.Open(p)
-	if err != nil {
-		return nil, fmt.Errorf("schedule: %w", err)
-	}
+// EnsureSchema creates this store's table and brings an existing one up to
+// date. Called once when the shared handle is opened.
+//
+// The opener this replaced did both on every single call, and resolved its own
+// path with session.DefaultDBPath() — ignoring a configured location, so a
+// deployment that moved its state database had its schedule history quietly
+// written somewhere else. Taking the shared handle fixes that by construction.
+func EnsureSchema(db *storage.DB) error {
 	if _, err := db.Exec(schema); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("schedule: create table: %w", err)
+		return fmt.Errorf("schedule: create table: %w", err)
 	}
-	if err := migrate(db); err != nil {
-		db.Close()
-		return nil, err
-	}
-	return db, nil
+	return migrate(db)
 }

@@ -5,11 +5,17 @@ import (
 	"errors"
 	"fmt"
 
-	// Pure-Go SQLite driver (modernc.org/sqlite), registered as "sqlite" — the
-	// same driver the memory index uses, so both can open the shared state.db.
-
 	"github.com/jelly-agent/jelly-agent/internal/storage"
 )
+
+// EnsureSchema is a no-op, and says so rather than being absent.
+//
+// The sessions and events tables belong to ADK, which creates them with GORM
+// AutoMigrate when the session service opens (see NewSQLite). A hand-written
+// DDL here would be a second definition of somebody else's schema, silently
+// drifting the next time ADK changes its models. The read and delete helpers
+// in this package already tolerate the tables not being there yet.
+func EnsureSchema(*storage.DB) error { return nil }
 
 // SessionMeta is a lightweight session row for the list UI: id, event count and
 // last-update epoch (seconds) only — no event bodies, so listing stays cheap as
@@ -20,38 +26,18 @@ type SessionMeta struct {
 	LastUpdate int64
 }
 
-// openDB opens the shared state.db for short read queries, on the settings
-// internal/storage applies so this handle coexists with the session store's
-// writer. Used for both the read projections and the delete helpers. An empty
-// path resolves to DefaultDBPath. Caller closes the returned DB.
-func openDB(dbPath string) (*storage.DB, error) {
-	if dbPath == "" {
-		p, err := DefaultDBPath()
-		if err != nil {
-			return nil, err
-		}
-		dbPath = p
-	}
-	return storage.Open(dbPath)
-}
-
 // ListPage returns one page of sessions for app/user, newest first (update_time
 // desc, id desc), plus the total count for the same filter. Event counts come
 // from a COUNT join — ADK's session.List does not preload events, so this query
 // is also the only place the real per-session count is available. A limit <= 0
 // uses a default; offset < 0 is clamped to 0.
-func ListPage(dbPath, appName, userID string, limit, offset int) (rows []SessionMeta, total int, err error) {
+func ListPage(db *storage.DB, appName, userID string, limit, offset int) (rows []SessionMeta, total int, err error) {
 	if limit <= 0 {
 		limit = 50
 	}
 	if offset < 0 {
 		offset = 0
 	}
-	db, err := openDB(dbPath)
-	if err != nil {
-		return nil, 0, err
-	}
-	defer db.Close()
 
 	if err := db.QueryRow(
 		`SELECT COUNT(*) FROM sessions WHERE app_name = ? AND user_id = ?`,
@@ -94,12 +80,7 @@ LIMIT ? OFFSET ?`
 // AllIDs returns every session id for app/user (id only — cheap), newest first.
 // Backs the "select all across pages" action so batch delete can target the
 // full filtered set without paging through it.
-func AllIDs(dbPath, appName, userID string) ([]string, error) {
-	db, err := openDB(dbPath)
-	if err != nil {
-		return nil, err
-	}
-	defer db.Close()
+func AllIDs(db *storage.DB, appName, userID string) ([]string, error) {
 	res, err := db.Query(
 		`SELECT id FROM sessions WHERE app_name = ? AND user_id = ? ORDER BY update_time DESC, id DESC`,
 		appName, userID,
@@ -129,17 +110,12 @@ func AllIDs(dbPath, appName, userID string) ([]string, error) {
 // conversation that was deleted. Rows are removed with the session now, so
 // this is the second lock on the same door — and the one that still holds if a
 // delete only half succeeded.
-func Exists(dbPath, appName, userID, id string) (bool, error) {
+func Exists(db *storage.DB, appName, userID, id string) (bool, error) {
 	if id == "" {
 		return false, nil
 	}
-	db, err := openDB(dbPath)
-	if err != nil {
-		return false, err
-	}
-	defer db.Close()
 	var one int
-	err = db.QueryRow(
+	err := db.QueryRow(
 		`SELECT 1 FROM sessions WHERE app_name = ? AND user_id = ? AND id = ?`,
 		appName, userID, id,
 	).Scan(&one)

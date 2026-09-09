@@ -40,6 +40,9 @@ import (
 	"github.com/jelly-agent/jelly-agent/internal/toolreg"
 
 	"github.com/jelly-agent/jelly-agent/internal/logging"
+	"github.com/jelly-agent/jelly-agent/internal/schedule"
+	"github.com/jelly-agent/jelly-agent/internal/storage"
+	"github.com/jelly-agent/jelly-agent/internal/task"
 )
 
 // Wire a default audit sink so every sandboxed script run leaves a log line for
@@ -142,6 +145,17 @@ type Engine struct {
 	recordsOnce sync.Once
 	recordStore *record.Store
 	recordsErr  error
+
+	// stateOnce guards the one handle on the shared state database.
+	//
+	// Four stores used to open their own on every call and close it again —
+	// free against a local SQLite file, a TCP and authentication handshake
+	// against PostgreSQL. Measured at 9.3ms per call versus 579µs on a handle
+	// that is kept, so a sessions page paid the 9.3ms before doing any work
+	// and a bulk delete paid it three times.
+	stateOnce sync.Once
+	stateDB   *storage.DB
+	stateErr  error
 
 	// promptByAgent is the last exact fixed prompt shape observed at the model
 	// boundary. The console cannot reconstruct MCP schemas from metadata: the
@@ -716,6 +730,44 @@ func upstreamCut(delivered map[string]any) record.Upstream {
 	// Present but not a bool — a tool using the key for something else. Not a
 	// claim we can read either way.
 	return record.UpstreamUnknown
+}
+
+// StateDB is the process's one handle on the shared state database.
+//
+// The stores that live in it — sessions, task links, the schedule log, the L2
+// memory index — take this rather than a path, so the process holds one pool
+// instead of opening one per call. Each store's schema is created here, once,
+// for the same reason: the openers this replaced ran CREATE TABLE IF NOT
+// EXISTS on every call, which is a no-op that still costs a round trip.
+//
+// The handle is not closed per use. It lives as long as the process, which is
+// what a pool is for.
+func (e *Engine) StateDB() (*storage.DB, error) {
+	e.stateOnce.Do(func() {
+		path := e.sessionDBPath
+		if path == "" {
+			path, e.stateErr = jellysession.DefaultDBPath()
+			if e.stateErr != nil {
+				return
+			}
+		}
+		if e.stateDB, e.stateErr = storage.Open(path); e.stateErr != nil {
+			return
+		}
+		for _, ensure := range []func(*storage.DB) error{
+			jellysession.EnsureSchema,
+			task.EnsureSchema,
+			schedule.EnsureSchema,
+			memory.EnsureSchema,
+		} {
+			if err := ensure(e.stateDB); err != nil {
+				e.stateDB.Close()
+				e.stateDB, e.stateErr = nil, err
+				return
+			}
+		}
+	})
+	return e.stateDB, e.stateErr
 }
 
 // records opens the delivery store on first use.

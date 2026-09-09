@@ -16,18 +16,12 @@ import (
 // (idempotent); it returns how many session rows were actually removed. Deleting
 // events directly also handles ids containing "/" that the REST path-param route
 // cannot match.
-func DeleteSessions(dbPath, appName, userID string, ids []string) (int, error) {
+func DeleteSessions(db *storage.DB, appName, userID string, ids []string) (int, error) {
 	if len(ids) == 0 {
 		return 0, nil
 	}
-	db, err := openDB(dbPath)
-	if err != nil {
-		return 0, err
-	}
-	defer db.Close()
-
 	deleted := 0
-	err = db.InTx(context.Background(), func(tx *storage.Tx) error {
+	err := db.InTx(context.Background(), func(tx *storage.Tx) error {
 		for _, id := range ids {
 			if id == "" {
 				continue
@@ -82,13 +76,7 @@ var errNoSchema = errors.New("session: schema not created yet")
 // past deletes that ran before sessions and events were removed together. It is
 // best-effort: a brand-new database without the events table yet returns 0 and
 // no error. Returns the number of rows removed.
-func PurgeOrphanEvents(dbPath string) (int, error) {
-	db, err := openDB(dbPath)
-	if err != nil {
-		return 0, err
-	}
-	defer db.Close()
-
+func PurgeOrphanEvents(db *storage.DB) (int, error) {
 	res, err := db.Exec(`DELETE FROM events WHERE NOT EXISTS (
 		SELECT 1 FROM sessions s
 		WHERE s.app_name = events.app_name

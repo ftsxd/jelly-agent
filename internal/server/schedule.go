@@ -203,12 +203,22 @@ func (s *Server) runSchedule(ctx context.Context, t config.ScheduleTask) {
 			}
 		}
 	}
+	// A run that finished has to be recorded somewhere even if the database is
+	// unreachable, or an operator sees a schedule that never reports.
+	db, dbErr := s.engine().StateDB()
+	if dbErr != nil {
+		slog.Error("周期任务的运行记录写不进状态库", "task", t.Name, logging.Err(dbErr))
+	}
 	if err != nil {
-		_ = schedule.Record(t.Name, started, "failed", out, err.Error(), ref.session, ref.invocation)
+		if dbErr == nil {
+			_ = schedule.Record(db, t.Name, started, "failed", out, err.Error(), ref.session, ref.invocation)
+		}
 		slog.Error("周期任务失败", "task", t.Name, logging.Err(err))
 		return
 	}
-	_ = schedule.Record(t.Name, started, "succeeded", out, "", ref.session, ref.invocation)
+	if dbErr == nil {
+		_ = schedule.Record(db, t.Name, started, "succeeded", out, "", ref.session, ref.invocation)
+	}
 }
 
 // runRef is where a scheduled run's events landed, so its row can be joined to
@@ -384,7 +394,11 @@ func (s *Server) handleScheduleRuns(w http.ResponseWriter, r *http.Request) {
 	if n, err := strconv.Atoi(r.URL.Query().Get("offset")); err == nil && n >= 0 {
 		offset = n
 	}
-	runs, total, err := schedule.List(r.URL.Query().Get("task"), limit, offset)
+	db, ok := s.stateDB(w)
+	if !ok {
+		return
+	}
+	runs, total, err := schedule.List(db, r.URL.Query().Get("task"), limit, offset)
 	if err != nil {
 		writeErr(w, 500, err.Error())
 		return

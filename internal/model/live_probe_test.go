@@ -5,9 +5,9 @@ import (
 	"os"
 	"testing"
 
-	"gopkg.in/yaml.v3"
 	adkmodel "google.golang.org/adk/model"
 	"google.golang.org/genai"
+	"gopkg.in/yaml.v3"
 )
 
 // Live probe: not part of the suite (skipped without JELLY_LIVE=1). It exists

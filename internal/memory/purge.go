@@ -2,15 +2,22 @@ package memory
 
 import (
 	"context"
+	"fmt"
 	"strings"
 
 	"github.com/jelly-agent/jelly-agent/internal/storage"
 )
 
-// openIndexDB opens the shared state.db for the L2 index maintenance helpers
-// below. Caller closes.
-func openIndexDB(dbPath string) (*storage.DB, error) {
-	return storage.Open(dbPath)
+// EnsureSchema creates the L2 index table.
+//
+// It lives here rather than in NewSearch because the purge helpers run whether
+// or not search is enabled — server.go sweeps orphaned index rows at startup —
+// and they need the table to exist before they can find it empty.
+func EnsureSchema(db *storage.DB) error {
+	if _, err := db.Exec(createFTS); err != nil {
+		return fmt.Errorf("memory: create index: %w", err)
+	}
+	return nil
 }
 
 // tolerateMissing returns nil when err is a "no such table" error — the L2 index
@@ -28,21 +35,15 @@ func tolerateMissing(err error) error {
 // delete does not touch, so without this a deleted session's text stays
 // retrievable via load_memory. Best-effort and idempotent; safe to call even
 // when L2 search was never enabled. Returns the number of index rows removed.
-func PurgeSessions(dbPath string, ids []string) (int, error) {
+func PurgeSessions(db *storage.DB, ids []string) (int, error) {
 	if len(ids) == 0 {
 		return 0, nil
 	}
-	db, err := openIndexDB(dbPath)
-	if err != nil {
-		return 0, err
-	}
-	defer db.Close()
-
 	// Chunked to stay under the placeholder limit, and all of it in one
 	// transaction: this runs alongside the session and task purges, and a
 	// half-purged index leaves searchable text for a session that is gone.
 	n := 0
-	err = db.InTx(context.Background(), func(tx *storage.Tx) error {
+	err := db.InTx(context.Background(), func(tx *storage.Tx) error {
 		return storage.ForEachChunk(ids, func(chunk []string) error {
 			args := make([]any, len(chunk))
 			for i, id := range chunk {
@@ -68,13 +69,7 @@ func PurgeSessions(dbPath string, ids []string) (int, error) {
 // PurgeOrphanIndex removes L2 index rows whose session no longer exists —
 // leftovers from sessions deleted before the index was purged alongside them.
 // Best-effort: a missing memory_fts or sessions table yields 0 and no error.
-func PurgeOrphanIndex(dbPath string) (int, error) {
-	db, err := openIndexDB(dbPath)
-	if err != nil {
-		return 0, err
-	}
-	defer db.Close()
-
+func PurgeOrphanIndex(db *storage.DB) (int, error) {
 	res, err := db.Exec(`DELETE FROM memory_fts WHERE NOT EXISTS (
 		SELECT 1 FROM sessions s
 		WHERE s.app_name = memory_fts.app_name

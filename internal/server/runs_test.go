@@ -69,7 +69,7 @@ func TestTheListShowsAJoinedRunAsTheTasksStatus(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := task.Link(s.engine().SessionDBPath(), "web-live/inv-1", "web-live", "inv-2"); err != nil {
+	if err := task.Link(stateDBOf(t, s), "web-live/inv-1", "web-live", "inv-2"); err != nil {
 		t.Fatal(err)
 	}
 	s.runs().start("web-live", "inv-2", "web-live/inv-1")

@@ -102,9 +102,14 @@ func (s *Server) tasksOf(r *http.Request, svc adksession.Service, id string, inf
 	// Which runs were joined to an earlier task. Empty for everything written
 	// before that was possible, which is what makes historical data fold into
 	// one task per run rather than not at all.
-	links, err := task.OfSession(s.engine().SessionDBPath(), id)
-	if err != nil {
-		links = nil
+	// A failure here loses the run's task membership, which folds historical
+	// data into one task per run rather than not at all — the same degradation
+	// as a session written before the table existed. Not worth a 500.
+	var links map[string]string
+	if db, err := s.engine().StateDB(); err == nil {
+		if got, err := task.OfSession(db, id); err == nil {
+			links = got
+		}
 	}
 	tasks := foldTasks(id, frames, infoOf, links)
 
@@ -171,9 +176,13 @@ func (s *Server) handleTasks(w http.ResponseWriter, r *http.Request) {
 		sessionsTotal int
 		exhausted     bool
 	)
+	stateDB, ok := s.stateDB(w)
+	if !ok {
+		return
+	}
 	for scanned < taskScanMax {
 		metas, count, err := jellysession.ListPage(
-			s.engine().SessionDBPath(), engine.AppName, engine.UserID, taskScanPage, scanned)
+			stateDB, engine.AppName, engine.UserID, taskScanPage, scanned)
 		if err != nil {
 			writeErr(w, http.StatusInternalServerError, err.Error())
 			return

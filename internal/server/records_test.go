@@ -241,7 +241,11 @@ func TestDeletingASessionLeavesNothingReadable(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := task.Link(s.engine().SessionDBPath(), "web-gone/inv-1", "web-gone", "inv-2"); err != nil {
+	stateDB, err := s.engine().StateDB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := task.Link(stateDB, "web-gone/inv-1", "web-gone", "inv-2"); err != nil {
 		t.Fatal(err)
 	}
 	// Readable before, so the assertion after the delete means something.
@@ -275,7 +279,7 @@ func TestDeletingASessionLeavesNothingReadable(t *testing.T) {
 			t.Errorf("调用记录还在: %+v", rows)
 		}
 	}
-	links, err := task.OfSession(s.engine().SessionDBPath(), "web-gone")
+	links, err := task.OfSession(stateDB, "web-gone")
 	if err != nil {
 		t.Fatal(err)
 	}

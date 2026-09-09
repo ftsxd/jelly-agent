@@ -32,6 +32,11 @@ func TestDialectKnowledgeLivesOnlyInThisPackage(t *testing.T) {
 		// production — there is no other way to catch it.
 		{"*sql.DB", "hold a *storage.DB; a native handle skips the rebind"},
 		{"*sql.Tx", "hold a *storage.Tx; a native handle skips the rebind"},
+		// Opening one per call is free against a local file and a full TCP
+		// and authentication handshake against PostgreSQL — measured at
+		// 9.3ms versus 579µs on a handle that is kept. Four stores did this
+		// on every call; a handle comes from engine.StateDB now.
+		{"defer db.Close()", "take a *storage.DB; do not open one per call"},
 	}
 
 	root := filepath.Join("..", "..", "internal")

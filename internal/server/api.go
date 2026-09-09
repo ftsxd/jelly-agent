@@ -145,7 +145,11 @@ type sessionDTO struct {
 func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 	limit := queryInt(r, "limit", 50, 1, 200)
 	offset := queryInt(r, "offset", 0, 0, 1<<30)
-	rows, total, err := jellysession.ListPage(s.engine().SessionDBPath(), engine.AppName, engine.UserID, limit, offset)
+	db, ok := s.stateDB(w)
+	if !ok {
+		return
+	}
+	rows, total, err := jellysession.ListPage(db, engine.AppName, engine.UserID, limit, offset)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -199,7 +203,11 @@ func sessionPreview(ctx context.Context, svc adksession.Service, id string) stri
 // handleSessionIDs returns every session id (newest first) for the "select all
 // across pages" action, so batch delete can target the full set without paging.
 func (s *Server) handleSessionIDs(w http.ResponseWriter, _ *http.Request) {
-	ids, err := jellysession.AllIDs(s.engine().SessionDBPath(), engine.AppName, engine.UserID)
+	db, ok := s.stateDB(w)
+	if !ok {
+		return
+	}
+	ids, err := jellysession.AllIDs(db, engine.AppName, engine.UserID)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -348,7 +356,11 @@ const purgeTimeout = 30 * time.Second
 // the same id, that one went instead.
 func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	if _, err := jellysession.DeleteSessions(s.engine().SessionDBPath(), engine.AppName, engine.UserID, []string{id}); err != nil {
+	db, ok := s.stateDB(w)
+	if !ok {
+		return
+	}
+	if _, err := jellysession.DeleteSessions(db, engine.AppName, engine.UserID, []string{id}); err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -404,9 +416,18 @@ func (s *Server) purgeSessionTraces(ctx context.Context, ids []string) error {
 		errs = append(errs, fmt.Errorf("%s未能清理: %w", what, err))
 	}
 
+	db, dbErr := s.engine().StateDB()
+	if dbErr != nil {
+		// Two stores live in this database. Reported once rather than twice,
+		// and the rest of the purge still runs — the tool results and the
+		// call records are elsewhere.
+		fail("记忆索引与任务归属（状态库打不开）", dbErr, "sessions", len(ids))
+	}
 	// L2 search index, else load_memory could still surface the conversation.
-	if _, err := memory.PurgeSessions(s.engine().SessionDBPath(), ids); err != nil {
-		fail("记忆索引", err, "sessions", len(ids))
+	if dbErr == nil {
+		if _, err := memory.PurgeSessions(db, ids); err != nil {
+			fail("记忆索引", err, "sessions", len(ids))
+		}
 	}
 	store, err := s.engine().Records()
 	if err != nil {
@@ -425,8 +446,10 @@ func (s *Server) purgeSessionTraces(ctx context.Context, ids []string) error {
 			fail("调用记录", err, "sessions", len(ids))
 		}
 	}
-	if _, err := task.DeleteSessions(s.engine().SessionDBPath(), ids); err != nil {
-		fail("任务归属", err, "sessions", len(ids))
+	if dbErr == nil {
+		if _, err := task.DeleteSessions(db, ids); err != nil {
+			fail("任务归属", err, "sessions", len(ids))
+		}
 	}
 	return errors.Join(errs...)
 }
@@ -446,7 +469,11 @@ func (s *Server) handleDeleteSessions(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "ids 不能为空")
 		return
 	}
-	deleted, err := jellysession.DeleteSessions(s.engine().SessionDBPath(), engine.AppName, engine.UserID, in.IDs)
+	db, ok := s.stateDB(w)
+	if !ok {
+		return
+	}
+	deleted, err := jellysession.DeleteSessions(db, engine.AppName, engine.UserID, in.IDs)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, fmt.Sprintf("批量删除失败（已删除 %d 个）: %v", deleted, err))
 		return

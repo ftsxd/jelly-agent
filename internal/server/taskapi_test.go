@@ -270,7 +270,7 @@ func TestALinkedFollowUpJoinsTheOriginalTask(t *testing.T) {
 		t.Fatalf("before linking: tasks = %d", len(before.Tasks))
 	}
 
-	if err := task.Link(s.engine().SessionDBPath(), "web-link/inv-1", "web-link", "inv-2"); err != nil {
+	if err := task.Link(stateDBOf(t, s), "web-link/inv-1", "web-link", "inv-2"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -458,7 +458,7 @@ func TestAFoldedTaskKeepsEachRunsCallsApart(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := task.Link(s.engine().SessionDBPath(), "web-dup/inv-1", "web-dup", "inv-2"); err != nil {
+	if err := task.Link(stateDBOf(t, s), "web-dup/inv-1", "web-dup", "inv-2"); err != nil {
 		t.Fatal(err)
 	}
 

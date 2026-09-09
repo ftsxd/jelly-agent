@@ -18,8 +18,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jelly-agent/jelly-agent/internal/session"
-
 	"github.com/jelly-agent/jelly-agent/internal/storage"
 )
 
@@ -58,19 +56,14 @@ func Split(id string) (sessionID, invocationID string) {
 // Idempotent: re-running the same invocation (a retry, a reconnect) must not
 // create a second membership, and re-linking it to a different task would be a
 // caller error rather than a state change, so the row stands.
-func Link(dbPath, taskID, sessionID, invocationID string) error {
+func Link(db *storage.DB, taskID, sessionID, invocationID string) error {
 	if taskID == "" || sessionID == "" || invocationID == "" {
 		return fmt.Errorf("task: link needs a task, a session and an invocation")
 	}
 	if err := Owns(taskID, sessionID); err != nil {
 		return err
 	}
-	db, err := open(dbPath)
-	if err != nil {
-		return err
-	}
-	defer db.Close()
-	_, err = db.Exec(`INSERT INTO task_runs(task_id, session_id, invocation_id, at)
+	_, err := db.Exec(`INSERT INTO task_runs(task_id, session_id, invocation_id, at)
 		VALUES(?,?,?,?) ON CONFLICT(session_id, invocation_id) DO NOTHING`,
 		taskID, sessionID, invocationID, time.Now().UTC().Format(time.RFC3339Nano))
 	return err
@@ -96,12 +89,7 @@ func Owns(taskID, sessionID string) error {
 // Runs with no row are absent from the map, which the caller reads as "its own
 // task" — the common case, and the only case for anything written before this
 // table existed.
-func OfSession(dbPath, sessionID string) (map[string]string, error) {
-	db, err := open(dbPath)
-	if err != nil {
-		return nil, err
-	}
-	defer db.Close()
+func OfSession(db *storage.DB, sessionID string) (map[string]string, error) {
 	rows, err := db.Query(
 		`SELECT invocation_id, task_id FROM task_runs WHERE session_id = ?`, sessionID)
 	if err != nil {
@@ -126,23 +114,15 @@ func OfSession(dbPath, sessionID string) (map[string]string, error) {
 // and a store that resolves its own path ignores it. Two handlers already had
 // this bug; a test writing links into the developer's real database is how
 // this one surfaced. Empty still means the shared default.
-func open(dbPath string) (*storage.DB, error) {
-	p := dbPath
-	if p == "" {
-		var err error
-		if p, err = session.DefaultDBPath(); err != nil {
-			return nil, err
-		}
-	}
-	db, err := storage.Open(p)
-	if err != nil {
-		return nil, fmt.Errorf("task: %w", err)
-	}
+// EnsureSchema creates this store's table. Called once when the shared handle
+// is opened, rather than on every call as the opener it replaced did — a
+// CREATE TABLE IF NOT EXISTS against an existing table is a no-op that still
+// costs a round trip.
+func EnsureSchema(db *storage.DB) error {
 	if _, err := db.Exec(schema); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("task: create table: %w", err)
+		return fmt.Errorf("task: create table: %w", err)
 	}
-	return db, nil
+	return nil
 }
 
 // DeleteSessions drops the task memberships of the given sessions.
@@ -150,7 +130,7 @@ func open(dbPath string) (*storage.DB, error) {
 // Called when the sessions are deleted. A membership row names a session, an
 // invocation and the task they belonged to, so it outlives the conversation it
 // describes unless it goes with it.
-func DeleteSessions(dbPath string, ids []string) (int, error) {
+func DeleteSessions(db *storage.DB, ids []string) (int, error) {
 	// One statement rather than one per id.
 	//
 	// The loop it replaces returned the count so far alongside the error, so a
@@ -169,11 +149,6 @@ func DeleteSessions(dbPath string, ids []string) (int, error) {
 	if len(kept) == 0 {
 		return 0, nil
 	}
-	db, err := open(dbPath)
-	if err != nil {
-		return 0, err
-	}
-	defer db.Close()
 
 	// Chunked, because a single IN (…) is a wall: SQLite refuses past 32,766
 	// placeholders and PostgreSQL's protocol past 65,535, while the id list
@@ -183,7 +158,7 @@ func DeleteSessions(dbPath string, ids []string) (int, error) {
 	// caller reports as irreversible (server.purgeSessionTraces). Half a purge
 	// leaves task rows pointing at events that are gone.
 	n := 0
-	err = db.InTx(context.Background(), func(tx *storage.Tx) error {
+	err := db.InTx(context.Background(), func(tx *storage.Tx) error {
 		return storage.ForEachChunk(kept, func(chunk []any) error {
 			res, err := tx.Exec(
 				`DELETE FROM task_runs WHERE session_id IN (`+storage.Placeholders(len(chunk))+`)`,
