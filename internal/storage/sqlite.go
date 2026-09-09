@@ -2,7 +2,10 @@ package storage
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
+
+	sqlite "github.com/glebarez/go-sqlite"
 )
 
 // Everything SQLite-specific. A second dialect goes in a file beside this one
@@ -59,4 +62,28 @@ func hasColumn(db *sql.DB, table, column string) (bool, error) {
 		`SELECT count(*) FROM pragma_table_info(?) WHERE name = ?`, table, column,
 	).Scan(&n)
 	return n > 0, err
+}
+
+// SQLITE_CONSTRAINT_UNIQUE / _PRIMARYKEY. Two extended codes because SQLite
+// reports a clash on a UNIQUE index and one on a PRIMARY KEY separately, and
+// callers retrying an allocation care about neither distinction.
+const (
+	sqliteConstraintUnique     = 2067
+	sqliteConstraintPrimaryKey = 1555
+)
+
+// isUniqueViolation reports whether err is a uniqueness clash.
+//
+// The equivalent on PostgreSQL is SQLSTATE 23505 (verified against 16.6),
+// which is why this is not a
+// strings.Contains at the call site. Callers use it to retry an allocation
+// that lost a race, so a false negative turns a retryable conflict into a
+// failed tool result, and a false positive retries something that will never
+// succeed — the code, not the message.
+func isUniqueViolation(err error) bool {
+	var e *sqlite.Error
+	if !errors.As(err, &e) {
+		return false
+	}
+	return e.Code() == sqliteConstraintUnique || e.Code() == sqliteConstraintPrimaryKey
 }

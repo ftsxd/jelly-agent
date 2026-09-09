@@ -203,3 +203,98 @@ func TestARunCannotJoinAnotherSessionsTask(t *testing.T) {
 		t.Errorf("links = %v", got)
 	}
 }
+
+// Deleting a session's runs is part of an irreversible purge
+// (server.purgeSessionTraces), so it has to be all of them or none.
+//
+// It used to be a loop of one DELETE per id that returned the count so far
+// alongside the error, which meant a failure partway left some sessions purged
+// and some not — task rows pointing at events that are gone.
+func TestDeleteSessionsRemovesEveryNamedSession(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.db")
+	for _, s := range []struct{ session, inv string }{
+		{"s1", "i1"}, {"s1", "i2"}, // two runs of one session
+		{"s2", "i1"},
+		{"s3", "i1"}, // not named below; must survive
+	} {
+		if err := Link(path, ID(s.session, s.inv), s.session, s.inv); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	n, err := DeleteSessions(path, []string{"s1", "s2"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 3 {
+		t.Errorf("deleted %d rows, want 3 (s1 has two runs, s2 has one)", n)
+	}
+
+	left := remaining(t, path)
+	if len(left) != 1 || left[0] != "s3" {
+		t.Errorf("still there: %v — want only s3", left)
+	}
+}
+
+func TestDeleteSessionsIgnoresBlanksAndEmptyInput(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.db")
+	if err := Link(path, ID("s1", "i1"), "s1", "i1"); err != nil {
+		t.Fatal(err)
+	}
+	// A row whose session_id is the empty string — the column's default, so
+	// this is what rows written before it was recorded look like.
+	writeBlankSession(t, path)
+
+	// An empty id must not become a placeholder, because IN ('') would delete
+	// exactly that row.
+	n, err := DeleteSessions(path, []string{"", ""})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Errorf("deleted %d rows for a list of blanks", n)
+	}
+	if n, err := DeleteSessions(path, nil); err != nil || n != 0 {
+		t.Errorf("empty list: %d, %v", n, err)
+	}
+	if left := remaining(t, path); len(left) != 2 {
+		t.Errorf("still there: %v — want both the blank row and s1 untouched", left)
+	}
+}
+
+func writeBlankSession(t *testing.T, path string) {
+	t.Helper()
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(
+		`INSERT INTO task_runs(task_id, session_id, invocation_id, at) VALUES ('legacy','','i0','')`,
+	); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func remaining(t *testing.T, path string) []string {
+	t.Helper()
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	rows, err := db.Query(`SELECT DISTINCT session_id FROM task_runs ORDER BY session_id`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var s string
+		if err := rows.Scan(&s); err != nil {
+			t.Fatal(err)
+		}
+		out = append(out, s)
+	}
+	return out
+}

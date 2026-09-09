@@ -296,11 +296,47 @@ func (s *Store) Put(ctx context.Context, r Record) (string, error) {
 	}
 	sum := sha256.Sum256(r.Payload)
 
-	// One statement, so allocating the number and writing the row cannot come
-	// apart. COALESCE(MAX(seq),0)+1 is evaluated against the session's rows;
-	// the unique index on (scope, seq) turns any race into a failed write
-	// rather than two deliveries sharing a handle.
-	_, err := s.db.ExecContext(ctx, `
+	// Retried, because losing the race for a sequence number is a normal
+	// outcome and not a failure of this delivery.
+	//
+	// Two Puts in the same session both evaluate COALESCE(MAX(seq),0)+1, both
+	// get N, and the unique index rejects the second. That is the index doing
+	// its job — two deliveries must never share a handle — but the loser has a
+	// perfectly good payload and simply needs the next number.
+	//
+	// On SQLite this never fires: one writer at a time means the two readers
+	// never overlap. It is here for the networked database, where they do.
+	seq, err := storage.RetryOnConflict(putAttempts, func() (int, error) {
+		return s.put(ctx, r, sum)
+	})
+	if err != nil {
+		return "", err
+	}
+	return Label(seq), nil
+}
+
+// putAttempts bounds the retry above.
+//
+// Each attempt re-reads MAX(seq), so a retry only fails again if another
+// delivery landed in between — with a handful of concurrent tools per turn,
+// losing four times running would mean something other than contention.
+const putAttempts = 4
+
+// put is one attempt: allocate the number and write the row.
+//
+// The two statements are in a transaction so the handle that comes back names
+// the row that was just written. Without it, retention or a session delete
+// landing in between turns the read-back into "no rows", reported as a failed
+// delivery for a payload that was stored fine.
+//
+// The allocation stays inside the INSERT rather than being a SELECT of its
+// own: as one statement it cannot come apart, and the unique index on
+// (scope, seq) turns a lost race into a failed write rather than two
+// deliveries sharing a handle — which is what the loop above retries.
+func (s *Store) put(ctx context.Context, r Record, sum [32]byte) (int, error) {
+	var seq int
+	err := storage.InTx(ctx, s.db, func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx, `
 		INSERT INTO tool_results
 			(app_name,user_id,session_id,invocation_id,call_id,seq,tool,server,at,bytes,sha256,upstream,payload)
 		VALUES (?,?,?,?,?,
@@ -311,23 +347,22 @@ func (s *Store) Put(ctx context.Context, r Record) (string, error) {
 			tool=excluded.tool, server=excluded.server,
 			at=excluded.at, bytes=excluded.bytes, sha256=excluded.sha256,
 			upstream=excluded.upstream, payload=excluded.payload`,
-		r.AppName, r.UserID, r.SessionID, r.InvocationID, r.CallID,
-		r.AppName, r.UserID, r.SessionID,
-		r.Tool, r.Server, r.At.UTC().Format(time.RFC3339Nano),
-		len(r.Payload), hex.EncodeToString(sum[:]), string(r.Upstream), r.Payload)
-	if err != nil {
-		return "", fmt.Errorf("record: put %s/%s: %w", r.SessionID, r.CallID, err)
-	}
-
-	var seq int
-	if err := s.db.QueryRowContext(ctx, `
+			r.AppName, r.UserID, r.SessionID, r.InvocationID, r.CallID,
+			r.AppName, r.UserID, r.SessionID,
+			r.Tool, r.Server, r.At.UTC().Format(time.RFC3339Nano),
+			len(r.Payload), hex.EncodeToString(sum[:]), string(r.Upstream), r.Payload); err != nil {
+			return fmt.Errorf("record: put %s/%s: %w", r.SessionID, r.CallID, err)
+		}
+		if err := tx.QueryRowContext(ctx, `
 		SELECT seq FROM tool_results
 		WHERE app_name=? AND user_id=? AND session_id=? AND invocation_id=? AND call_id=?`,
-		r.AppName, r.UserID, r.SessionID, r.InvocationID, r.CallID,
-	).Scan(&seq); err != nil {
-		return "", fmt.Errorf("record: read back handle for %s/%s: %w", r.SessionID, r.CallID, err)
-	}
-	return Label(seq), nil
+			r.AppName, r.UserID, r.SessionID, r.InvocationID, r.CallID,
+		).Scan(&seq); err != nil {
+			return fmt.Errorf("record: read back handle for %s/%s: %w", r.SessionID, r.CallID, err)
+		}
+		return nil
+	})
+	return seq, err
 }
 
 // ReadLabel returns a window of the delivery a model-visible handle names.

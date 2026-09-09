@@ -151,7 +151,22 @@ func open(dbPath string) (*sql.DB, error) {
 // invocation and the task they belonged to, so it outlives the conversation it
 // describes unless it goes with it.
 func DeleteSessions(dbPath string, ids []string) (int, error) {
-	if len(ids) == 0 {
+	// One statement rather than one per id.
+	//
+	// The loop it replaces returned the count so far alongside the error, so a
+	// failure partway left some sessions purged and some not — on a delete the
+	// caller reports as irreversible (server.purgeSessionTraces). Deleting
+	// everything or nothing is not a nicety here; a half-purged session leaves
+	// task rows pointing at events that are gone.
+	//
+	// Same shape as memory.PurgeSessions, which already did it this way.
+	kept := make([]any, 0, len(ids))
+	for _, id := range ids {
+		if id != "" {
+			kept = append(kept, id)
+		}
+	}
+	if len(kept) == 0 {
 		return 0, nil
 	}
 	db, err := open(dbPath)
@@ -159,18 +174,12 @@ func DeleteSessions(dbPath string, ids []string) (int, error) {
 		return 0, err
 	}
 	defer db.Close()
-	n := 0
-	for _, id := range ids {
-		if id == "" {
-			continue
-		}
-		res, err := db.Exec(`DELETE FROM task_runs WHERE session_id = ?`, id)
-		if err != nil {
-			return n, fmt.Errorf("task: delete runs of %s: %w", id, err)
-		}
-		if c, _ := res.RowsAffected(); c > 0 {
-			n += int(c)
-		}
+
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(kept)), ",")
+	res, err := db.Exec(`DELETE FROM task_runs WHERE session_id IN (`+placeholders+`)`, kept...)
+	if err != nil {
+		return 0, fmt.Errorf("task: delete runs of %d sessions: %w", len(kept), err)
 	}
-	return n, nil
+	n, _ := res.RowsAffected()
+	return int(n), nil
 }
