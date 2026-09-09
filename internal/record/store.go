@@ -153,10 +153,12 @@ CREATE TABLE IF NOT EXISTS tool_results (
 	session_id    TEXT    NOT NULL,
 	invocation_id TEXT    NOT NULL,
 	call_id       TEXT    NOT NULL,
-	-- seq numbers deliveries within a session, assigned here rather than by
-	-- the caller. An in-process counter would reset on restart and hand the
-	-- next turn a label that already refers to something else, which is the
-	-- one thing a durable reference cannot do.
+	-- seq numbers deliveries within a session, assigned by tool_result_seq
+	-- rather than by the caller. An in-process counter would reset on restart
+	-- and hand the next turn a label that already refers to something else,
+	-- which is the one thing a durable reference cannot do.
+	--
+	-- Monotonic and never reused; not contiguous. See tool_result_seq.
 	seq           INTEGER NOT NULL DEFAULT 0,
 	tool          TEXT    NOT NULL,
 	server        TEXT    NOT NULL DEFAULT '',
@@ -173,6 +175,30 @@ CREATE TABLE IF NOT EXISTS tool_results (
 );
 CREATE INDEX IF NOT EXISTS idx_tool_results_session ON tool_results(session_id);
 CREATE INDEX IF NOT EXISTS idx_tool_results_at      ON tool_results(at);
+
+-- One row per session, holding the number most recently handed out.
+--
+-- It replaces COALESCE(MAX(seq),0)+1 evaluated inside the insert, which read
+-- and wrote without holding anything: N deliveries landing together all read
+-- the same maximum, one won, and the rest were rejected by the unique index.
+-- Measured against PostgreSQL, the unluckiest of N concurrent writers needs
+-- exactly N attempts — six parallel tools lost two results, eight lost four.
+--
+-- An UPDATE takes a row lock, so the same N writers queue for microseconds and
+-- each leaves with a different number. Nothing is rejected, and nothing needs
+-- retrying — which matters because a retry could not have helped: the
+-- allocation and the write share a transaction, so rolling back returns the
+-- counter too and the next attempt asks for the same number again.
+CREATE TABLE IF NOT EXISTS tool_result_seq (
+	app_name   TEXT    NOT NULL,
+	user_id    TEXT    NOT NULL,
+	session_id TEXT    NOT NULL,
+	-- The number most recently handed out, not the next one. Named for what
+	-- it holds: the allocating statement increments and returns in one step,
+	-- so the value read back is the one just given away.
+	last_seq   INTEGER NOT NULL,
+	PRIMARY KEY (app_name, user_id, session_id)
+);
 `
 
 // The unique index is created after migrate, not in schema: on a database
@@ -252,6 +278,25 @@ func migrate(db *storage.DB) error {
 	if _, err := db.Exec(seqIndex); err != nil {
 		return fmt.Errorf("create seq index: %w", err)
 	}
+
+	// Seed the counter from what is already stored.
+	//
+	// MAX(seq), not COUNT(*). They agree only while the numbers are
+	// contiguous, and they are not: a re-put of the same call keeps its
+	// original number while the counter has already moved on, so a session
+	// with a gap would be seeded low and hand out a number the unique index
+	// already holds.
+	//
+	// Only sessions with no counter row are seeded, so this is a no-op on
+	// every start after the first.
+	if _, err := db.Exec(`
+		INSERT INTO tool_result_seq (app_name, user_id, session_id, last_seq)
+		SELECT app_name, user_id, session_id, MAX(seq)
+		FROM tool_results
+		GROUP BY app_name, user_id, session_id
+		ON CONFLICT (app_name, user_id, session_id) DO NOTHING`); err != nil {
+		return fmt.Errorf("seed sequence counters: %w", err)
+	}
 	return nil
 }
 
@@ -289,69 +334,63 @@ func (s *Store) Put(ctx context.Context, r Record) (string, error) {
 	}
 	sum := sha256.Sum256(r.Payload)
 
-	// Retried, because losing the race for a sequence number is a normal
-	// outcome and not a failure of this delivery.
-	//
-	// Two Puts in the same session both evaluate COALESCE(MAX(seq),0)+1, both
-	// get N, and the unique index rejects the second. That is the index doing
-	// its job — two deliveries must never share a handle — but the loser has a
-	// perfectly good payload and simply needs the next number.
-	//
-	// On SQLite this never fires: one writer at a time means the two readers
-	// never overlap. It is here for the networked database, where they do.
-	seq, err := storage.RetryOnConflict(putAttempts, func() (int, error) {
-		return s.put(ctx, r, sum)
-	})
+	seq, err := s.put(ctx, r, sum)
 	if err != nil {
 		return "", err
 	}
 	return Label(seq), nil
 }
 
-// putAttempts bounds the retry above.
+// put allocates this delivery's number and writes the row, as one transaction.
 //
-// Each attempt re-reads MAX(seq), so a retry only fails again if another
-// delivery landed in between — with a handful of concurrent tools per turn,
-// losing four times running would mean something other than contention.
-const putAttempts = 4
-
-// put is one attempt: allocate the number and write the row.
-//
-// The two statements are in a transaction so the handle that comes back names
-// the row that was just written. Without it, retention or a session delete
-// landing in between turns the read-back into "no rows", reported as a failed
-// delivery for a payload that was stored fine.
-//
-// The allocation stays inside the INSERT rather than being a SELECT of its
-// own: as one statement it cannot come apart, and the unique index on
-// (scope, seq) turns a lost race into a failed write rather than two
-// deliveries sharing a handle — which is what the loop above retries.
+// Not retried, deliberately. The counter blocks rather than collides, so the
+// unique index on (scope, seq) can only fire if the counter is behind the
+// table — seeded wrong, or a second writer still on the old MAX(seq)+1 path.
+// Retrying that would ask for the same number again, because the rollback
+// returns the counter along with everything else. It is an invariant to
+// report, not a race to wait out.
 func (s *Store) put(ctx context.Context, r Record, sum [32]byte) (int, error) {
 	var seq int
 	err := s.db.InTx(ctx, func(tx *storage.Tx) error {
-		if _, err := tx.ExecContext(ctx, `
+		// Increment and read in one statement: an UPDATE holds the row until
+		// the transaction ends, so concurrent deliveries in the same session
+		// queue instead of racing. Whoever waits leaves with a different
+		// number, and nothing is rejected.
+		if err := tx.QueryRowContext(ctx, `
+		INSERT INTO tool_result_seq (app_name, user_id, session_id, last_seq)
+		VALUES (?,?,?,1)
+		ON CONFLICT (app_name, user_id, session_id)
+		DO UPDATE SET last_seq = tool_result_seq.last_seq + 1
+		RETURNING last_seq`,
+			r.AppName, r.UserID, r.SessionID,
+		).Scan(&seq); err != nil {
+			return fmt.Errorf("record: allocate handle for %s/%s: %w", r.SessionID, r.CallID, err)
+		}
+
+		// RETURNING seq rather than a second SELECT, because on the conflict
+		// path the row keeps the number it already had: re-delivering a call
+		// must not change the handle the model was shown. The number just
+		// allocated is then spent, which is why handles are monotonic and not
+		// contiguous.
+		if err := tx.QueryRowContext(ctx, `
 		INSERT INTO tool_results
 			(app_name,user_id,session_id,invocation_id,call_id,seq,tool,server,at,bytes,sha256,upstream,payload)
-		VALUES (?,?,?,?,?,
-			(SELECT COALESCE(MAX(seq),0)+1 FROM tool_results
-			 WHERE app_name=? AND user_id=? AND session_id=?),
-			?,?,?,?,?,?,?)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(app_name,user_id,session_id,invocation_id,call_id) DO UPDATE SET
 			tool=excluded.tool, server=excluded.server,
 			at=excluded.at, bytes=excluded.bytes, sha256=excluded.sha256,
-			upstream=excluded.upstream, payload=excluded.payload`,
-			r.AppName, r.UserID, r.SessionID, r.InvocationID, r.CallID,
-			r.AppName, r.UserID, r.SessionID,
+			upstream=excluded.upstream, payload=excluded.payload
+		RETURNING seq`,
+			r.AppName, r.UserID, r.SessionID, r.InvocationID, r.CallID, seq,
 			r.Tool, r.Server, r.At.UTC().Format(time.RFC3339Nano),
-			len(r.Payload), hex.EncodeToString(sum[:]), string(r.Upstream), r.Payload); err != nil {
-			return fmt.Errorf("record: put %s/%s: %w", r.SessionID, r.CallID, err)
-		}
-		if err := tx.QueryRowContext(ctx, `
-		SELECT seq FROM tool_results
-		WHERE app_name=? AND user_id=? AND session_id=? AND invocation_id=? AND call_id=?`,
-			r.AppName, r.UserID, r.SessionID, r.InvocationID, r.CallID,
+			len(r.Payload), hex.EncodeToString(sum[:]), string(r.Upstream), r.Payload,
 		).Scan(&seq); err != nil {
-			return fmt.Errorf("record: read back handle for %s/%s: %w", r.SessionID, r.CallID, err)
+			if storage.IsUniqueViolation(err) {
+				return fmt.Errorf("record: handle %s is already taken in %s — "+
+					"the sequence counter is behind its table: %w",
+					Label(seq), r.SessionID, err)
+			}
+			return fmt.Errorf("record: put %s/%s: %w", r.SessionID, r.CallID, err)
 		}
 		return nil
 	})
@@ -478,8 +517,22 @@ func (s *Store) Delete(ctx context.Context, sc Scope) error {
 	if s == nil || s.db == nil {
 		return nil
 	}
-	_, err := s.db.ExecContext(ctx,
-		`DELETE FROM tool_results WHERE app_name=? AND user_id=? AND session_id=?`,
-		sc.AppName, sc.UserID, sc.SessionID)
-	return err
+	// The counter goes with the rows, in the same transaction.
+	//
+	// Left behind it is two problems. It still names the session, so a purge
+	// that is supposed to remove every trace has not; and if that session id
+	// ever comes back, its first delivery is numbered from where the deleted
+	// conversation left off — a handle that looks like history nobody can
+	// read. Separately would leave one of those true whenever the second
+	// statement failed.
+	return s.db.InTx(ctx, func(tx *storage.Tx) error {
+		for _, table := range []string{"tool_results", "tool_result_seq"} {
+			if _, err := tx.ExecContext(ctx,
+				`DELETE FROM `+table+` WHERE app_name=? AND user_id=? AND session_id=?`,
+				sc.AppName, sc.UserID, sc.SessionID); err != nil {
+				return fmt.Errorf("record: delete %s of %s: %w", table, sc.SessionID, err)
+			}
+		}
+		return nil
+	})
 }

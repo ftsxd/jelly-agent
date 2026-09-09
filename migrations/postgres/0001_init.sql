@@ -26,18 +26,11 @@ CREATE TABLE tool_results (
   invocation_id text NOT NULL,
   call_id       text NOT NULL,
 
-  -- 会话内的交付序号，模型看到的 e{seq}。由插入语句自己分配，不由调用方给：
-  -- 进程内计数器一重启就会把下一轮的编号指到别的证据上，这是一个持久句柄
-  -- 唯一不能出的错。
+  -- 会话内的交付序号，模型看到的 e{seq}。由 tool_result_seq 分配，不由调用方
+  -- 给：进程内计数器一重启就会把下一轮的编号指到别的证据上，这是一个持久
+  -- 句柄唯一不能出的错。
   --
-  -- 分配语句（internal/record/store.go Put）在 PG 上一字不用改：
-  --   INSERT INTO tool_results (...,seq,...) VALUES (...,
-  --     (SELECT COALESCE(MAX(seq),0)+1 FROM tool_results WHERE ...), ...)
-  --   ON CONFLICT (app_name,user_id,session_id,invocation_id,call_id)
-  --   DO UPDATE SET tool=excluded.tool, ...
-  -- MySQL 会以 error 1093 拒绝它（INSERT 的子查询不许引用目标表），PG 不会。
-  -- 那条注释说的「One statement, so allocating the number and writing the
-  -- row cannot come apart」继续成立。
+  -- 单调、不复用，但**不连续**。见 tool_result_seq。
   seq           bigint NOT NULL DEFAULT 0,
 
   tool          text NOT NULL,
@@ -71,6 +64,28 @@ CREATE TABLE tool_results (
 
 CREATE UNIQUE INDEX idx_tool_results_seq
   ON tool_results (app_name, user_id, session_id, seq);
+
+
+-- ═══ tool_result_seq ═════════════════════════════════════════════════════
+-- 每个会话一行，存最近发出去的那个号。
+--
+-- 它取代的是写在 INSERT 内部的 COALESCE(MAX(seq),0)+1 —— 那个写法读和写之间
+-- 不持有任何锁：N 条交付同时落地，全都读到同一个最大值，一个赢，其余被唯一
+-- 索引拒掉。在这台 PG 上实测过：N 个并发写入里最倒霉的那个正好需要第 N 次，
+-- 6 个并行工具丢 2 条结果，8 个丢 4 条。
+--
+-- UPDATE 会拿行锁，所以同样这 N 个写入排队几微秒，各自拿到不同的号。没有
+-- 任何一条被拒，也不需要重试 —— 而重试本来也救不了：分配和写入在同一个事务
+-- 里，回滚会把计数器一起退回，下一次重试拿到的还是同一个号。
+CREATE TABLE tool_result_seq (
+  app_name   text NOT NULL,
+  user_id    text NOT NULL,
+  session_id text NOT NULL,
+  -- 最近发出去的号，不是下一个。名字照它存的东西起：分配语句一步完成
+  -- 自增和返回，读回来的就是刚发出去的那个值。
+  last_seq   bigint NOT NULL,
+  PRIMARY KEY (app_name, user_id, session_id)
+);
 CREATE INDEX idx_tool_results_session ON tool_results (session_id);
 CREATE INDEX idx_tool_results_at      ON tool_results (at);
 

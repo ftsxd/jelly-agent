@@ -162,29 +162,3 @@ func Placeholders(n int) string {
 	}
 	return string(b)
 }
-
-// RetryOnConflict runs fn until it succeeds, gives up, or fails for a reason
-// retrying cannot fix.
-//
-// Retained only so this commit changes no behaviour while several hundred call
-// sites move onto the wrapper. It goes away with the sequence counter: once
-// numbers are handed out by something that blocks rather than collides, a
-// uniqueness clash means an invariant is broken, and retrying it four times
-// hides the signal instead of recovering from it — worse, when the allocation
-// and the write share a transaction the rollback returns the counter too, so
-// every retry asks for the same number again.
-func RetryOnConflict[T any](attempts int, fn func() (T, error)) (T, error) {
-	if attempts < 1 {
-		attempts = 1
-	}
-	var (
-		v   T
-		err error
-	)
-	for i := 0; i < attempts; i++ {
-		if v, err = fn(); err == nil || !IsUniqueViolation(err) {
-			return v, err
-		}
-	}
-	return v, err
-}
