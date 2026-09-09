@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	sqlite "github.com/glebarez/go-sqlite" // registers the "sqlite" driver
 )
@@ -121,4 +122,10 @@ func (sqliteDialect) hasTable(db *DB, table string) (bool, error) {
 
 func (sqliteDialect) epochSeconds(c string) string {
 	return `CAST(strftime('%s', ` + c + `) AS INTEGER)`
+}
+
+// isMissingTable matches the driver's message, which is all SQLite offers: the
+// extended code for it (SQLITE_ERROR) says nothing more than "error".
+func (sqliteDialect) isMissingTable(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "no such table")
 }

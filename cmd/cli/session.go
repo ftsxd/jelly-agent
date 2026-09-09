@@ -25,7 +25,15 @@ func newSessionListCmd() *cobra.Command {
 		Use:   "list",
 		Short: "列出持久化的历史会话",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			svc, err := jellysession.New("")
+			// The configured reference, not the default. Without this a
+			// deployment on PostgreSQL had `jelly session list` reading the
+			// SQLite file nobody writes to any more, and reporting no history
+			// at all — from the same binary that serves the console.
+			cfg, err := loadConfig()
+			if err != nil {
+				return err
+			}
+			svc, err := jellysession.New(cfg.Storage.DSN)
 			if err != nil {
 				return err
 			}

@@ -8,6 +8,7 @@ import (
 
 	"github.com/jelly-agent/jelly-agent/internal/config"
 	"github.com/jelly-agent/jelly-agent/internal/memory"
+	jellymetrics "github.com/jelly-agent/jelly-agent/internal/metrics"
 	"github.com/jelly-agent/jelly-agent/internal/record"
 	"github.com/jelly-agent/jelly-agent/internal/schedule"
 	jellysession "github.com/jelly-agent/jelly-agent/internal/session"
@@ -42,7 +43,7 @@ func TestEveryStoreWorksAgainstPostgres(t *testing.T) {
 	t.Cleanup(func() {
 		db.Exec(`DELETE FROM task_runs WHERE session_id = ?`, sess)
 		db.Exec(`DELETE FROM schedule_runs WHERE task = ?`, "pgstack")
-		db.Exec(`DELETE FROM memory_index WHERE session_id = ?`, sess)
+		db.Exec(`DELETE FROM memory_fts WHERE session_id = ?`, sess)
 	})
 
 	t.Run("ADK 的会话服务能建表并写读", func(t *testing.T) {
@@ -152,13 +153,57 @@ func TestEveryStoreWorksAgainstPostgres(t *testing.T) {
 		}
 	})
 
-	t.Run("调用记录", func(t *testing.T) {
+	t.Run("调用记录：写、读、删", func(t *testing.T) {
+		// Asserting a write and a read, not just a delete. A delete against an
+		// empty table succeeds on any dialect, so the first version of this
+		// subtest would have passed with the booleans still written as
+		// integers — which is exactly the bug PostgreSQL rejects.
 		tr := e.Metrics()
 		if tr == nil {
 			t.Skip("metrics 未启用")
 		}
-		if _, err := tr.DeleteSessions([]string{sess}); err != nil {
+		rec := tr.Recorder()
+		if rec == nil {
+			t.Fatal("tracker 没有 recorder —— 埋点被静默关掉了")
+		}
+		if err := rec.Record(jellymetrics.ToolCall{
+			SessionID: sess, InvocationID: "inv1", CallID: "c1",
+			Tool: "query_range", Agent: "root", Duration: 12 * time.Millisecond,
+			OK: true, At: time.Now(),
+		}); err != nil {
+			t.Fatalf("Record: %v", err)
+		}
+		// In this database, not merely somewhere. A recorder that fell back to
+		// the default path would write to a local SQLite file and read it back
+		// again, so a round-trip assertion alone cannot tell — which is how
+		// the metrics store came to be pointed at a different database from
+		// every table it joins against.
+		var landed int
+		if err := db.QueryRow(
+			`SELECT count(*) FROM tool_calls WHERE session_id = ?`, sess).Scan(&landed); err != nil {
+			t.Fatal(err)
+		}
+		if landed != 1 {
+			t.Fatalf("PostgreSQL 里有 %d 行 tool_calls，说明埋点写到别的库去了", landed)
+		}
+
+		rows, err := tr.ByInvocation(sess, "inv1")
+		if err != nil {
+			t.Fatalf("ByInvocation: %v", err)
+		}
+		if len(rows) != 1 {
+			t.Fatalf("read back %d rows, want 1", len(rows))
+		}
+		if !rows[0].OK || rows[0].Tool != "query_range" || rows[0].DurationMS != 12 {
+			t.Errorf("row = %+v", rows[0])
+		}
+
+		n, err := tr.DeleteSessions([]string{sess})
+		if err != nil {
 			t.Fatalf("DeleteSessions: %v", err)
+		}
+		if n != 1 {
+			t.Errorf("deleted %d rows, want 1", n)
 		}
 	})
 }

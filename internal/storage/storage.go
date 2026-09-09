@@ -113,6 +113,20 @@ func IsUniqueViolation(err error) bool {
 	return sqliteDialect{}.isUniqueViolation(err) || postgresDialect{}.isUniqueViolation(err)
 }
 
+// IsMissingTable reports whether err is "that table does not exist".
+//
+// Several callers tolerate it: a store whose schema has not been created yet
+// holds nothing, so listing or purging it is a no-op rather than a failure.
+// Three of them matched SQLite's message text, which on PostgreSQL is not a
+// match — a fresh deployment's first sessions-page load answered 500 with a
+// SQL error in it, until something happened to open the ADK service first.
+//
+// Both dialects are asked, because the classification has to survive an error
+// that came from a handle this function cannot see.
+func IsMissingTable(err error) bool {
+	return sqliteDialect{}.isMissingTable(err) || postgresDialect{}.isMissingTable(err)
+}
+
 // Column is one column a table is expected to have, and the DDL that adds it.
 type Column struct {
 	Name string

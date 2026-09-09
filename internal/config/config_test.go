@@ -166,3 +166,30 @@ func TestSaveRoundTripsEverySection(t *testing.T) {
 		t.Errorf("default_agent / skill_vars lost: %q %+v", out.DefaultAgent, out.SkillVars)
 	}
 }
+
+// Saving must not drop storage.dsn.
+//
+// It did, silently, because Save writes through a payload struct that lists
+// every section by hand and this one was missing. An operator points the
+// deployment at PostgreSQL, changes anything at all in the console, and the
+// next restart is back on the default SQLite file — with every row still in
+// the database nobody is reading any more.
+func TestSaveKeepsTheStorageDSN(t *testing.T) {
+	const dsn = "postgres://jelly:secret@db.example:5432/jelly?sslmode=disable"
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	in := &Config{
+		DefaultProvider: "deepseek",
+		Providers:       []Provider{{Name: "deepseek", Model: "deepseek-chat"}},
+		Storage:         Storage{DSN: dsn},
+	}
+	if err := Save(in, path); err != nil {
+		t.Fatal(err)
+	}
+	out, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Storage.DSN != dsn {
+		t.Errorf("storage.dsn = %q after a save/load round trip, want %q", out.Storage.DSN, dsn)
+	}
+}

@@ -448,6 +448,7 @@ func Save(c *Config, path string) error {
 		Skills          *Skills                      `yaml:"skills,omitempty"`
 		Sandbox         *Sandbox                     `yaml:"sandbox,omitempty"`
 		Web             *Web                         `yaml:"web,omitempty"`
+		Storage         *Storage                     `yaml:"storage,omitempty"`
 		SkillVars       map[string]map[string]string `yaml:"skill_vars,omitempty"`
 		MCP             []MCPServer                  `yaml:"mcp,omitempty"`
 		Platforms       []PlatformBot                `yaml:"platforms,omitempty"`
@@ -457,6 +458,14 @@ func Save(c *Config, path string) error {
 		Instruction     string                       `yaml:"instruction,omitempty"`
 	}
 	p := payload{Instruction: c.Instruction, DefaultProvider: c.DefaultProvider, Providers: c.Providers, MCP: c.MCP, Platforms: c.Platforms, Schedules: c.Schedules, SkillVars: c.SkillVars, DefaultAgent: c.DefaultAgent, Agents: c.Agents}
+	if c.Storage != (Storage{}) {
+		// Dropped here once, silently: an operator points the deployment at
+		// PostgreSQL, changes anything in the console, and the next restart
+		// is back on the default SQLite file — with every row still in the
+		// database nobody is reading any more.
+		st := c.Storage
+		p.Storage = &st
+	}
 	if c.Web != (Web{}) {
 		web := c.Web
 		p.Web = &web

@@ -57,6 +57,10 @@ CREATE TABLE IF NOT EXISTS tool_calls (
 	tool          TEXT    NOT NULL,
 	args          TEXT    NOT NULL DEFAULT '',
 	duration_ms   INTEGER NOT NULL DEFAULT 0,
+	-- INTEGER because SQLite has no boolean type; the Go side passes a real
+	-- bool and the driver binds 0/1. PostgreSQL's column is a boolean, which
+	-- is why nothing here converts: a query that wrote 0 into it would be
+	-- rejected outright, and one that read it into an int silently was.
 	ok            INTEGER NOT NULL,
 	err_kind      TEXT    NOT NULL DEFAULT '',
 	err           TEXT    NOT NULL DEFAULT '',
@@ -125,7 +129,7 @@ func (r *Recorder) Record(c ToolCall) error {
 		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
 		at.UTC().Format(time.RFC3339Nano), c.SessionID, c.InvocationID, c.Agent,
 		c.CallID, c.Tool, encodeArgs(c.Args), c.Duration.Milliseconds(),
-		boolToInt(c.OK), string(c.ErrKind), truncate(c.Err, 1000), c.ResultBytes,
+		c.OK, string(c.ErrKind), truncate(c.Err, 1000), c.ResultBytes,
 	)
 	if err != nil {
 		return fmt.Errorf("metrics: insert: %w", err)
@@ -168,13 +172,6 @@ func truncate(s string, max int) string {
 	return string(runes[:max]) + "…"
 }
 
-func boolToInt(b bool) int {
-	if b {
-		return 1
-	}
-	return 0
-}
-
 // RecordGatewayCall stores what the gateway actually did.
 //
 // This is the authoritative row, and it replaces recording from ADK's tool
@@ -201,8 +198,8 @@ func (r *Recorder) RecordGatewayCall(c GatewayCall) error {
 		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		at.UTC().Format(time.RFC3339Nano), c.SessionID, c.InvocationID, c.Agent,
 		c.CallID, c.Tool, encodeArgs(c.Args), c.Duration.Milliseconds(),
-		boolToInt(c.OK), c.ErrKind, truncate(c.Err, 1000), c.ResultBytes,
-		c.EvidenceID, boolToInt(c.Replayed), boolToInt(c.Retrievable),
+		c.OK, c.ErrKind, truncate(c.Err, 1000), c.ResultBytes,
+		c.EvidenceID, c.Replayed, c.Retrievable,
 	)
 	if err != nil {
 		return fmt.Errorf("metrics: insert gateway call: %w", err)

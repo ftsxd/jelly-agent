@@ -2,7 +2,6 @@ package memory
 
 import (
 	"context"
-	"strings"
 
 	"github.com/jelly-agent/jelly-agent/internal/storage"
 )
@@ -24,7 +23,7 @@ func EnsureSchema(db *storage.DB) error {
 // (memory_fts) only exists once search has been enabled, so purging when it was
 // never created is a no-op rather than a failure.
 func tolerateMissing(err error) error {
-	if err == nil || strings.Contains(err.Error(), "no such table") {
+	if err == nil || storage.IsMissingTable(err) {
 		return nil
 	}
 	return err

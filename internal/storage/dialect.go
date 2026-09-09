@@ -26,6 +26,8 @@ type dialect interface {
 	createsOwnSchema() bool
 	// hasTable asks whether a table exists, for the dialects that only check.
 	hasTable(db *DB, table string) (bool, error)
+	// isMissingTable classifies "that table does not exist".
+	isMissingTable(err error) bool
 	// epochSeconds renders a timestamp column as whole seconds since the
 	// epoch. SQLite spells it strftime('%s', c); nothing else has strftime.
 	epochSeconds(column string) string

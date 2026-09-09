@@ -3,8 +3,9 @@ package metrics
 import (
 	"fmt"
 	"sort"
-	"strings"
 	"time"
+
+	"github.com/jelly-agent/jelly-agent/internal/storage"
 )
 
 // ToolLatency is one tool's timing and failure breakdown over the queried
@@ -64,7 +65,8 @@ func (r *Recorder) Summary(since time.Time) (*Summary, error) {
 
 	for rows.Next() {
 		var tool, errKind, at string
-		var dur, ok int
+		var dur int
+		var ok bool
 		if err := rows.Scan(&tool, &dur, &ok, &errKind, &at); err != nil {
 			return nil, fmt.Errorf("metrics: summary scan: %w", err)
 		}
@@ -74,7 +76,7 @@ func (r *Recorder) Summary(since time.Time) (*Summary, error) {
 			byTool[tool] = a
 		}
 		a.durations = append(a.durations, dur)
-		if ok == 1 {
+		if ok {
 			a.ok++
 		} else if errKind != "" {
 			a.errKinds[errKind]++
@@ -198,14 +200,14 @@ func (r *Recorder) ByInvocation(sessionID, invocationID string) ([]CallRow, erro
 		var (
 			c        CallRow
 			at       string
-			ok, retr int
+			ok, retr bool
 		)
 		if err := rows.Scan(&at, &c.CallID, &c.Agent, &c.Tool, &c.DurationMS, &ok,
 			&c.ErrKind, &c.Err, &c.ResultBytes, &c.EvidenceID, &retr); err != nil {
 			return nil, fmt.Errorf("metrics: scan call: %w", err)
 		}
 		c.At, _ = time.Parse(time.RFC3339Nano, at)
-		c.OK, c.Retrievable = ok != 0, retr != 0
+		c.OK, c.Retrievable = ok, retr
 		out = append(out, c)
 	}
 	return out, rows.Err()
@@ -239,7 +241,7 @@ func (r *Recorder) DeleteSessions(ids []string) (int, error) {
 		if err != nil {
 			// A fresh database has no table yet, which means no rows to
 			// remove rather than a failure.
-			if strings.Contains(err.Error(), "no such table") {
+			if storage.IsMissingTable(err) {
 				return n, nil
 			}
 			return n, fmt.Errorf("metrics: delete calls of %s: %w", id, err)

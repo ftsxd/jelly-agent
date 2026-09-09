@@ -105,3 +105,11 @@ func (postgresDialect) hasTable(db *DB, table string) (bool, error) {
 func (postgresDialect) epochSeconds(c string) string {
 	return `EXTRACT(EPOCH FROM ` + c + `)::bigint`
 }
+
+// postgresUndefinedTable is SQLSTATE 42P01.
+const postgresUndefinedTable = "42P01"
+
+func (postgresDialect) isMissingTable(err error) bool {
+	var e *pgconn.PgError
+	return errors.As(err, &e) && e.Code == postgresUndefinedTable
+}

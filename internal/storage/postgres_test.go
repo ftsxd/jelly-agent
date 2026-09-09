@@ -136,3 +136,38 @@ func TestPostgresDialectAgainstRealDatabase(t *testing.T) {
 		}
 	})
 }
+
+// A missing table has to be recognised on both dialects.
+//
+// Three callers tolerate it — a store whose schema is not there yet holds
+// nothing, so listing or purging it is a no-op — and all three matched
+// SQLite's message text. On PostgreSQL that is not a match, so a fresh
+// deployment's first sessions-page load answered 500 with a SQL error in it,
+// until something happened to open ADK's session service first and create the
+// tables. The end-to-end test could not see it because it opens that service
+// in its first subtest.
+func TestMissingTableIsRecognisedOnBothDialects(t *testing.T) {
+	if !IsMissingTable(&pgconn.PgError{Code: "42P01", Message: `relation "sessions" does not exist`}) {
+		t.Error("PostgreSQL 的 42P01 没被识别成缺表")
+	}
+	if !IsMissingTable(fmt.Errorf("list sessions: %w",
+		&pgconn.PgError{Code: "42P01"})) {
+		t.Error("包一层之后识别不出来了")
+	}
+	if IsMissingTable(&pgconn.PgError{Code: "42703", Message: "column does not exist"}) {
+		t.Error("缺列被当成了缺表")
+	}
+	if IsMissingTable(nil) {
+		t.Error("nil 被当成了缺表")
+	}
+
+	db, err := Open(filepath.Join(t.TempDir(), "s.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	_, err = db.Query(`SELECT 1 FROM nosuchtable`)
+	if !IsMissingTable(err) {
+		t.Errorf("SQLite 的缺表没被识别: %v", err)
+	}
+}

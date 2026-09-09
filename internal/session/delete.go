@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 
 	"github.com/jelly-agent/jelly-agent/internal/storage"
 )
@@ -100,6 +99,4 @@ func PurgeOrphanEvents(db *storage.DB) (int, error) {
 // message is what the driver leaves available; the alternative — creating the
 // schema from here — would put a second definition of ADK's tables in this
 // repository.
-func isMissingTable(err error) bool {
-	return err != nil && strings.Contains(err.Error(), "no such table")
-}
+func isMissingTable(err error) bool { return storage.IsMissingTable(err) }

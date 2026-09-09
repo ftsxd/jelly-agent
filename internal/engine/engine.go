@@ -366,7 +366,7 @@ func (e *Engine) Search() (*memory.Search, error) {
 	if !e.cfg.Memory.Search.Enabled {
 		return nil, nil
 	}
-	dbPath, err := jellysession.DefaultDBPath()
+	dbPath, err := e.stateReference()
 	if err != nil {
 		return nil, err
 	}
@@ -755,12 +755,9 @@ func upstreamCut(delivered map[string]any) record.Upstream {
 // what a pool is for.
 func (e *Engine) StateDB() (*storage.DB, error) {
 	e.stateOnce.Do(func() {
-		path := e.stateRef
-		if path == "" {
-			path, e.stateErr = jellysession.DefaultDBPath()
-			if e.stateErr != nil {
-				return
-			}
+		var path string
+		if path, e.stateErr = e.stateReference(); e.stateErr != nil {
+			return
 		}
 		if e.stateDB, e.stateErr = storage.Open(path); e.stateErr != nil {
 			return
@@ -784,12 +781,9 @@ func (e *Engine) StateDB() (*storage.DB, error) {
 // records opens the delivery store on first use.
 func (e *Engine) records() (*record.Store, error) {
 	e.recordsOnce.Do(func() {
-		path := e.stateRef
-		if path == "" {
-			path, e.recordsErr = jellysession.DefaultDBPath()
-			if e.recordsErr != nil {
-				return
-			}
+		var path string
+		if path, e.recordsErr = e.stateReference(); e.recordsErr != nil {
+			return
 		}
 		e.recordStore, e.recordsErr = record.Open(path)
 	})
@@ -945,13 +939,17 @@ func (e *Engine) ToolRegistry() *toolreg.Registry {
 // never cost a tool call.
 func (e *Engine) Metrics() *jellymetrics.Tracker {
 	e.metricsOnce.Do(func() {
-		dbPath, err := jellysession.DefaultDBPath()
+		// The configured reference, not the default. Call records join to
+		// events and tool results on (session_id, invocation_id); writing them
+		// to a different database than those makes every join in the console
+		// return nothing, on a deployment that otherwise looks fine.
+		ref, err := e.stateReference()
 		if err != nil {
-			slog.Warn("无法解析指标库路径，埋点已关闭", logging.Err(err))
+			slog.Warn("无法解析指标库位置，埋点已关闭", logging.Err(err))
 			e.metrics = jellymetrics.NewTracker(nil)
 			return
 		}
-		rec, err := jellymetrics.NewRecorder(dbPath)
+		rec, err := jellymetrics.NewRecorder(ref)
 		if err != nil {
 			slog.Warn("无法打开指标存储，埋点已关闭", logging.Err(err))
 			rec = nil
@@ -1522,6 +1520,21 @@ func (e *Engine) ReloadToolMetadata() {
 // location.
 func (e *Engine) ToolMetadataDir() string {
 	return config.ToolMetadataDir(e.cfg, e.cfg.SourcePath)
+}
+
+// stateReference resolves where the state database is, once.
+//
+// Every store in it has to agree, and they used to each decide for themselves:
+// the metrics recorder and the L2 index called DefaultDBPath directly, so a
+// deployment that configured PostgreSQL had its call records and its memory
+// index quietly left behind in ~/.jelly-agent/state.db — while sessions,
+// events, tool results and task links moved. Every join in the console is
+// (session_id, invocation_id), so the halves cannot be in different databases.
+func (e *Engine) stateReference() (string, error) {
+	if e.stateRef != "" {
+		return e.stateRef, nil
+	}
+	return jellysession.DefaultDBPath()
 }
 
 // StateRef names the state database. Empty means the shared default, which
