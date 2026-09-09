@@ -286,6 +286,18 @@ func (e *Engine) Close() {
 	if err := e.metrics.Close(); err != nil {
 		slog.Warn("关闭指标存储失败", logging.Err(err))
 	}
+	// The field, not records(): calling the accessor would open the store in
+	// order to close it, and on a config reload that means a fresh connection
+	// pool created and abandoned on every reload.
+	//
+	// Closing it at all is the fix. It was left out, so each reload leaked the
+	// pool the previous engine had opened — free against a SQLite file, and on
+	// PostgreSQL a slow walk into "too many clients already".
+	if e.recordStore != nil {
+		if err := e.recordStore.Close(); err != nil {
+			slog.Warn("关闭产物存储失败", logging.Err(err))
+		}
+	}
 	if e.stateDB != nil {
 		if err := e.stateDB.Close(); err != nil {
 			slog.Warn("关闭状态数据库失败", logging.Err(err))

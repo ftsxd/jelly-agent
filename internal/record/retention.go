@@ -50,10 +50,17 @@ func (s *Store) Expire(ctx context.Context, cutoff time.Time) (int64, error) {
 	if s == nil || s.db == nil {
 		return 0, errors.New("record: store not open")
 	}
+	// The empty payload is a parameter, not a literal.
+	//
+	// It used to be X'', which is SQLite's blob literal and not assignable to
+	// PostgreSQL's bytea. That failed the whole statement — so on PostgreSQL
+	// the sweep at startup and every hour after it errored out, and stored
+	// results never expired at all: the one job this file exists to do.
 	res, err := s.db.ExecContext(ctx, `
 		UPDATE tool_results
-		SET payload = X'', expired_at = ?
+		SET payload = ?, expired_at = ?
 		WHERE at < ? AND expired_at = ''`,
+		[]byte{},
 		time.Now().UTC().Format(time.RFC3339Nano),
 		cutoff.UTC().Format(time.RFC3339Nano))
 	if err != nil {

@@ -9,7 +9,6 @@ import (
 	"github.com/jelly-agent/jelly-agent/internal/config"
 	jellymetrics "github.com/jelly-agent/jelly-agent/internal/metrics"
 	"github.com/jelly-agent/jelly-agent/internal/record"
-	jellysession "github.com/jelly-agent/jelly-agent/internal/session"
 	"github.com/jelly-agent/jelly-agent/internal/storage"
 )
 
@@ -32,8 +31,21 @@ func TestSQLiteAndPostgresSchemasAgree(t *testing.T) {
 		t.Skip("set JELLY_PG_DSN to compare the two schemas")
 	}
 
-	lite := openEverything(t, filepath.Join(t.TempDir(), "state.db"))
-	pg := openEverything(t, dsn)
+	// SQLite is built by running every store's initialiser, because that is
+	// how a SQLite deployment gets its schema.
+	lite := buildSQLiteSchema(t, filepath.Join(t.TempDir(), "state.db"))
+
+	// PostgreSQL is only read. Running the initialisers against it would let
+	// this test repair the very drift it exists to find: each store's
+	// EnsureColumns list is checked and applied, so a column added to both the
+	// SQLite DDL and that list — but not to the migration — would be ALTERed
+	// into PostgreSQL here and then compare equal. Green, and the deployment
+	// still missing the column.
+	pg, err := storage.Open(dsn)
+	if err != nil {
+		t.Fatalf("open postgres: %v", err)
+	}
+	t.Cleanup(func() { pg.Close() })
 
 	// ADK's four are not compared: they are created by GORM AutoMigrate on
 	// both sides from one set of models, so they cannot drift the way two
@@ -68,33 +80,27 @@ func TestSQLiteAndPostgresSchemasAgree(t *testing.T) {
 	}
 }
 
-// openEverything opens one database and creates every store's schema in it —
-// including the two that keep their own handle and so are not covered by
-// engine.StateDB.
-func openEverything(t *testing.T, ref string) *storage.DB {
+// buildSQLiteSchema opens a SQLite file and creates every store's schema in
+// it, the way a SQLite deployment does — including the two stores that keep
+// their own handle and so are not covered by engine.StateDB.
+func buildSQLiteSchema(t *testing.T, path string) *storage.DB {
 	t.Helper()
-	e := New(&config.Config{Storage: config.Storage{DSN: ref}})
+	e := New(&config.Config{Storage: config.Storage{DSN: path}})
 	t.Cleanup(e.Close)
 
 	db, err := e.StateDB() // session, task, schedule, memory
 	if err != nil {
 		t.Fatalf("StateDB: %v", err)
 	}
-	store, err := record.Open(ref)
+	store, err := record.Open(path)
 	if err != nil {
 		t.Fatalf("record.Open: %v", err)
 	}
 	t.Cleanup(func() { store.Close() })
-	rec, err := jellymetrics.NewRecorder(ref)
+	rec, err := jellymetrics.NewRecorder(path)
 	if err != nil {
 		t.Fatalf("metrics.NewRecorder: %v", err)
 	}
 	t.Cleanup(func() { rec.Close() })
-
-	// ADK's tables, so a comparison run against a database that has never had
-	// them is not comparing against half a schema.
-	if _, err := jellysession.New(ref); err != nil {
-		t.Fatalf("session service: %v", err)
-	}
 	return db
 }
