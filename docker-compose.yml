@@ -1,7 +1,8 @@
-# 应用本身。可观测后端在下面的 obs profile 里，默认不启动。
+# 应用本身。可观测后端在 obs profile、PostgreSQL 在 db profile，默认都不启动。
 #
 #   docker compose up -d                    只跑 agent（连你已有的 collector）
 #   docker compose --profile obs up -d      顺带起一套本地的 traces/metrics/logs
+#   docker compose --profile db  up -d      起 PostgreSQL（存储迁移开发用）
 services:
   jelly-agent:
     image: jelly-agent:local
@@ -33,3 +34,50 @@ services:
     volumes:
       - ./data/lgtm:/data
     restart: unless-stopped
+
+  # PostgreSQL —— 存储迁移的开发依赖（migrations/README.md）。
+  #
+  # 版本钉死不用 latest：数据库大版本升级要 pg_upgrade，一个 latest 标签
+  # 在某天悄悄把本地数据变成打不开的状态，不值得省这点事。
+  #
+  # pg_trgm 在 contrib 里，官方镜像自带，不用装插件 —— 这正是选 PG 而不是
+  # 引一套 ES 的理由之一。
+  postgres:
+    image: postgres:16-bookworm
+    profiles: ["db"]
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: jelly
+      # 开发用的口令，别拿去线上。线上走你们自己的实例和密钥管理。
+      POSTGRES_USER: ${PGUSER:-jelly}
+      POSTGRES_PASSWORD: ${PGPASSWORD:-jelly-dev}
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8"
+      # 时间一律按 UTC 存，容器时区不能让语义漂移（见 migrations/README.md）。
+      TZ: UTC
+      PGTZ: UTC
+    volumes:
+      # 命名卷而不是 ./data 下的 bind mount：PG 要求数据目录 0700 且属主一致，
+      # 而 macOS 的 Docker Desktop 在 bind mount 上既给不了稳定的属主也慢。
+      # 另外 ./data 整个挂进了 jelly-agent 容器，PG 的数据文件不该出现在那里。
+      - postgres-data:/var/lib/postgresql/data
+      # 首次启动时，这个目录里的 *.sql 会按文件名顺序自动跑一遍。
+      #
+      # 只在数据目录为空时执行。改了 schema 要重来：
+      #     docker compose --profile db down -v
+      - ./migrations/postgres:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      # pg_isready 只说进程在听，所以顺带查一下建表脚本真的跑完了 ——
+      # 初始化失败时容器仍然是 running，光看 pg_isready 发现不了。
+      #
+      # 用户名走 compose 层替换（和上面 POSTGRES_USER 同一个表达式），不用
+      # $$ 转义把变量留给容器里的 shell —— 那样读的人得先想清楚是谁在展开。
+      test: ["CMD-SHELL", "pg_isready -U ${PGUSER:-jelly} -d jelly && psql -U ${PGUSER:-jelly} -d jelly -tAc \"SELECT to_regclass('public.tool_results') IS NOT NULL\" | grep -q t"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
+    restart: unless-stopped
+
+volumes:
+  postgres-data:

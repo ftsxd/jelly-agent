@@ -92,12 +92,41 @@ GORM 侧用 `gorm.io/driver/postgres`。
 `memory_fts` 虚拟表变成普通表 `memory_index` + GIN trgm 索引，不算差异——
 它是派生索引，删掉重建即可，没有数据要迁。
 
-## 执行
+## 本地起一个（docker compose）
+
+```bash
+docker compose --profile db up -d
+```
+
+`0001_init.sql` 会在**首次启动**时自动跑（挂在
+`/docker-entrypoint-initdb.d`）。healthcheck 除了 `pg_isready` 还查一下
+`tool_results` 建出来没有——初始化脚本失败时容器仍然是 running，光看
+`pg_isready` 发现不了。
+
+```bash
+docker compose --profile db ps          # 等 STATUS 变成 healthy
+psql "postgresql://jelly:jelly-dev@localhost:5432/jelly"
+```
+
+改了 schema 要重来（初始化脚本只在数据目录为空时执行）：
+
+```bash
+docker compose --profile db down -v     # -v 才会删掉命名卷
+docker compose --profile db up -d
+```
+
+口令是开发用的默认值，可以用 `PGUSER` / `PGPASSWORD` 覆盖。**线上走你们
+自己的实例和密钥管理，别用这套。**
+
+## 在已有实例上执行
 
 ```bash
 psql "$DSN" -f migrations/postgres/0001_init.sql
 # ADK 那四张表由程序启动时 AutoMigrate 建，不用手动跑
 ```
+
+`CREATE EXTENSION pg_trgm` 需要建库权限；托管实例上通常要用管理员账号跑
+这一行，或者先让 DBA 装好。
 
 ## 尚未验证
 
