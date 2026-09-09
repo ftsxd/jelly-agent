@@ -31,6 +31,8 @@ func TestSQLiteAndPostgresSchemasAgree(t *testing.T) {
 		t.Skip("set JELLY_PG_DSN to compare the two schemas")
 	}
 
+	exclusive(t, dsn)
+
 	// SQLite is built by running every store's initialiser, because that is
 	// how a SQLite deployment gets its schema.
 	lite := buildSQLiteSchema(t, filepath.Join(t.TempDir(), "state.db"))

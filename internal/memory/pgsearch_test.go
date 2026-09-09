@@ -27,6 +27,7 @@ func TestSearchAgainstPostgres(t *testing.T) {
 	if dsn == "" {
 		t.Skip("set JELLY_PG_DSN to exercise L2 search against PostgreSQL")
 	}
+	exclusive(t, dsn)
 	ctx := context.Background()
 
 	svc, err := jellysession.New(dsn)

@@ -41,6 +41,11 @@ type Server struct {
 	// runReg knows which runs are in flight, which is the one thing about a
 	// task that cannot be read off its stored events. See runs.go.
 	runsOnce sync.Once
+	// previewOnce guards the sessions page's one-line-per-row cache. See
+	// previewCache: getting that line meant loading every event of every
+	// session on the page.
+	previewOnce sync.Once
+	previewLRU  *previewCache
 	// declMu serialises writes to the console's tool-metadata file. Every save
 	// is a read-modify-write of one file, and the page saves a field at a time.
 	declMu sync.Mutex

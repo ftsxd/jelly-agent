@@ -157,6 +157,15 @@ type Engine struct {
 	stateDB   *storage.DB
 	stateErr  error
 
+	// sessionOnce guards the ADK session service, which six request paths
+	// used to build afresh on every call. Building it opens a connection and
+	// runs AutoMigrate — 857µs against a SQLite file and 733ms against
+	// PostgreSQL, where the migration inspects the catalogue for four tables
+	// over the wire. That was 85% of what a session timeline cost.
+	sessionOnce sync.Once
+	sessionSvc  adksession.Service
+	sessionErr  error
+
 	// promptByAgent is the last exact fixed prompt shape observed at the model
 	// boundary. The console cannot reconstruct MCP schemas from metadata: the
 	// parameter JSON is most of their cost, and undeclared MCP tools are absent
@@ -1558,10 +1567,22 @@ func (e *Engine) stateReference() (string, error) {
 // a URL is the kind of thing that gets passed to filepath.Dir.
 func (e *Engine) StateRef() string { return e.stateRef }
 
-// NewSessionService opens the persistent session store. The CLI and web server
-// share one store, so history is consistent across both front ends.
+// NewSessionService returns the persistent session store, building it once.
+//
+// The CLI and web server share one store, so history is consistent across both
+// front ends. It is built once because building it is not free: the service
+// opens its own connection and runs AutoMigrate, which on PostgreSQL means
+// asking the catalogue about four tables over the network. Six request paths
+// call this, and each of them was paying for it — 733ms a call, which was most
+// of what a page took.
+//
+// The service is safe for concurrent use; ADK's implementation is a handle on
+// a GORM database, not per-request state.
 func (e *Engine) NewSessionService() (adksession.Service, error) {
-	return jellysession.New(e.stateRef)
+	e.sessionOnce.Do(func() {
+		e.sessionSvc, e.sessionErr = jellysession.New(e.stateRef)
+	})
+	return e.sessionSvc, e.sessionErr
 }
 
 // NewRunner builds a runner backed by the persistent SQLite session store,

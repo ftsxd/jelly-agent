@@ -42,6 +42,7 @@ func TestMigrateSQLiteToPostgres(t *testing.T) {
 	}
 	ctx := context.Background()
 
+	exclusive(t, dsn)
 	srcPath := filepath.Join(t.TempDir(), "state.db")
 	seeded := seedSQLite(t, srcPath)
 
@@ -262,6 +263,7 @@ func TestVerifyReportsARowCountDifference(t *testing.T) {
 	}
 	ctx := context.Background()
 
+	exclusive(t, dsn)
 	srcPath := filepath.Join(t.TempDir(), "state.db")
 	seedSQLite(t, srcPath)
 	src, err := storage.Open(srcPath)
@@ -321,6 +323,7 @@ func TestColumnOnlyInTheSourceIsSkipped(t *testing.T) {
 	}
 	ctx := context.Background()
 
+	exclusive(t, dsn)
 	srcPath := filepath.Join(t.TempDir(), "state.db")
 	seedSQLite(t, srcPath)
 	src, err := storage.Open(srcPath)

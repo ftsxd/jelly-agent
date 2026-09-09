@@ -29,6 +29,7 @@ func TestEveryStoreWorksAgainstPostgres(t *testing.T) {
 	if dsn == "" {
 		t.Skip("set JELLY_PG_DSN to exercise the stores against PostgreSQL")
 	}
+	exclusive(t, dsn)
 	ctx := context.Background()
 	e := New(&config.Config{Storage: config.Storage{DSN: dsn}})
 	t.Cleanup(e.Close)

@@ -161,7 +161,7 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 	}
 	out := make([]sessionDTO, 0, len(rows))
 	for _, m := range rows {
-		out = append(out, sessionDTO{ID: m.ID, Events: m.Events, LastUpdate: m.LastUpdate, Preview: sessionPreview(r.Context(), svc, m.ID)})
+		out = append(out, sessionDTO{ID: m.ID, Events: m.Events, LastUpdate: m.LastUpdate, Preview: s.previews().get(r.Context(), svc, m.ID)})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"sessions": out,
@@ -170,34 +170,6 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 		"offset":   offset,
 		"has_more": offset+len(out) < total,
 	})
-}
-
-// sessionPreview returns the first user text for human-friendly history labels.
-// It is best-effort: a missing/corrupt session must not make the list unusable.
-func sessionPreview(ctx context.Context, svc adksession.Service, id string) string {
-	resp, err := svc.Get(ctx, &adksession.GetRequest{AppName: engine.AppName, UserID: engine.UserID, SessionID: id})
-	if err != nil || resp.Session == nil {
-		return ""
-	}
-	for ev := range resp.Session.Events().All() {
-		if roleForAuthor(ev.Author) != "user" || ev.Content == nil {
-			continue
-		}
-		var b strings.Builder
-		for _, p := range ev.Content.Parts {
-			if p != nil {
-				b.WriteString(p.Text)
-			}
-		}
-		text := strings.TrimSpace(b.String())
-		if len([]rune(text)) > 42 {
-			return string([]rune(text)[:42]) + "…"
-		}
-		if text != "" {
-			return text
-		}
-	}
-	return ""
 }
 
 // handleSessionIDs returns every session id (newest first) for the "select all
@@ -395,6 +367,10 @@ func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 // should name everything that is still holding data rather than the first
 // thing that went wrong.
 func (s *Server) purgeSessionTraces(ctx context.Context, ids []string) error {
+	// The preview cache answers for sessions that no longer exist otherwise,
+	// and this is where both delete paths meet — putting it in either handler
+	// would mean the other one kept a deleted conversation's first line.
+	s.previews().forget(ids...)
 	// Detached from the request, deliberately.
 	//
 	// The sessions are already gone by the time this runs, and nothing here

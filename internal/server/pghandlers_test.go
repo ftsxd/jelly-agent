@@ -26,6 +26,7 @@ func newPostgresServer(t *testing.T) (*Server, string) {
 	if dsn == "" {
 		t.Skip("set JELLY_PG_DSN to exercise the handlers against PostgreSQL")
 	}
+	exclusive(t, dsn)
 	cfg := &config.Config{
 		DefaultProvider: "test",
 		Providers:       []config.Provider{{Name: "test", BaseURL: "http://x", APIKey: "sk-test", Model: "m"}},
@@ -98,6 +99,7 @@ func TestSessionReadsToleratePostgresWithoutADKTables(t *testing.T) {
 	}
 	dropADKTables(t, dsn)
 
+	exclusive(t, dsn)
 	cfg := &config.Config{
 		DefaultProvider: "test",
 		Providers:       []config.Provider{{Name: "test", BaseURL: "http://x", APIKey: "sk-test", Model: "m"}},
