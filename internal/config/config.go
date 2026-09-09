@@ -155,6 +155,7 @@ type Config struct {
 	Skills          Skills     `mapstructure:"skills" yaml:"skills,omitempty"`
 	Sandbox         Sandbox    `mapstructure:"sandbox" yaml:"sandbox,omitempty"`
 	Web             Web        `mapstructure:"web" yaml:"web,omitempty"`
+	Storage         Storage    `mapstructure:"storage" yaml:"storage,omitempty"`
 	// SkillVars holds per-skill variables (skill name → KV), where secret-ish
 	// values are masked by the API and may use ${ENV}. Kept here (config, 0600)
 	// rather than in the skill files so sharing/exporting a skill omits secrets.
@@ -331,6 +332,31 @@ type Sandbox struct {
 	CPUSeconds  int `mapstructure:"cpu_seconds" yaml:"cpu_seconds,omitempty"`
 	MaxProcs    int `mapstructure:"max_procs" yaml:"max_procs,omitempty"`
 	MemoryMB    int `mapstructure:"memory_mb" yaml:"memory_mb,omitempty"`
+}
+
+// Storage says which database holds the state everything shares: ADK's
+// sessions and events, tool deliveries, call records, task links, the schedule
+// log and the L2 memory index.
+//
+// One key, because they are one database. Splitting them across two would put
+// a run's steps in one place and its evidence in another, and every join in
+// the console is (session_id, invocation_id).
+type Storage struct {
+	// DSN selects the database. Empty means the SQLite file beside the config
+	// (~/.jelly-agent/state.db), which is what an untouched deployment gets.
+	//
+	// A postgres:// or postgresql:// URL selects PostgreSQL. Anything else is
+	// taken as a SQLite path, and an unrecognised URL scheme is rejected
+	// rather than becoming a surprisingly named file.
+	//
+	// Reasons to move it: several processes sharing one database — a
+	// PostgreSQL is the only way they see each other's writes, because a
+	// per-process SQLite handle does not — and the operational story that
+	// comes with it (backups, replicas, a connection you can point psql at).
+	// See migrations/README.md for the schema and what changes with it.
+	//
+	// Not printed in errors: a URL may carry a password.
+	DSN string `mapstructure:"dsn" yaml:"dsn,omitempty"`
 }
 
 // Memory configures the memory subsystem (PLAN §10.5): L1 core memory

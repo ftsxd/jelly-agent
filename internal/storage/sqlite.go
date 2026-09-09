@@ -105,3 +105,20 @@ func (sqliteDialect) isUniqueViolation(err error) bool {
 // sqlDB is the native handle, aliased so dialect.configure can take one
 // without every other file in the package naming database/sql.
 type sqlDB = sql.DB
+
+// createsOwnSchema is true: a SQLite file has no migration step. It appears
+// when the process starts, so each store creates what it needs — which is what
+// makes a fresh install and a test's t.TempDir() work with no setup.
+func (sqliteDialect) createsOwnSchema() bool { return true }
+
+func (sqliteDialect) hasTable(db *DB, table string) (bool, error) {
+	var n int
+	err := db.QueryRow(
+		`SELECT count(*) FROM sqlite_master WHERE type IN ('table','view') AND name = ?`,
+		table).Scan(&n)
+	return n > 0, err
+}
+
+func (sqliteDialect) epochSeconds(c string) string {
+	return `CAST(strftime('%s', ` + c + `) AS INTEGER)`
+}

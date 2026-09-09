@@ -14,9 +14,9 @@ import (
 // leftovers.
 func TestDeleteSessionsCascadesEvents(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "state.db")
-	svc, err := NewSQLite(dbPath)
+	svc, err := New(dbPath)
 	if err != nil {
-		t.Fatalf("NewSQLite: %v", err)
+		t.Fatalf("session store: %v", err)
 	}
 	ctx := context.Background()
 	const app, user = "jelly-agent", "local-user"

@@ -88,3 +88,20 @@ func (postgresDialect) isUniqueViolation(err error) bool {
 	var e *pgconn.PgError
 	return errors.As(err, &e) && e.Code == postgresUniqueViolation
 }
+
+// createsOwnSchema is false: the schema is migrations/postgres/0001_init.sql,
+// which an operator runs and backs up. A schema a process invents on startup
+// and a schema somebody operates should not be the same schema.
+func (postgresDialect) createsOwnSchema() bool { return false }
+
+func (postgresDialect) hasTable(db *DB, table string) (bool, error) {
+	var n int
+	err := db.QueryRow(`
+		SELECT count(*) FROM information_schema.tables
+		WHERE table_schema = current_schema() AND table_name = ?`, table).Scan(&n)
+	return n > 0, err
+}
+
+func (postgresDialect) epochSeconds(c string) string {
+	return `EXTRACT(EPOCH FROM ` + c + `)::bigint`
+}

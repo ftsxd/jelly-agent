@@ -228,9 +228,9 @@ func Open(dbPath string) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("record: %w", err)
 	}
-	if _, err := db.Exec(schema); err != nil {
+	if err := storage.ApplySchema(db, schema, "tool_results", "tool_result_seq"); err != nil {
 		db.Close()
-		return nil, fmt.Errorf("record: create: %w", err)
+		return nil, fmt.Errorf("record: %w", err)
 	}
 	if err := migrate(db); err != nil {
 		db.Close()

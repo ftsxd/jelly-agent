@@ -27,7 +27,7 @@ func TestKeeperPublishesNoHandleWhenStorageFails(t *testing.T) {
 	if err := writeDirAt(filepath.Join(dir, "state.db")); err != nil {
 		t.Fatal(err)
 	}
-	e.SetSessionDBPath(filepath.Join(dir, "state.db"))
+	e.SetStateRef(filepath.Join(dir, "state.db"))
 
 	label, err := e.keepToolResult(t.Context(),
 		gateway.CallMeta{SessionID: "s1", InvocationID: "inv1", CallID: "c1"},
@@ -47,7 +47,7 @@ func TestKeeperPublishesNoHandleWhenStorageFails(t *testing.T) {
 // there.
 func TestKeeperPublishesNoHandleWhenTheWriteFails(t *testing.T) {
 	e := New(&config.Config{})
-	e.SetSessionDBPath(filepath.Join(t.TempDir(), "state.db"))
+	e.SetStateRef(filepath.Join(t.TempDir(), "state.db"))
 
 	store, err := e.Records()
 	if err != nil {
@@ -72,7 +72,7 @@ func TestKeeperPublishesNoHandleWhenTheWriteFails(t *testing.T) {
 
 func TestKeeperPublishesAHandleWhenStorageSucceeds(t *testing.T) {
 	e := New(&config.Config{})
-	e.SetSessionDBPath(filepath.Join(t.TempDir(), "state.db"))
+	e.SetStateRef(filepath.Join(t.TempDir(), "state.db"))
 
 	label, err := e.keepToolResult(t.Context(),
 		gateway.CallMeta{SessionID: "s1", InvocationID: "inv1", CallID: "c1"},
@@ -90,7 +90,7 @@ func TestKeeperPublishesAHandleWhenStorageSucceeds(t *testing.T) {
 // to keep and nothing wrong either.
 func TestKeeperExemptsItsOwnReaders(t *testing.T) {
 	e := New(&config.Config{})
-	e.SetSessionDBPath(filepath.Join(t.TempDir(), "state.db"))
+	e.SetStateRef(filepath.Join(t.TempDir(), "state.db"))
 
 	for _, name := range []string{jellytool.ReadResultName, jellytool.SearchResultName} {
 		label, err := e.keepToolResult(t.Context(),

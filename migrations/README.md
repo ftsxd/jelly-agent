@@ -84,13 +84,33 @@ GORM 侧用 `gorm.io/driver/postgres`。
 
 | 差异 | 原因 |
 |---|---|
-| `at` / `started_at` 等 → `timestamptz` | 原来存 RFC3339Nano 文本，而这个格式**砍掉末尾的零**：整秒的 `…T10:00:00Z` 在字符串比较里排在同一秒内的 `…T10:00:00.5Z` **之后**（`'.'` 的字节值小于 `'Z'`）。`ORDER BY at` 在秒内本来就是乱的。换真时间类型顺带修掉。 |
-| `expired_at` → 可空 | 原来用空字符串表示未过期，因为 SQLite 那列是 NOT NULL。 |
+| `schedule_runs.started_at` / `finished_at`、`tool_decls.updated_at` → `timestamptz` | 这几处 Go 侧本来就传 `time.Time`、也扫回 `time.Time`，真时间类型是对的。 |
+| `tool_results.at` / `tool_calls.at` / `task_runs.at` **保持 `text`** | 见下面「撤回的一条」。 |
 | `ok` / `replayed` / `retrievable` → `boolean` | SQLite 用 INTEGER 存布尔。 |
 | 新增 `tool_calls(session_id, invocation_id)` 索引 | 任务中心按一次运行取全部调用。本地文件上过滤一下无所谓，走网络值得让索引一次带出。 |
 
-`memory_fts` 虚拟表变成普通表 `memory_index` + GIN trgm 索引，不算差异——
-它是派生索引，删掉重建即可，没有数据要迁。
+`memory_fts` 在 PG 上是普通表 + GIN trgm 索引，**表名保持 `memory_fts`**——
+名字是这个存储的名字不是技术的名字，而查询里的表名是写死的。改名要迁移已有
+的 SQLite 库，换不来任何东西。
+
+### 撤回的一条：时间列没有换成 timestamptz
+
+前一版这份 README 说 `at` 换成 `timestamptz`「顺带修掉」了那个排序 bug。
+**做不到，已撤回。**
+
+Go 侧存的是 RFC3339Nano 文本、读回来也扫进 `string`
+（`internal/record/store.go` 的 `Put` 与 `read`）。换成真时间类型要同时改读写
+两端，还要迁移已有 SQLite 库里的数据 —— 那是一次独立改动，混进方言接入里，
+出问题时分不清是哪一边。
+
+**排序 bug 仍然存在，两个方言都有**：RFC3339Nano 砍掉末尾的零，整秒的
+`…T10:00:00Z` 在字符串比较里排在同一秒内的 `…T10:00:00.5Z` **之后**
+（`'.'` 的字节值小于 `'Z'`），所以 `ORDER BY at` 和 `idx_tool_results_at`
+在秒内是乱的。
+
+这条是怎么被发现漏改的，值得记一笔：端到端测试第一版没有校验时间往返，
+于是一个声明成 `timestamptz`、而代码按字符串读写的列**照样通过**——值以
+数据库自己的格式回来，没人看。补上断言之后才暴露。
 
 ## 本地起一个（docker compose）
 

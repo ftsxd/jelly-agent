@@ -21,6 +21,14 @@ type dialect interface {
 	hasColumn(db *DB, table, column string) (bool, error)
 	// isUniqueViolation classifies a uniqueness clash by error code.
 	isUniqueViolation(err error) bool
+	// createsOwnSchema says whether a store may create its tables on open, or
+	// whether the schema belongs to a migration the operator runs.
+	createsOwnSchema() bool
+	// hasTable asks whether a table exists, for the dialects that only check.
+	hasTable(db *DB, table string) (bool, error)
+	// epochSeconds renders a timestamp column as whole seconds since the
+	// epoch. SQLite spells it strftime('%s', c); nothing else has strftime.
+	epochSeconds(column string) string
 }
 
 // scanPlaceholders walks q and calls emit for each `?` that is really a

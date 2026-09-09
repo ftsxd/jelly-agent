@@ -119,10 +119,7 @@ func OfSession(db *storage.DB, sessionID string) (map[string]string, error) {
 // CREATE TABLE IF NOT EXISTS against an existing table is a no-op that still
 // costs a round trip.
 func EnsureSchema(db *storage.DB) error {
-	if _, err := db.Exec(schema); err != nil {
-		return fmt.Errorf("task: create table: %w", err)
-	}
-	return nil
+	return storage.ApplySchema(db, schema, "task_runs")
 }
 
 // DeleteSessions drops the task memberships of the given sessions.

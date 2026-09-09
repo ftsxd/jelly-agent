@@ -100,9 +100,9 @@ type Engine struct {
 	metricsOnce sync.Once
 	metrics     *jellymetrics.Tracker
 
-	// sessionDBPath overrides the shared store's location. Empty means the
+	// stateRef overrides the shared store's location. Empty means the
 	// default path; only tests and embedders set it.
-	sessionDBPath string
+	stateRef string
 
 	// Tool registry and gateway. Built once per engine: the registry snapshot
 	// is immutable and the gateway is safe for concurrent use, so the many
@@ -263,7 +263,13 @@ func (e *Engine) observePrompt(agentName string, cfg *genai.GenerateContentConfi
 // New wraps a loaded config in an engine.
 func New(cfg *config.Config) *Engine {
 	ctx, cancel := context.WithCancel(context.Background())
-	return &Engine{cfg: cfg, reg: jellymodel.NewRegistry(cfg), mcpCtx: ctx, mcpCancel: cancel}
+	e := &Engine{cfg: cfg, reg: jellymodel.NewRegistry(cfg), mcpCtx: ctx, mcpCancel: cancel}
+	// Taken here rather than read at each use, so a hot reload cannot swap the
+	// database out from under handles that are already open on the old one.
+	// Changing it needs a restart, which is the honest behaviour for the store
+	// every other store is keyed against.
+	e.stateRef = cfg.Storage.DSN
+	return e
 }
 
 // Config returns the underlying config.
@@ -279,6 +285,11 @@ func (e *Engine) Close() {
 	}
 	if err := e.metrics.Close(); err != nil {
 		slog.Warn("关闭指标存储失败", logging.Err(err))
+	}
+	if e.stateDB != nil {
+		if err := e.stateDB.Close(); err != nil {
+			slog.Warn("关闭状态数据库失败", logging.Err(err))
+		}
 	}
 }
 
@@ -744,7 +755,7 @@ func upstreamCut(delivered map[string]any) record.Upstream {
 // what a pool is for.
 func (e *Engine) StateDB() (*storage.DB, error) {
 	e.stateOnce.Do(func() {
-		path := e.sessionDBPath
+		path := e.stateRef
 		if path == "" {
 			path, e.stateErr = jellysession.DefaultDBPath()
 			if e.stateErr != nil {
@@ -773,7 +784,7 @@ func (e *Engine) StateDB() (*storage.DB, error) {
 // records opens the delivery store on first use.
 func (e *Engine) records() (*record.Store, error) {
 	e.recordsOnce.Do(func() {
-		path := e.sessionDBPath
+		path := e.stateRef
 		if path == "" {
 			path, e.recordsErr = jellysession.DefaultDBPath()
 			if e.recordsErr != nil {
@@ -1458,14 +1469,15 @@ func (e *Engine) buildNode(name, description, provider, instruction string, tool
 	return a, prov, nil
 }
 
-// SetSessionDBPath points the session store somewhere other than the shared
+// SetStateRef points the state database somewhere other than the shared
 // default.
 //
 // Tests need this for the same reason they need SetMetrics: without it, any
-// handler that lists sessions reads the developer's real ~/.jelly-agent/state.db,
-// so the suite's results depend on what that developer happens to have chatted
-// about. Call it before the first NewSessionService.
-func (e *Engine) SetSessionDBPath(path string) { e.sessionDBPath = path }
+// handler that lists sessions reads the developer's real
+// ~/.jelly-agent/state.db, so the suite's results depend on what that
+// developer happens to have chatted about. Call it before the first StateDB or
+// NewSessionService.
+func (e *Engine) SetStateRef(ref string) { e.stateRef = ref }
 
 // buildRegistry merges the metadata sources into a registry.
 //
@@ -1512,20 +1524,19 @@ func (e *Engine) ToolMetadataDir() string {
 	return config.ToolMetadataDir(e.cfg, e.cfg.SourcePath)
 }
 
-// SessionDBPath is where the session store lives, for the handlers that query
-// it directly rather than through the ADK service.
+// StateRef names the state database. Empty means the shared default, which
+// the session package resolves for itself.
 //
-// Empty means the shared default, which is what the session package resolves
-// for itself — so an empty return is a valid argument, not a missing one. It
-// is exported because two handlers were passing "" unconditionally and thereby
-// ignoring the override entirely: harmless in a deployment, where the override
-// is unset, and wrong everywhere else.
-func (e *Engine) SessionDBPath() string { return e.sessionDBPath }
+// A reference, not a path: `postgres://…` selects PostgreSQL, anything else is
+// a SQLite file. The name says so because the value has not been only a path
+// since the dialect seam went in, and a getter called SessionDBPath returning
+// a URL is the kind of thing that gets passed to filepath.Dir.
+func (e *Engine) StateRef() string { return e.stateRef }
 
-// NewSessionService opens the persistent SQLite session store. The CLI and web
-// server share one store, so history is consistent across both front ends.
+// NewSessionService opens the persistent session store. The CLI and web server
+// share one store, so history is consistent across both front ends.
 func (e *Engine) NewSessionService() (adksession.Service, error) {
-	return jellysession.NewSQLite(e.sessionDBPath)
+	return jellysession.New(e.stateRef)
 }
 
 // NewRunner builds a runner backed by the persistent SQLite session store,

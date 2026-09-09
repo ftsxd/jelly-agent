@@ -11,7 +11,7 @@ import (
 // EnsureSchema is a no-op, and says so rather than being absent.
 //
 // The sessions and events tables belong to ADK, which creates them with GORM
-// AutoMigrate when the session service opens (see NewSQLite). A hand-written
+// AutoMigrate when the session service opens (see New). A hand-written
 // DDL here would be a second definition of somebody else's schema, silently
 // drifting the next time ADK changes its models. The read and delete helpers
 // in this package already tolerate the tables not being there yet.
@@ -49,9 +49,9 @@ func ListPage(db *storage.DB, appName, userID string, limit, offset int) (rows [
 		return nil, 0, fmt.Errorf("count sessions: %w", err)
 	}
 
-	const q = `
+	q := `
 SELECT s.id,
-       CAST(strftime('%s', s.update_time) AS INTEGER) AS last_update,
+       ` + db.EpochSeconds("s.update_time") + ` AS last_update,
        COUNT(e.id) AS events
 FROM sessions s
 LEFT JOIN events e

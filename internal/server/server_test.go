@@ -31,7 +31,7 @@ func newTestServer(t *testing.T) *Server {
 	// temp file, or the suite reads (and writes) whatever the developer running
 	// it happens to have chatted about.
 	dir := t.TempDir()
-	eng.SetSessionDBPath(filepath.Join(dir, "sessions.db"))
+	eng.SetStateRef(filepath.Join(dir, "sessions.db"))
 	rec, err := metrics.NewRecorder(filepath.Join(dir, "state.db"))
 	if err != nil {
 		t.Fatal(err)

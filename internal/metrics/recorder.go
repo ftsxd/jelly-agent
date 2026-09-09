@@ -80,7 +80,7 @@ func NewRecorder(dbPath string) (*Recorder, error) {
 	if err != nil {
 		return nil, fmt.Errorf("metrics: %w", err)
 	}
-	if _, err := db.Exec(schema); err != nil {
+	if err := storage.ApplySchema(db, schema, "tool_calls"); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("metrics: migrate: %w", err)
 	}

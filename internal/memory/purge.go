@@ -2,7 +2,6 @@ package memory
 
 import (
 	"context"
-	"fmt"
 	"strings"
 
 	"github.com/jelly-agent/jelly-agent/internal/storage"
@@ -14,10 +13,11 @@ import (
 // or not search is enabled — server.go sweeps orphaned index rows at startup —
 // and they need the table to exist before they can find it empty.
 func EnsureSchema(db *storage.DB) error {
-	if _, err := db.Exec(createFTS); err != nil {
-		return fmt.Errorf("memory: create index: %w", err)
-	}
-	return nil
+	// Same table name on both, though only one of them is really FTS5: the
+	// migration file builds an ordinary table with a GIN trigram index. The
+	// name belongs to the store rather than to the technology, and the
+	// queries spell it out.
+	return storage.ApplySchema(db, createFTS, "memory_fts")
 }
 
 // tolerateMissing returns nil when err is a "no such table" error — the L2 index

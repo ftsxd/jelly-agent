@@ -7,7 +7,6 @@
 package schedule
 
 import (
-	"fmt"
 	"time"
 
 	"github.com/jelly-agent/jelly-agent/internal/storage"
@@ -129,8 +128,8 @@ func List(db *storage.DB, task string, limit, offset int) ([]Run, int, error) {
 // deployment that moved its state database had its schedule history quietly
 // written somewhere else. Taking the shared handle fixes that by construction.
 func EnsureSchema(db *storage.DB) error {
-	if _, err := db.Exec(schema); err != nil {
-		return fmt.Errorf("schedule: create table: %w", err)
+	if err := storage.ApplySchema(db, schema, "schedule_runs"); err != nil {
+		return err
 	}
 	return migrate(db)
 }

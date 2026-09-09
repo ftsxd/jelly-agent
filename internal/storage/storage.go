@@ -74,6 +74,34 @@ func dialectFor(ref string) (dialect, error) {
 	return sqliteDialect{}, nil
 }
 
+// Kind names the database a reference selects.
+type Kind string
+
+const (
+	KindSQLite   Kind = "sqlite"
+	KindPostgres Kind = "postgres"
+)
+
+// KindOf reports which database ref selects, without opening it.
+//
+// Exported for the one caller that cannot go through DB: ADK's session store
+// takes a GORM dialector rather than a database/sql handle, so
+// internal/session has to choose one. Everything else uses Open and never asks.
+//
+// An unsupported scheme is an error here too, so a value that is rejected by
+// Open is not silently accepted by the session store — which would leave the
+// two halves of the same database pointed at different places.
+func KindOf(ref string) (Kind, error) {
+	d, err := dialectFor(ref)
+	if err != nil {
+		return "", err
+	}
+	if _, ok := d.(postgresDialect); ok {
+		return KindPostgres, nil
+	}
+	return KindSQLite, nil
+}
+
 // IsUniqueViolation reports whether err is a uniqueness clash — a UNIQUE index
 // or a PRIMARY KEY rejecting a row that is already there.
 //
@@ -162,3 +190,49 @@ func Placeholders(n int) string {
 	}
 	return string(b)
 }
+
+// ApplySchema creates a store's tables, on a database that expects to be asked.
+//
+// The two dialects differ in who owns the schema, not just in how it is
+// spelled:
+//
+//   - SQLite has no migration step. The file appears when the process starts,
+//     so each store creates what it needs on open — which is what makes a
+//     fresh install and a test's t.TempDir() work with no setup at all.
+//   - PostgreSQL has one, and it is migrations/postgres/0001_init.sql. Running
+//     the SQLite DDL against it would fail anyway (BLOB and INTEGER are not
+//     PostgreSQL types), but the deeper reason is that a schema an operator
+//     backs up and a schema a process invents on startup should not be the
+//     same schema.
+//
+// So on PostgreSQL this checks rather than creates. A missing table becomes one
+// clear error at startup naming the file to run, instead of a raw "relation
+// does not exist" from whichever request happens to touch it first.
+func ApplySchema(db *DB, ddl string, tables ...string) error {
+	if db.dialect.createsOwnSchema() {
+		if _, err := db.Exec(ddl); err != nil {
+			return fmt.Errorf("storage: create schema: %w", err)
+		}
+		return nil
+	}
+	for _, t := range tables {
+		has, err := db.dialect.hasTable(db, t)
+		if err != nil {
+			return fmt.Errorf("storage: inspect %s: %w", t, err)
+		}
+		if !has {
+			return fmt.Errorf("storage: 表 %s 不存在。"+
+				"PostgreSQL 的 schema 由迁移文件建，不由进程自己建 —— "+
+				"先跑 migrations/postgres/0001_init.sql", t)
+		}
+	}
+	return nil
+}
+
+// EpochSeconds renders a timestamp column as whole seconds since the epoch.
+//
+// Exported because a query has to be built with it, and the spelling is
+// dialect-specific: SQLite has strftime('%s', c) and nothing else does. It
+// belongs here for the same reason the placeholder does — a caller that writes
+// the SQLite spelling inline works in every test and fails only on PostgreSQL.
+func (d *DB) EpochSeconds(column string) string { return d.dialect.epochSeconds(column) }

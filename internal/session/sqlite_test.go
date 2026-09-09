@@ -12,9 +12,9 @@ import (
 // retrieve and list sessions (schema migration runs on open).
 func TestSQLiteRoundTrip(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "state.db")
-	svc, err := NewSQLite(dbPath)
+	svc, err := New(dbPath)
 	if err != nil {
-		t.Fatalf("NewSQLite: %v", err)
+		t.Fatalf("session store: %v", err)
 	}
 
 	ctx := context.Background()
@@ -44,7 +44,7 @@ func TestSQLiteRoundTrip(t *testing.T) {
 	}
 
 	// Reopen the same file: data should persist across service instances.
-	svc2, err := NewSQLite(dbPath)
+	svc2, err := New(dbPath)
 	if err != nil {
 		t.Fatalf("reopen: %v", err)
 	}

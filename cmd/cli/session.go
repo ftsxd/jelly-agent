@@ -25,7 +25,7 @@ func newSessionListCmd() *cobra.Command {
 		Use:   "list",
 		Short: "列出持久化的历史会话",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			svc, err := jellysession.NewSQLite("")
+			svc, err := jellysession.New("")
 			if err != nil {
 				return err
 			}
