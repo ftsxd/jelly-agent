@@ -1,166 +1,108 @@
-# 存储迁移：SQLite → MySQL + Elasticsearch
+# 存储迁移：SQLite → PostgreSQL
 
 ```
-migrations/
-├── mysql/0001_init.sql               手写的五张业务表 + 两张新表
-└── elastic/
-    ├── jelly-memory.json             替代 memory_fts（需 IK 插件）
-    ├── jelly-memory.no-ik.json       同上，改用内置 cjk 二元分词
-    ├── jelly-artifacts.json          大产物全文检索（需 IK 插件）
-    └── jelly-artifacts.no-ik.json    同上，无插件版
+migrations/postgres/0001_init.sql    七张表 + 索引 + pg_trgm
 ```
+
+一套 PG 解决全部：关系数据、中文检索、以后的向量。**不引 MySQL，也不引
+Elasticsearch。**
+
+## 为什么是 PG 而不是 MySQL
+
+不是偏好，是这次迁移里风险最高的两项改造在 PG 上直接消失：
+
+**① `seq` 分配不用重新设计。** `record.Put` 把序号分配写在 INSERT 的子查询
+里，注释写明了它依赖什么：「One statement, so allocating the number and
+writing the row cannot come apart」。MySQL 以 **error 1093** 拒绝这种语句
+（INSERT 的子查询不许引用目标表），绕过去就得另建计数器表、改并发语义——
+而 seq 是模型看到的 `e7` 句柄，错一次就指向别的证据。**PG 允许原语句。**
+
+**② `tool_results` 主键不用改。** MySQL 里 TEXT 不加前缀长度不能进索引，
+所以得换代理主键，连带 `ON CONFLICT` 的目标和唯一索引全部重新设计。PG 的
+`text` 完全可索引，而且 PG 不按主键聚簇——二级索引带 6 字节 ctid，不是整个
+主键。五列复合主键原样保留。
+
+顺带还少三处：
+
+| | MySQL | PG |
+|---|---|---|
+| `ON CONFLICT … DO UPDATE SET x=excluded.x` | 要改写成 `ON DUPLICATE KEY UPDATE` | **原样**（这本来就是 PG 语法，SQLite 抄的） |
+| 大小写 | 默认 `utf8mb4_0900_ai_ci` 不区分大小写，`'A1b2'` 和 `'a1B2'` 会撞成同一个 call_id，所有标识列必须显式 `_bin` | 默认区分，和 SQLite 的 BINARY 一致，**没这个陷阱** |
+| ADK 的 events 主键 | GORM 把 4 个无 size string 映射成 `varchar(191)`，4×191×4 = 3056，InnoDB 上限 3072，**只剩 16 字节** | 映射成 `text`，完全可索引，**问题不存在** |
+
+## 为什么不引 Elasticsearch
+
+原本打算把 memory 检索和大产物搜索放 ES。逐条看下来，两个都不值得：
+
+**memory 检索**：现在用 FTS5 的 trigram 分词器。PG 的 `pg_trgm` 是同一个
+东西，而且在 `contrib` 里、装 PG 就有。**行为和今天完全一致**，包括那个已知
+限制（查询要 ≥3 个字）。ES 的 IK 是真分词、确实更好，但那是提升不是补齐，
+而今天没人抱怨过检索质量。真要提升，路是加 `zhparser` / `pg_bigm` 扩展，
+不必换数据库。
+
+**大产物搜索**：`record.Search`（`internal/record/search.go:86`）是**正则 +
+行号 + 上下文行**流式扫的。ES 的 highlight 做不到这几件——没有正则、没有
+行号。换过去是退步。这条我一开始提反了。
+
+**以后的向量**：`pgvector` 扩展，HNSW 索引。不用再引第三套。
 
 ## ADK 的四张表不在这里
 
 `sessions` / `events` / `app_states` / `user_states` 由 ADK 自己的 GORM 模型
 建（`internal/session/sqlite.go` → `database.AutoMigrate`）。**不要手写一份
-DDL**：ADK 升级时改了模型，AutoMigrate 会跟上，手写的那份只会静默漂移。
+DDL**：ADK 升级改了模型，AutoMigrate 会跟上，手写的那份只会静默漂移。
 
-换 MySQL 就是换一个 dialector：
+换 PG 就是换一个 dialector：
 
 ```go
-database.NewSessionService(mysql.Open(dsn), &gorm.Config{...})
+database.NewSessionService(postgres.Open(dsn), &gorm.Config{...})
 ```
 
-ADK 明确支持（`session/database/gorm_datatypes.go` 里有 postgres / mysql /
-spanner 三个分支）。但有一件事要盯：
+ADK 明确支持——`session/database/gorm_datatypes.go` 里 `case "postgres":
+return "JSONB"`。
 
-> `storageEvent` 的主键是 4 个无 size 的 `string`。GORM 的 MySQL 驱动把
-> 主键上的无 size string 映射成 `varchar(191)`
-> （`gorm.io/driver/mysql@v1.6.0/mysql.go:392`），于是
-> **4 × 191 × 4 = 3056 字节**，而 InnoDB 索引键上限是 3072。
->
-> **能建，只剩 16 字节余量。** ADK 哪天给主键加第五列，AutoMigrate 当场失败。
-> 而且这是 events 表的聚簇主键，量最大的那张，每条二级索引都背着它。
->
-> 这个数是从驱动源码算出来的，**上线前用真库跑一次 AutoMigrate 确认**。
+## 版本与扩展
 
-## MySQL 参数
+- **PostgreSQL 13+**（`GENERATED AS IDENTITY`、`gin_trgm_ops`）
+- `pg_trgm` —— contrib 自带，DDL 里第一行就 `CREATE EXTENSION`
+- `pgvector` —— 只有做语义记忆那天才需要，现在不装
 
-```ini
-[mysqld]
-max_allowed_packet = 64M      # 产物实测已有 82KB，LONGBLOB 单行要能过网
-innodb_file_per_table = ON
-character_set_server = utf8mb4
-collation_server = utf8mb4_0900_ai_ci
-```
+驱动用 `github.com/jackc/pgx/v5`（`stdlib` 包提供 `database/sql` 兼容），
+GORM 侧用 `gorm.io/driver/postgres`。
 
-连接串至少要带：
+连接串至少带：
 
 ```
-?charset=utf8mb4&parseTime=true&loc=UTC&interpolateParams=false
+?sslmode=... &timezone=UTC
 ```
 
-`parseTime=true` 是必须的——DATETIME(6) 要能直接扫进 `time.Time`。
-`loc=UTC` 也是：现在所有时间都按 UTC 存，换机器时区不能让语义漂移。
+时区必须钉死 UTC：现在所有时间都按 UTC 存，换机器时区不能让语义漂移。
 
-## 和 SQLite 版的结构差异，以及为什么
+## 和 SQLite 版的四处差异
+
+这份 DDL 和原来的 schema 几乎一一对应。差异只有四处：
 
 | 差异 | 原因 |
 |---|---|
-| `tool_results` 换代理主键 | 原来是 5 个 TEXT 列做主键，MySQL 里 TEXT 不加前缀长度不能进索引。换 VARCHAR 后能建，但 InnoDB 聚簇，二级索引都背这个宽键。 |
-| `payload` → `LONGBLOB` | MySQL 的 `BLOB` 只有 64KB，现网实测单条产物已 82,540 字节。 |
-| `at` → `DATETIME(6)` | 原来存 RFC3339Nano 文本，而这个格式砍掉末尾的零：整秒的 `…T10:00:00Z` 在字符串比较里排在同秒的 `…T10:00:00.5Z` **之后**（`'.' < 'Z'`）。`ORDER BY at` 在秒内是乱的。换真时间类型顺带修掉。 |
+| `at` / `started_at` 等 → `timestamptz` | 原来存 RFC3339Nano 文本，而这个格式**砍掉末尾的零**：整秒的 `…T10:00:00Z` 在字符串比较里排在同一秒内的 `…T10:00:00.5Z` **之后**（`'.'` 的字节值小于 `'Z'`）。`ORDER BY at` 在秒内本来就是乱的。换真时间类型顺带修掉。 |
 | `expired_at` → 可空 | 原来用空字符串表示未过期，因为 SQLite 那列是 NOT NULL。 |
-| 新增 `tool_result_seq` | 原来的 seq 分配写在 INSERT 的子查询里，引用了插入目标表 —— MySQL error 1093。改用 `LAST_INSERT_ID` 序列惯用法，仍是一条语句、仍原子。 |
+| `ok` / `replayed` / `retrievable` → `boolean` | SQLite 用 INTEGER 存布尔。 |
 | 新增 `tool_calls(session_id, invocation_id)` 索引 | 任务中心按一次运行取全部调用。本地文件上过滤一下无所谓，走网络值得让索引一次带出。 |
-| 标识列 `ascii_bin` | 见下。 |
 
-## 两条容易踩死的规定
+`memory_fts` 虚拟表变成普通表 `memory_index` + GIN trgm 索引，不算差异——
+它是派生索引，删掉重建即可，没有数据要迁。
 
-**① 标识列必须显式 `_bin` 排序规则。**
-
-SQLite 的 TEXT 默认按 BINARY 比较，区分大小写。MySQL 默认的
-`utf8mb4_0900_ai_ci` **不区分大小写、也不区分重音**。照搬默认值会让两个本来
-不同的 `call_id` 撞成一个——`'A1b2'` 和 `'a1B2'` 在默认排序规则下相等，而
-它们是唯一键的一部分。
-
-**② 标识列用 `ascii` 而不是 `utf8mb4`。**
-
-session_id / invocation_id / call_id / sha256 全是 UUID、十六进制或生成的短
-id，永不含非 ASCII。ascii 每字符 1 字节，utf8mb4 是 4 字节。这是 5 列复合
-唯一键能舒服地待在 InnoDB 3072 字节上限之内的原因（320 字节 vs 1280 字节）。
-
-现网实测的最大长度，VARCHAR 宽度是照它给的余量：
-
-| 列 | 实测最长 | 给到 |
-|---|---|---|
-| app_name | 11 | 64 |
-| user_id | 10 | 64 |
-| session_id | 25 | 64 |
-| invocation_id | 38 | 64 |
-| call_id | 32 | 64 |
-| tool | 16 | 128 |
-| sha256 | 64（定长） | CHAR(64) |
-| payload | 82,540 | LONGBLOB |
-
-## Elasticsearch
-
-两个索引都是**可重建的派生索引**，权威数据在 MySQL。所以：不需要备份、
-不需要迁移数据、坏了删掉重建。
-
-### jelly-memory —— 替代 memory_fts
-
-对应 `internal/memory/fts5.go`。它本来就是派生的：`AddSessionToMemory` 每轮
-先 `DELETE` 掉该会话的旧行再重建，所以换后端不涉及数据迁移。**这是整套存储
-里最容易换的一块。**
-
-值得换的理由：现在用 FTS5 的 trigram 分词器，三字滑窗。它能做 CJK 子串匹配
-（默认的 unicode61 会把一整句中文当成一个 token），代价是**查询必须 ≥3 个
-字**，更短的走 LIKE 全扫。真分词没有这个下限。
-
-字段对应关系直接照搬：FTS5 里除 `content` 外全是 `UNINDEXED`，这里对应
-`keyword`；只有 `content` 走分词。`dynamic: strict` 是有意的——这个索引由
-代码写入，字段集固定，多出来的字段一定是 bug，该报错而不是被静默索引。
-
-### jelly-artifacts —— 大产物全文检索
-
-服务 `search_result` 工具和 `GET /api/sessions/{id}/results/{ref}/search`。
-现在这条路是把 payload 从 SQLite 读出来在进程里扫；产物实测已有 80KB，而
-bench 里那个假 MCP 会造 6 万行日志。
-
-正文**只索引不存储**（`store: false` + 从 `_source` 排除），命中靠 highlight
-返回片段。这样 ES 不会变成 payload 的第二份副本：权威副本在
-`tool_results.payload`，这里只是一个可重建的倒排索引。
-
-文档 id 用 `app_name/user_id/session_id/invocation_id/call_id` 拼出来，和
-MySQL 的唯一键同一把钥匙，重建时天然幂等。
-
-> 一个已知边界：highlight 默认只分析正文前 1,000,000 字符
-> （`index.highlight.max_analyzed_offset`）。超长产物要么调这个值，要么开
-> `term_vector`。等真碰到再定——提前开 term_vector 是实打实的存储代价。
-
-### 中文分词：两个版本选一个
-
-| 文件 | 分词器 | 需要 |
-|---|---|---|
-| `*.json` | `ik_max_word` | 装 `analysis-ik` 插件 |
-| `*.no-ik.json` | 内置 `cjk`（二元分词） | 无 |
-
-IK 是真分词，明显强于现在的 trigram；`cjk` 二元分词不需要插件，效果介于
-trigram 和 IK 之间。**先用 no-ik 版跑通，确认这条路有价值了再装插件。**
-
-## 执行顺序
+## 执行
 
 ```bash
-# MySQL
-mysql -h HOST -u USER -p jelly < migrations/mysql/0001_init.sql
+psql "$DSN" -f migrations/postgres/0001_init.sql
 # ADK 那四张表由程序启动时 AutoMigrate 建，不用手动跑
-
-# Elasticsearch
-# Elasticsearch —— 没装 IK 插件就用 .no-ik.json
-curl -XPUT "$ES/jelly-memory"    -H 'Content-Type: application/json' \
-     -d @migrations/elastic/jelly-memory.no-ik.json
-curl -XPUT "$ES/jelly-artifacts" -H 'Content-Type: application/json' \
-     -d @migrations/elastic/jelly-artifacts.no-ik.json
 ```
 
-四个 JSON 都是干净的 ES 请求体，可以直接 `-d @file`，不用先剥注释。
+## 尚未验证
 
-## 尚未验证的部分
+Docker 起不来，下面这些是从源码和文档推出来的，**接线前要用真库过一遍**：
 
-Docker 起不来，所以下面这些是从源码和文档推出来的，**上线前要用真库过一遍**：
-
-- ADK `AutoMigrate` 在 MySQL 上是否真能建出 events 表（那 16 字节余量）
-- `LAST_INSERT_ID` 序列惯用法在并发 `Put` 下的实际表现
+- ADK 的 `AutoMigrate` 在 PG 上建出来的 events 表是什么样
+- `record.Put` 那条 UPSERT 在 PG 上原样能跑（这是「不用改」这个结论的前提）
 - 热路径延迟：`timeline.go` 的投影和 `taskapi.go` 的分页，本地文件 vs 网络
