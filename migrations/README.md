@@ -125,13 +125,58 @@ psql "$DSN" -f migrations/postgres/0001_init.sql
 # ADK 那四张表由程序启动时 AutoMigrate 建，不用手动跑
 ```
 
+**重跑会报 `42P07 relation already exists`，这是故意的。** `CREATE TABLE`
+没写 `IF NOT EXISTS`：那个写法对一张已经存在、但定义已经变了的表**什么都
+不做**，而这正是 record / metrics / schedule 三个包分别踩过一次的坑
+（见它们各自 migrate 函数的注释）。宁可在你面前失败，也不要静默地让 schema
+和代码对不上。
+
+用 DBeaver 之类的客户端跑时尤其注意：报了 already exists 就说明**上一次已经
+成功了**，去看表在不在，而不是反复重试。要重来就先 `DROP SCHEMA public
+CASCADE; CREATE SCHEMA public;`。
+
 `CREATE EXTENSION pg_trgm` 需要建库权限；托管实例上通常要用管理员账号跑
 这一行，或者先让 DBA 装好。
 
-## 尚未验证
+## 已在真库上验过（PostgreSQL 16.6）
 
-Docker 起不来，下面这些是从源码和文档推出来的，**接线前要用真库过一遍**：
+三条原本推断出来的结论，都在 `172.16.5.128:5432/jelly` 上跑过了：
 
-- ADK 的 `AutoMigrate` 在 PG 上建出来的 events 表是什么样
-- `record.Put` 那条 UPSERT 在 PG 上原样能跑（这是「不用改」这个结论的前提）
-- 热路径延迟：`timeline.go` 的投影和 `taskapi.go` 的分页，本地文件 vs 网络
+**① `0001_init.sql` 能跑通。** 7 张表、13 个索引、7 个主键、`pg_trgm 1.6`
+全部就位。
+
+**② ADK 的 `AutoMigrate` 在 PG 上没有 MySQL 那个隐患。** 四张表都建出来，
+**每个字符串列都是 `text`** —— 没有 `varchar(191)` 的截断，也没有那个
+「4×191×4 = 3056，距 InnoDB 上限只剩 16 字节」的问题。events 的主键是
+`btree (id, app_name, user_id, session_id)`，四列 text，PG 完全不在意。
+state / content / 各种 metadata 用的是 `jsonb`（MySQL 上会是 LONGTEXT）。
+
+复现：`internal/session/pgprobe_test.go`，设 `JELLY_PG_DSN` 才跑。留着它是
+因为每次升 ADK 都值得重问一遍这个问题。
+
+**③ `record.Put` 那条 UPSERT 一字不改就能跑。** 这是整个 PG 方案的前提，
+实测：
+
+| 场景 | 结果 |
+|---|---|
+| 连续三次交付 | seq = 1, 2, 3 |
+| 同一 call_id 重放 | seq 不变（仍是 2），内容更新 |
+| 两条交付抢同一个 seq | 唯一索引拒绝写入，不会共用句柄 |
+
+MySQL 会以 error 1093 拒绝这条语句（INSERT 的子查询引用了目标表）。
+
+**附带测出来的：`pg_trgm` 对中文是有效的。** `show_trgm('内存使用率')` 给出
+6 个哈希三元组（多字节字符的三元组以哈希形式存，这是正常的）。索引可用，
+但**小表上 planner 会正确地选顺序扫**：
+
+| 行数 | 执行计划 | 耗时 |
+|---|---|---|
+| 5,000 | Seq Scan | —— 表只有几页，顺序扫本来就更快 |
+| 200,000 | Bitmap Index Scan | 1.26 ms |
+
+所以短期内看到 Seq Scan 不是索引坏了，是数据量还没到。
+
+## 还没验的一项
+
+**热路径延迟**：`timeline.go` 的投影和 `taskapi.go` 的分页，本地文件 vs
+网络。这一条要等接线之后才测得了 —— 现在代码还在读 SQLite。
