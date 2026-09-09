@@ -30,8 +30,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -199,11 +197,6 @@ type Store struct {
 func Open(dbPath string) (*Store, error) {
 	if dbPath == "" {
 		return nil, fmt.Errorf("record: empty db path")
-	}
-	if dir := filepath.Dir(dbPath); dir != "" {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			return nil, fmt.Errorf("record: create db dir: %w", err)
-		}
 	}
 	db, err := storage.Open(dbPath)
 	if err != nil {

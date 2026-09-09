@@ -8,6 +8,9 @@ import "strings"
 type dialect interface {
 	// driver names the registered database/sql driver.
 	driver() string
+	// prepare validates or prepares the reference before database/sql sees it.
+	// SQLite creates a parent directory for its file; PostgreSQL has none.
+	prepare(ref string) error
 	// rebind converts a query written with `?` into this dialect's placeholder
 	// syntax. Queries are written with `?` everywhere because that is what the
 	// repo already had; only this function knows the difference.

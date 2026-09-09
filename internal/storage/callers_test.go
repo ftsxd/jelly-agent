@@ -57,6 +57,13 @@ func TestDialectKnowledgeLivesOnlyInThisPackage(t *testing.T) {
 				t.Errorf("%s 出现了 %q —— %s", path, b.needle, b.why)
 			}
 		}
+		// Once a reference reaches storage.Open, only its dialect knows whether
+		// it names a local file. Preparing a directory beside the call turns a
+		// PostgreSQL URL (including credentials) into a filesystem path before
+		// storage gets a chance to classify it.
+		if strings.Contains(src, "storage.Open(") && strings.Contains(src, "os.MkdirAll(") {
+			t.Errorf("%s 在 storage.Open 旁自行创建目录 —— 数据库引用是否是文件属于 dialect", path)
+		}
 		return nil
 	})
 	if err != nil {

@@ -25,38 +25,53 @@ package storage
 import (
 	"database/sql"
 	"fmt"
-	"os"
-	"path/filepath"
+	"strings"
 )
 
 // Open returns a configured handle to the database ref names.
 //
-// Today ref is a filesystem path and the database is SQLite; the parent
-// directory is created if it does not exist, because every caller wanted that
-// and only three of them had their own copy of it. When a networked database
-// is added, ref grows a scheme and this is the only function that learns
-// about it.
+// A postgres:// or postgresql:// ref selects PostgreSQL; anything without a
+// URL scheme is a SQLite filesystem path. SQLite's parent directory is created
+// if it does not exist, because every caller wanted that and only three of them
+// had their own copy of it.
 //
 // The caller closes the handle.
 func Open(ref string) (*DB, error) {
 	if ref == "" {
 		return nil, fmt.Errorf("storage: empty database reference")
 	}
-	d := dialect(sqliteDialect{})
-	if dir := filepath.Dir(ref); dir != "" && dir != "." {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			return nil, fmt.Errorf("storage: create db dir %s: %w", dir, err)
-		}
+	d, err := dialectFor(ref)
+	if err != nil {
+		return nil, err
+	}
+	if err := d.prepare(ref); err != nil {
+		return nil, err
 	}
 	native, err := sql.Open(d.driver(), ref)
 	if err != nil {
-		return nil, fmt.Errorf("storage: open %s: %w", ref, err)
+		// Do not put ref in this error: a PostgreSQL URL may contain a password.
+		return nil, fmt.Errorf("storage: open %s: %w", d.driver(), err)
 	}
 	if err := d.configure(native); err != nil {
 		native.Close()
 		return nil, err
 	}
 	return &DB{db: native, dialect: d}, nil
+}
+
+// dialectFor chooses by URL scheme. A value with no URL scheme is a SQLite
+// path, preserving the existing API; a value that claims to be some other URL
+// is rejected instead of becoming a surprisingly named SQLite file.
+func dialectFor(ref string) (dialect, error) {
+	if scheme, _, ok := strings.Cut(ref, "://"); ok {
+		switch scheme {
+		case "postgres", "postgresql":
+			return postgresDialect{}, nil
+		default:
+			return nil, fmt.Errorf("storage: unsupported database scheme %q", scheme)
+		}
+	}
+	return sqliteDialect{}, nil
 }
 
 // IsUniqueViolation reports whether err is a uniqueness clash — a UNIQUE index
@@ -66,7 +81,9 @@ func Open(ref string) (*DB, error) {
 // rather than collides, so a clash on one means an invariant is broken — a
 // counter behind its table, or a second writer on the old path — and the
 // caller uses this to say so instead of returning a bare driver error.
-func IsUniqueViolation(err error) bool { return sqliteDialect{}.isUniqueViolation(err) }
+func IsUniqueViolation(err error) bool {
+	return sqliteDialect{}.isUniqueViolation(err) || postgresDialect{}.isUniqueViolation(err)
+}
 
 // Column is one column a table is expected to have, and the DDL that adds it.
 type Column struct {

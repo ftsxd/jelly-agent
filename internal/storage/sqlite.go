@@ -4,6 +4,8 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 
 	sqlite "github.com/glebarez/go-sqlite" // registers the "sqlite" driver
 )
@@ -13,6 +15,15 @@ import (
 type sqliteDialect struct{}
 
 func (sqliteDialect) driver() string { return "sqlite" }
+
+func (sqliteDialect) prepare(ref string) error {
+	if dir := filepath.Dir(ref); dir != "" && dir != "." {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return fmt.Errorf("storage: create db dir %s: %w", dir, err)
+		}
+	}
+	return nil
+}
 
 // rebind is the identity: `?` is already SQLite's placeholder.
 //

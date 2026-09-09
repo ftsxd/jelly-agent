@@ -176,7 +176,32 @@ MySQL 会以 error 1093 拒绝这条语句（INSERT 的子查询引用了目标�
 
 所以短期内看到 Seq Scan 不是索引坏了，是数据量还没到。
 
+## 接线时必须一起解决的：句柄不能每次调用现开
+
+七个 store 里有四个是**每次调用现开一个句柄再关掉**（`open()` → `defer
+db.Close()`）：`internal/task`、`internal/session/list`、
+`internal/memory/purge`、`internal/schedule`。
+
+在 SQLite 上这是开个文件，可以忽略。在 PG 上这是一次 TCP + 认证握手。
+对着 `172.16.5.128:5432` 实测（局域网，和真实部署形态一致）：
+
+| | 每次 `SELECT 1` |
+|---|---|
+| 每次调用现开句柄（这四个 store 的现状） | **9.337 ms** |
+| 复用已有句柄（record / metrics / memory-fts 的做法） | **579 µs** |
+| | **16 倍** |
+
+具体后果：`session.ListPage` 在每次会话页加载时付一次；
+`handleDeleteSessions` 连着调三个清理函数，就是三次握手，纯开销 28ms。
+
+所以这不是「接完再优化」，是接线的一部分——否则第一次跑 PG 会慢得离谱，
+而人会去查错的地方。两条路：把这四个 store 改成持有句柄（和另外三个一样），
+或者在 `storage` 里按 DSN 共享句柄。前者更干净，后者改动小。
+
+顺带一件相关的：`postgresConnLimit` 现在设成 4，因为七个 store 各开一个池，
+乘七是 28，而 PG 默认 `max_connections` 是 100。句柄共享之后这个数就该重定。
+
 ## 还没验的一项
 
-**热路径延迟**：`timeline.go` 的投影和 `taskapi.go` 的分页，本地文件 vs
-网络。这一条要等接线之后才测得了 —— 现在代码还在读 SQLite。
+**热路径延迟**：`timeline.go` 的投影和 `taskapi.go` 的分页。这一条要等
+store 真正接到 PG 之后才测得了 —— 现在代码还在读 SQLite。
