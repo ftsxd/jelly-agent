@@ -129,3 +129,7 @@ func (sqliteDialect) epochSeconds(c string) string {
 func (sqliteDialect) isMissingTable(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "no such table")
 }
+
+func (sqliteDialect) columns(db *DB, table string) ([]string, error) {
+	return scanStrings(db, `SELECT name FROM pragma_table_info(?) ORDER BY name`, table)
+}

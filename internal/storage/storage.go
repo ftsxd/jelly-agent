@@ -250,3 +250,34 @@ func ApplySchema(db *DB, ddl string, tables ...string) error {
 // belongs here for the same reason the placeholder does — a caller that writes
 // the SQLite spelling inline works in every test and fails only on PostgreSQL.
 func (d *DB) EpochSeconds(column string) string { return d.dialect.epochSeconds(column) }
+
+// Columns lists a table's column names, sorted.
+//
+// For comparing the two schemas against each other. They are two independent
+// definitions — the DDL a store runs on SQLite, and
+// migrations/postgres/0001_init.sql — so a column added to one and not the
+// other goes unnoticed until a query on the deployment that has the older one
+// fails. ApplySchema checks that a table is there; nothing checked what is in
+// it, and nothing at runtime can: a PostgreSQL deployment never runs the
+// SQLite DDL, so only a test with both in front of it can compare them.
+func Columns(db *DB, table string) ([]string, error) {
+	return db.dialect.columns(db, table)
+}
+
+// scanStrings collects a single-column result.
+func scanStrings(db *DB, query string, args ...any) ([]string, error) {
+	rows, err := db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var s string
+		if err := rows.Scan(&s); err != nil {
+			return nil, err
+		}
+		out = append(out, s)
+	}
+	return out, rows.Err()
+}

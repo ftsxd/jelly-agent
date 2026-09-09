@@ -276,6 +276,29 @@ UPDATE 拿行锁，并发写入排队几微秒，各自拿到不同的号。同�
 下一个发 4，而 4 已经被唯一索引占着——库能干净打开，然后这个会话的下一条
 交付就失败。
 
+## 两份 schema 不会悄悄漂开
+
+这份迁移文件和各个 store 里的 DDL 常量是**两份独立定义**。给一边加一列、
+忘了另一边，运行时不会有人抱怨 —— `storage.ApplySchema` 只检查表在不在，
+不检查里面有什么，而且它也做不到更多：PG 部署从来不跑 SQLite 的 DDL。
+
+只有一个同时看得到两个库的测试能比。
+`internal/engine/schemadrift_test.go` 就是它：在临时 SQLite 上跑一遍所有
+store 的建表，再对着已经迁移过的 PG，逐表比列名。设 `JELLY_PG_DSN` 才跑。
+
+两个方向都验过：
+
+```
+tool_results.brand_new 只在 SQLite 上有 —— migrations/postgres/0001_init.sql 少了它
+task_runs.only_in_pg   只在 PostgreSQL 上有 —— 某个 store 的 DDL 少了它
+```
+
+**只比列名，不比类型。** `INTEGER` 对 `boolean`、`TEXT` 对 `text` 是有意的
+（见上面那张差异表）；而「一边有、另一边没有」从来不是有意的。
+
+ADK 那四张表不在比较范围内：两边都由 GORM AutoMigrate 从同一套模型建，
+不会像两份手写定义那样漂。
+
 ## 还没验的一项
 
 **热路径延迟**：`timeline.go` 的投影和 `taskapi.go` 的分页。这一条要等

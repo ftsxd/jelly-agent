@@ -113,3 +113,10 @@ func (postgresDialect) isMissingTable(err error) bool {
 	var e *pgconn.PgError
 	return errors.As(err, &e) && e.Code == postgresUndefinedTable
 }
+
+func (postgresDialect) columns(db *DB, table string) ([]string, error) {
+	return scanStrings(db, `
+		SELECT column_name FROM information_schema.columns
+		WHERE table_schema = current_schema() AND table_name = ?
+		ORDER BY column_name`, table)
+}

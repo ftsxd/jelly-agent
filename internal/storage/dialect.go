@@ -26,6 +26,9 @@ type dialect interface {
 	createsOwnSchema() bool
 	// hasTable asks whether a table exists, for the dialects that only check.
 	hasTable(db *DB, table string) (bool, error)
+	// columns lists a table's column names, for comparing one dialect's
+	// schema against another's.
+	columns(db *DB, table string) ([]string, error)
 	// isMissingTable classifies "that table does not exist".
 	isMissingTable(err error) bool
 	// epochSeconds renders a timestamp column as whole seconds since the
