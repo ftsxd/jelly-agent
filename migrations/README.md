@@ -7,6 +7,33 @@ migrations/postgres/0001_init.sql    七张表 + 索引 + pg_trgm
 一套 PG 解决全部：关系数据、中文检索、以后的向量。**不引 MySQL，也不引
 Elasticsearch。**
 
+## 怎么确认这套东西是对的
+
+跑测试。PostgreSQL 相关的是 opt-in 的，设 `JELLY_PG_DSN` 才跑：
+
+```bash
+go test ./...                                   # SQLite 侧，无需任何外部依赖
+JELLY_PG_DSN=postgres://… go test ./internal/... # 同一批测试，跑在 PG 上
+go test ./internal/server/ ./internal/task/ -race
+cd web && npx vitest run && npx vite build
+```
+
+值得知道的几条：
+
+| 测试 | 它守着什么 |
+|---|---|
+| `engine.TestSQLiteAndPostgresSchemasAgree` | 两份 schema 定义不会漂开，表清单从 `migrate.Tables` 推导 |
+| `engine.TestEveryStoreWorksAgainstPostgres` | 每个 store 在 PG 上的读写往返 |
+| `server.TestHandlersWorkAgainstPostgres` | handler 层，投影和分页自己拼的 SQL |
+| `server.TestTheTaskListDoesNotReloadUnchangedSessions` | 任务列表的 N+1 不会回来 |
+| `server.TestHotPathLatency` | 三条热路径的实际耗时，打印出来 |
+| `migrate.TestMigrateSQLiteToPostgres` | 整条升级路径，含幂等与审计历史 |
+| `engine.TestOpeningWithNoConfiguredDirectoryLeavesTheDefaultOneAlone` | 没配目录的进程不动默认目录里的文件 |
+| `storage.TestDialectKnowledgeLivesOnlyInThisPackage` | 方言代码不会长回别的包 |
+
+PG 测试共用一个开发库，靠 `pg_advisory_lock` 串行化（`storage.LockExclusively`）
+—— 不是靠记得加 `-p 1`。
+
 ## 为什么是 PG 而不是 MySQL
 
 不是偏好，是这次迁移里风险最高的两项改造在 PG 上直接消失：
@@ -349,9 +376,10 @@ schema 定义差一个提交是常有的事，修法通常是往 `0001_init.sql`
 
 ### 搬什么、不搬什么
 
-九张表：ADK 的 `sessions` / `events` / `app_states` / `user_states`，加上
+十一张表：ADK 的 `sessions` / `events` / `app_states` / `user_states`，加上
 `tool_results` / `tool_result_seq` / `tool_calls` / `task_runs` /
-`schedule_runs`。顺序有讲究——events 引用 sessions。
+`schedule_runs` / `tool_decls` / `tool_decl_log`。顺序有讲究——events 引用
+sessions。
 
 **`memory_fts` 不搬。** 它是从 events 重建的派生索引，每个会话的下一轮对话
 会自动重建，搬过去只是把马上要被覆盖的旧行搬一遍。
@@ -373,9 +401,22 @@ schema 定义差一个提交是常有的事，修法通常是往 `0001_init.sql`
 
 ### 实测
 
-拿一个真实的 2MB `state.db` 端到端跑过：2 个会话、16 条事件、13 条产物
-（含一条 82,540 字节的）、66 条调用记录，全部搬过去，行数核对通过，
-服务在新库上起来零错误。
+拿一个真实的 2MB `state.db` 加 9 条 `console.yaml` 声明，端到端走完整条
+升级路径：
+
+```
+1. SQLite 上启动一次   → console.yaml 导入 tool_decls（9 条，带 import: 署名）
+                          原文件改名 console.yaml.imported
+2. psql -f 0001_init.sql
+3. migrate --dry-run    → 报出会搬多少，一行都不写（ADK 的四张表也不建）
+4. migrate              → 115 行，行数核对通过
+5. 再跑一次 migrate      → 复制 0 行，已存在 115 行
+6. 在 PG 上启动服务      → 首页 200、未鉴权端点 401、日志零错误
+                          9 条声明与审计历史都在
+```
+
+数据是 2 个会话、16 条事件、13 条产物（含一条 82,540 字节的）、66 条调用
+记录。
 
 ## 热路径延迟（已实测）
 

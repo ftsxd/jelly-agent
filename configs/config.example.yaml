@@ -71,7 +71,11 @@ history:
 
 # 工具：选择、结果上限、结果保留期。整段省略即用默认值。
 tools:
-  # metadata_dir: ~/.jelly-agent/tools   # 工具元数据 YAML 目录，留空只用内置
+  # 这套部署自己的工具元数据 YAML 目录。留空 = 配置文件旁边的 tools/。
+  #
+  # 三层，从下到上：随产品发布的（internal/toolreg/bundled/，编译进二进制，
+  # 无需任何配置）、这个目录里的、控制台改的（存 tool_decls 表，带审计）。
+  # metadata_dir: ~/.jelly-agent/tools
 
   # max_tools: 48            # 一轮最多送给模型多少个工具 schema。填负数 = 全送
   #
@@ -129,3 +133,19 @@ sandbox:
 #   - name: coder
 #     description: 写代码与调试
 #     enabled: true
+
+# ── 状态数据库 ──────────────────────────────────────────────────────────
+#
+# 会话、事件、工具产物、调用记录、任务归属、排程日志、L2 索引、控制台改的
+# 工具声明——都在这一个库里。它们按 (session_id, invocation_id) 互相 join，
+# 所以不能拆开放。
+storage:
+  # 留空 = 配置文件旁边的 state.db（这个文件在 ~/.jelly-agent/ 就是
+  # ~/.jelly-agent/state.db）。
+  #
+  # postgres:// 或 postgresql:// 开头选 PostgreSQL。什么时候需要：多个进程
+  # 共享一个库（每进程一个 SQLite 句柄互相看不见对方的写入），以及随之而来的
+  # 运维能力（备份、从库、能拿 psql 连上去的东西）。
+  #
+  # schema 与迁移见 migrations/README.md。改这一项要重启。
+  # dsn: postgres://jelly:PASSWORD@db.example:5432/jelly?sslmode=require

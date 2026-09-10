@@ -91,8 +91,10 @@ function fmtTime(iso) {
 const decls = ref({})
 const kinds = ref([])
 const effects = ref([])
-const declDir = ref('')
-const declFile = ref('')
+// Where the console's declarations live. A table now, not a file: a save used
+// to rewrite console.yaml in full, which lost a field with no history to
+// recover it from and could not be made safe between two processes.
+const declStore = ref('')
 const declError = ref('')
 const declOpen = reactive({})
 const declDrafts = reactive({})
@@ -108,8 +110,7 @@ async function loadDecls() {
     decls.value = byKey
     kinds.value = r.kinds || []
     effects.value = r.effects || []
-    declDir.value = r.dir || ''
-    declFile.value = r.file || ''
+    declStore.value = r.stored_in || ''
     declError.value = ''
   } catch (e) {
     declError.value = e.message
@@ -543,7 +544,11 @@ async function testForm() {
                 </tbody>
               </table>
               <div v-if="declError" class="error-bar"><Icon name="alert" :size="14" /> {{ declError }}</div>
-              <div v-else-if="declDir" class="muted tiny">保存到 {{ declDir }}/{{ declFile }}，可手工编辑</div>
+              <div v-else-if="declStore" class="muted tiny">
+                保存在数据库的 {{ declStore }} 表，每次改动都记在 tool_decl_log 里；
+                随产品发布的声明在 internal/toolreg/bundled/，部署自己的放
+                tools.metadata_dir 指向的目录
+              </div>
             </div>
           </div>
         </div>

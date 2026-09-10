@@ -10,7 +10,7 @@
 - Agent + `web_search` / `fetch_url` 工具，端到端跑通 DeepSeek。
 - 配置层（YAML + `${ENV}` + 环境变量回落）、模型 Registry、cobra 命令树。
 - **交互式多轮对话** + 内联命令（`/help` `/tools` `/memory` `/clear` `/stats` `/exit`）。
-- **会话持久化**：纯 Go SQLite（无 CGO），落 `~/.jelly-agent/state.db`，可列出历史会话。
+- **会话持久化**：默认纯 Go SQLite（无 CGO），落配置文件旁边的 `state.db`（默认 `~/.jelly-agent/state.db`）；配 `storage.dsn` 可换 PostgreSQL，见 [migrations/README.md](migrations/README.md)。
 - **L1 核心记忆**（Hermes 式）：`MEMORY.md` / `USER.md` 每轮注入 system prompt（带 token 预算裁剪），Agent 通过 `remember` / `forget` 工具跨会话增删长期事实。
 - **L2 会话检索**（可选）：历史会话文本索引进 SQLite FTS5（与 `state.db` 同库、纯 Go trigram 分词，中英文皆可子串检索），开启后 Agent 获得 `load_memory` 工具按需检索过往对话。
 - **多 Agent（协调者 + 子 Agent 转交）**：在 config / Web 定义多个具名 Agent（各自 provider、指令、MCP），给协调者挂上「子 Agent」即开启 ADK 的 `transfer_to_agent` 转交——协调者按每个子 Agent 的描述判断把任务交给谁。未定义任何 Agent 时对话仍走默认单 Agent（向后兼容）。
