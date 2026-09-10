@@ -60,12 +60,14 @@ func NewFileSource(dir string) *FileSource {
 
 func (f *FileSource) Name() string { return "file:" + f.dir }
 
-// ConsoleFile is the metadata file the web console owns and rewrites.
+// ConsoleFile is the file the console used to own.
 //
-// Named here rather than in the console because how it is applied is a
-// property of this package: it patches the other files rather than competing
-// with them, which is what makes a declaration made in the UI take effect
-// without discarding whatever else was written about that tool.
+// The console's layer is tool_decls now — see DBSource for why. The name
+// survives for one purpose: finding an old file on an upgrading deployment
+// and importing it (ImportConsoleFile). This package no longer treats it as
+// an overlay, because there is only one overlay and it is the database; a
+// file that reappeared here would otherwise be a second one, silently
+// competing with what the console shows.
 const ConsoleFile = "console.yaml"
 
 // metadataFile is the on-disk shape. The wrapper key exists so a file can
@@ -81,14 +83,14 @@ type metadataFile struct {
 // symptom — a tool that is configured but absent — is far harder to trace back
 // than a parse error naming the file.
 //
-// The console's file is applied on top of the rest rather than alongside them.
-// See applyOverlay for why that is not the same as loading it first.
+// Every file here is a base declaration. The overlay — the console's layer —
+// lives in the database now; see DBSource.
 func (f *FileSource) Load(ctx context.Context) ([]ops.ToolMetadata, error) {
 	paths, err := f.paths()
 	if err != nil {
 		return nil, err
 	}
-	var base, overlay []ops.ToolMetadata
+	var base []ops.ToolMetadata
 	for _, p := range paths {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -101,13 +103,9 @@ func (f *FileSource) Load(ctx context.Context) ([]ops.ToolMetadata, error) {
 		if err := yaml.Unmarshal(raw, &mf); err != nil {
 			return nil, fmt.Errorf("toolreg: parse %s: %w", p, err)
 		}
-		if filepath.Base(p) == ConsoleFile {
-			overlay = append(overlay, mf.Tools...)
-			continue
-		}
 		base = append(base, mf.Tools...)
 	}
-	return applyOverlay(base, overlay), nil
+	return base, nil
 }
 
 // applyOverlay patches declarations onto the entries they name.

@@ -1564,7 +1564,7 @@ func (e *Engine) ReloadToolMetadata() {
 // deployment that still answers with what its files say is more useful than
 // one that answers with nothing.
 func (e *Engine) metadataSources() []toolreg.Source {
-	sources := []toolreg.Source{jellytool.BuiltinMetadata()}
+	sources := []toolreg.Source{jellytool.BuiltinMetadata(), toolreg.BundledMetadata()}
 	if dir := e.ToolMetadataDir(); dir != "" {
 		sources = append(sources, toolreg.NewFileSource(dir))
 	}

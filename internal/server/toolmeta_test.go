@@ -50,9 +50,13 @@ func TestDeclaringAToolFromTheConsole(t *testing.T) {
 	if len(before.Kinds) == 0 {
 		t.Error("the console has no vocabulary to offer")
 	}
+	// The console has declared nothing yet. The tool itself is known — its
+	// produces and side effect ship with the build (toolreg.BundledMetadata)
+	// — and that is the layering this test is about: a console save patches
+	// what the bundled layer said, it does not introduce the tool.
 	for _, d := range before.Tools {
-		if d.Name == "query_instant" {
-			t.Fatal("precondition: query_instant should not be declared yet")
+		if d.Name == "query_instant" && d.Declared != nil {
+			t.Fatalf("precondition: 控制台不该已经声明过它: %+v", d.Declared)
 		}
 	}
 

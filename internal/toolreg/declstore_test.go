@@ -337,3 +337,45 @@ func TestImportingWithNoFileIsFine(t *testing.T) {
 		t.Errorf("n = %d, err = %v", n, err)
 	}
 }
+
+// The overlay patches the file layer, and it is the only overlay.
+//
+// This behaviour used to belong to console.yaml, applied inside
+// FileSource.Load: whichever file sorted last did not win outright, its
+// fields were folded into the others. That layer moved to the database, and
+// FileSource stopped treating any filename specially — a second overlay would
+// silently compete with what the console shows.
+func TestTheOverlayFoldsIntoTheFileLayer(t *testing.T) {
+	ctx := context.Background()
+	db := declDB(t)
+
+	hand := StaticSource{Label: "hand-written", Metas: []ops.ToolMetadata{{
+		Name: "query_range", Server: "n9e",
+		Description: "查询一段时间的指标曲线",
+		Produces:    "log_excerpt",
+		SideEffect:  "read_only",
+		Aliases:     []string{"range_query"},
+	}}}
+	if err := SaveDecl(ctx, db, Decl{
+		Server: "n9e", Name: "query_range", Produces: str("metric_series"),
+	}, "alice"); err != nil {
+		t.Fatal(err)
+	}
+
+	metas, err := Merge(ctx, hand, NewDBSource(db))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(metas) != 1 {
+		t.Fatalf("metas = %d, want the overlay folded into the file entry: %+v", len(metas), metas)
+	}
+	got := metas[0]
+	if got.Produces != "metric_series" {
+		t.Errorf("produces = %q, want the overlay's", got.Produces)
+	}
+	// Everything the overlay said nothing about survives.
+	if got.Description != "查询一段时间的指标曲线" || got.SideEffect != "read_only" ||
+		!slices.Equal(got.Aliases, []string{"range_query"}) {
+		t.Errorf("覆盖一个字段把文件层的其余部分冲掉了: %+v", got)
+	}
+}

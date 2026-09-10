@@ -4,20 +4,25 @@
 # 的证据"。没有它，任务中心只能说"执行工具"——那是诚实的，但对人没用。
 # 声明之后，同一批调用会被归成"查询监控""关联日志"这样的业务阶段。
 #
-# 这是配置，不是代码：下面的名字来自实际跑过的会话，你的 MCP 服务器换了工具，
-# 改这个文件即可，不用改程序。
+# 这个文件编译进二进制（internal/toolreg/bundled.go），所以不需要任何启用步骤。
+# 它以前在 configs/tools/ 下、要靠 tools.metadata_dir 指过来才生效——而没人设过
+# 那个键，容器镜像里也根本没有 configs/，于是这些声明从来没有生效过：六个 n9e
+# 工具一直在没有 produces、没有 side_effect、没有 suites 的状态下运行。
 #
-# 启用方式（config.yaml）：
-#   tools:
-#     metadata_dir: /path/to/configs/tools
+# server 必须与 mcp 段里的服务器名一致，否则不会匹配上。名字对不上的条目是惰性的
+# ——没有那个 MCP 服务器的部署不受影响，这也是可以随产品发布它的原因。
 #
-# server 必须与 mcp 段里的服务器名一致，否则不会匹配上。
+# 这里**不写 backend**。Registry.Available 按 backend 过滤，而目前唯一构造的
+# incident（engine.incidentFor）不带 targets，Backends() 返回空——所以任何带
+# backend 的工具在每一条路径上都会被滤掉，包括提示词页面自己。
+# internal/server 里 TestAConsoleDeclarationDoesNotSetABackend 守着同一件事。
+#
+# 你自己部署的声明放 tools.metadata_dir 指向的目录；控制台改的存进 tool_decls。
 
 tools:
   # ── 监控指标：任务中心归为「查询监控」 ────────────────────────────
   - name: query_instant
     server: n9e-mcp
-    backend: n9e
     description: 对监控数据源执行一次 PromQL 瞬时查询。
     produces: metric_series
     side_effect: read_only
@@ -27,7 +32,6 @@ tools:
 
   - name: query_range
     server: n9e-mcp
-    backend: n9e
     description: 对监控数据源执行 PromQL 区间查询，返回时间序列。
     produces: metric_series
     side_effect: read_only
@@ -38,7 +42,6 @@ tools:
   # ── 告警：归为「查询事件」 ────────────────────────────────────────
   - name: list_active_alerts
     server: n9e-mcp
-    backend: n9e
     description: 列出当前活跃告警。
     produces: events
     side_effect: read_only
@@ -47,7 +50,6 @@ tools:
 
   - name: list_history_alerts
     server: n9e-mcp
-    backend: n9e
     description: 列出历史告警记录。
     produces: events
     side_effect: read_only
@@ -57,7 +59,6 @@ tools:
   # ── 配置类：归为「读取配置」 ──────────────────────────────────────
   - name: list_alert_rules
     server: n9e-mcp
-    backend: n9e
     description: 列出告警规则。
     produces: config
     side_effect: read_only
@@ -66,7 +67,6 @@ tools:
 
   - name: list_busi_groups
     server: n9e-mcp
-    backend: n9e
     description: 列出业务组。
     produces: config
     side_effect: read_only
@@ -75,7 +75,6 @@ tools:
 
   - name: list_datasources
     server: n9e-mcp
-    backend: n9e
     description: 列出监控数据源。
     produces: config
     side_effect: read_only
@@ -84,7 +83,6 @@ tools:
 
   - name: list_dashboards
     server: n9e-mcp
-    backend: n9e
     description: 列出监控大盘。
     produces: config
     side_effect: read_only
@@ -93,7 +91,6 @@ tools:
 
   - name: get_dashboard_pure
     server: n9e-mcp
-    backend: n9e
     description: 读取单个大盘的完整配置。
     produces: config
     side_effect: read_only
@@ -103,7 +100,6 @@ tools:
   # ── 资源清单：归为「查询状态」 ────────────────────────────────────
   - name: list_targets
     server: n9e-mcp
-    backend: n9e
     description: 列出被监控对象。
     produces: workload_status
     side_effect: read_only
