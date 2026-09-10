@@ -71,6 +71,7 @@ func TestSessionStoreUsesABoundedPoolItCanRelease(t *testing.T) {
 	if dsn == "" {
 		t.Skip("set JELLY_PG_DSN")
 	}
+	exclusive(t, dsn)
 	before := backendCount(t, dsn)
 
 	svc, closeSvc, err := New(dsn)

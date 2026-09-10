@@ -283,13 +283,35 @@ func (s StaticSource) Watch(ctx context.Context) <-chan []ops.ToolMetadata {
 // overlays follow. Build reports every conflict, so a losing entry is never
 // silent.
 func Merge(ctx context.Context, sources ...Source) ([]ops.ToolMetadata, error) {
-	var out []ops.ToolMetadata
+	var base, overlay []ops.ToolMetadata
 	for _, s := range sources {
 		metas, err := s.Load(ctx)
 		if err != nil {
 			return nil, fmt.Errorf("toolreg: source %s: %w", s.Name(), err)
 		}
-		out = append(out, metas...)
+		if _, ok := s.(Overlay); ok {
+			overlay = append(overlay, metas...)
+			continue
+		}
+		base = append(base, metas...)
 	}
-	return out, nil
+	// Overlays last, and patched in rather than appended, so an operator who
+	// set one field in the console does not silently discard what a
+	// hand-written file said about the others. See applyOverlay.
+	return applyOverlay(base, overlay), nil
+}
+
+// Overlay marks a source whose entries patch the others rather than compete
+// with them.
+//
+// The distinction is not about precedence — Build already resolves that — but
+// about granularity. A base source declares a tool; an overlay declares a
+// field of one, and the fields it says nothing about must keep the value the
+// base gave them. Two sources both declaring the same tool would otherwise be
+// a conflict, and resolving it either way loses half the answer.
+type Overlay interface {
+	Source
+	// IsOverlay is a marker. It exists so a source opts in explicitly rather
+	// than being classified by its name or its position in a list.
+	IsOverlay()
 }

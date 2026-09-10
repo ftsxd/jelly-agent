@@ -796,6 +796,7 @@ func (e *Engine) StateDB() (*storage.DB, error) {
 		for _, ensure := range []func(*storage.DB) error{
 			jellysession.EnsureSchema,
 			task.EnsureSchema,
+			toolreg.EnsureSchema,
 			schedule.EnsureSchema,
 			memory.EnsureSchema,
 		} {
