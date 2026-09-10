@@ -13,31 +13,16 @@ package server
 // any way to write one without a text editor. That is all this is.
 
 import (
+	"context"
+	"github.com/jelly-agent/jelly-agent/internal/storage"
 	"net/http"
-	"os"
-	"path/filepath"
 	"slices"
 	"sort"
 	"strings"
 
-	"gopkg.in/yaml.v3"
-
 	"github.com/jelly-agent/jelly-agent/internal/ops"
 	"github.com/jelly-agent/jelly-agent/internal/toolreg"
 )
-
-// consoleFile is the file the console owns.
-//
-// Separate from anything hand-written so that saving from the UI can rewrite
-// it whole without touching a file somebody maintains by hand — and so that
-// deleting it undoes exactly what the console did. The name lives in toolreg
-// because that is what loads it first, which is what makes a declaration made
-// here actually take effect rather than lose to a file that sorts earlier.
-const consoleFile = toolreg.ConsoleFile
-
-type metadataFile struct {
-	Tools []ops.ToolMetadata `yaml:"tools"`
-}
 
 // toolDeclDTO is one tool's declaration as the console edits it.
 //
@@ -91,9 +76,17 @@ type toolDeclFields struct {
 
 // handleToolMetadata lists what has been declared, and where each came from.
 func (s *Server) handleToolMetadata(w http.ResponseWriter, r *http.Request) {
-	dir := s.engine().ToolMetadataDir()
-	fromConsole := map[string]ops.ToolMetadata{}
-	for _, m := range readDecls(filepath.Join(dir, consoleFile)) {
+	db, ok := s.stateDB(w)
+	if !ok {
+		return
+	}
+	declared, err := toolreg.NewDBSource(db).Load(r.Context())
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	fromConsole := make(map[string]ops.ToolMetadata, len(declared))
+	for _, m := range declared {
 		fromConsole[declKey(m.Server, m.Name)] = m
 	}
 
@@ -104,15 +97,8 @@ func (s *Server) handleToolMetadata(w http.ResponseWriter, r *http.Request) {
 			if !ok || m.Name != name {
 				continue // aliases resolve to the same entry; list it once
 			}
-			src := "builtin"
-			if m.Server != "" {
-				src = "file"
-			}
-			decl, declared := fromConsole[declKey(m.Server, m.Name)]
-			if declared {
-				src = "console"
-			}
-			out = append(out, declRow(m, decl, declared, src))
+			decl, inConsole := fromConsole[declKey(m.Server, m.Name)]
+			out = append(out, declRow(m, decl, inConsole, sourceOf(m, inConsole)))
 		}
 	}
 	sort.Slice(out, func(i, j int) bool {
@@ -123,7 +109,7 @@ func (s *Server) handleToolMetadata(w http.ResponseWriter, r *http.Request) {
 	})
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"dir": dir, "file": consoleFile, "tools": out,
+		"stored_in": "tool_decls", "tools": out,
 		// The vocabulary, so the console does not carry its own copy of a list
 		// that lives in the domain model.
 		"kinds":   evidenceKinds(),
@@ -182,83 +168,37 @@ func (s *Server) handleSaveToolMetadata(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	dir := s.engine().ToolMetadataDir()
-	if dir == "" {
-		writeErr(w, http.StatusInternalServerError, "无法确定工具元数据目录")
+	db, ok := s.stateDB(w)
+	if !ok {
 		return
 	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+
+	// No mutex here any more, and that is the point.
+	//
+	// The lock this replaces guarded a file that every save rewrote in full,
+	// and it only ever guarded it from this process — a second console, or a
+	// second instance, raced it anyway. The row-per-tool table makes the
+	// patch a single statement whose scope is one tool, and the transaction
+	// around it is the database's, not one goroutine's idea of one.
+	if err := toolreg.SaveDecl(r.Context(), db, toolreg.Decl{
+		Name:   in.Name,
+		Server: in.Server,
+		// Backend is deliberately never set: it filters Registry.Available,
+		// and a console declaration is about what a tool IS, not about which
+		// incidents it belongs to — setting one here would hide the tool from
+		// every view that asks without an incident.
+		Description:  trimmed(in.Description),
+		UseCases:     cleaned(in.UseCases),
+		Examples:     cleaned(in.Examples),
+		AntiExamples: cleaned(in.AntiExamples),
+		Suites:       cleaned(in.Suites),
+		Produces:     in.Produces,
+		SideEffect:   in.Effect,
+	}, s.engine().Config().Web.Admin.Username); err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	path := filepath.Join(dir, consoleFile)
 
-	// One save at a time. Every save is a read-modify-write of one file, and
-	// the page issues them a field at a time — two dropdowns changed quickly
-	// both read the same old file and the second one wrote over the first.
-	// Serialising here rather than in the browser because the file is what is
-	// being protected, and a second console would race the first anyway.
-	s.declMu.Lock()
-	defer s.declMu.Unlock()
-
-	decls := readDecls(path)
-	key := declKey(in.Server, in.Name)
-	cur := ops.ToolMetadata{Name: in.Name, Server: in.Server}
-	kept := make([]ops.ToolMetadata, 0, len(decls)+1)
-	for _, m := range decls {
-		if declKey(m.Server, m.Name) == key {
-			cur = m // start from what is on disk now, not from what the page had
-			continue
-		}
-		kept = append(kept, m)
-	}
-	// Only the fields this request carried. Backend is deliberately never set:
-	// it filters Registry.Available, and a console declaration is about what a
-	// tool IS, not about which incidents it belongs to — setting one here
-	// would hide the tool from every view that asks without an incident.
-	cur.Name, cur.Server, cur.Backend = in.Name, in.Server, ""
-	if in.Produces != nil {
-		cur.Produces = ops.EvidenceKind(*in.Produces)
-	}
-	if in.Effect != nil {
-		cur.SideEffect = ops.SideEffectLevel(*in.Effect)
-	}
-	if in.Description != nil {
-		cur.Description = strings.TrimSpace(*in.Description)
-	}
-	if in.UseCases != nil {
-		cur.UseCases = cleanNames(*in.UseCases)
-	}
-	if in.Examples != nil {
-		cur.Examples = cleanNames(*in.Examples)
-	}
-	if in.AntiExamples != nil {
-		cur.AntiExamples = cleanNames(*in.AntiExamples)
-	}
-	if in.Suites != nil {
-		cur.Suites = cleanNames(*in.Suites)
-	}
-	// An entry with nothing left in it is removed rather than stored blank:
-	// "not declared" and "declared as nothing" look the same downstream, and
-	// only the first is true.
-	if hasConsoleFields(cur) {
-		kept = append(kept, cur)
-	}
-	sort.Slice(kept, func(i, j int) bool {
-		return declKey(kept[i].Server, kept[i].Name) < declKey(kept[j].Server, kept[j].Name)
-	})
-
-	body, err := yaml.Marshal(metadataFile{Tools: kept})
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	header := "# 由控制台维护，可以手工编辑。\n" +
-		"# 同目录下的其他 .yaml 文件不会被这里覆盖；这个文件优先于它们生效。\n"
-	if err := writeFileAtomic(path, append([]byte(header), body...)); err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error())
-		return
-	}
 	// Only the registry is rebuilt. A config reload would cancel the MCP
 	// context and kill every stdio subprocess — an absurd price for saying
 	// that a tool returns metrics.
@@ -272,8 +212,8 @@ func (s *Server) handleSaveToolMetadata(w http.ResponseWriter, r *http.Request) 
 	// directly — that is what keeps it from re-reading and racing the next
 	// save — so the response has to be the same answer the list would give.
 	writeJSON(w, http.StatusOK, map[string]any{
-		"ok": true, "saved_to": path,
-		"tool": s.effectiveDecl(in.Name, in.Server, cur),
+		"ok": true, "saved_to": "tool_decls",
+		"tool": s.effectiveDecl(r.Context(), db, in.Name, in.Server),
 	})
 }
 
@@ -325,40 +265,43 @@ func declRow(m, decl ops.ToolMetadata, declared bool, src string) toolDeclDTO {
 // does not know — nothing else declares it and it is not connected — is
 // answered with the declaration itself, which is exactly what will apply the
 // moment it appears.
-func (s *Server) effectiveDecl(name, server string, decl ops.ToolMetadata) toolDeclDTO {
+func (s *Server) effectiveDecl(ctx context.Context, db *storage.DB, name, server string) toolDeclDTO {
+	// Read back rather than echo what was sent. A save carries a patch; what
+	// the row now says is the patch applied to what was already there, and
+	// the page shows the row.
+	decl, declared := consoleDecl(ctx, db, server, name)
 	if reg := s.engine().ToolRegistry(); reg != nil {
 		if m, ok := reg.Lookup(name); ok && m.Server == server && m.Name == name {
-			return declRow(m, decl, true, "console")
+			return declRow(m, decl, declared, sourceOf(m, declared))
 		}
 	}
-	return declRow(decl, decl, true, "console")
+	return declRow(decl, decl, declared, "console")
 }
 
-// writeFileAtomic replaces a file in one step.
-//
-// os.WriteFile truncates and then writes, so a reader arriving in between — the
-// registry's own file watcher, or the next save's read-modify-write — sees an
-// empty or half-written file and treats it as "nothing declared". Writing a
-// temporary file in the same directory and renaming it over the target makes
-// the replacement a single operation as far as any reader is concerned.
-func writeFileAtomic(path string, data []byte) error {
-	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".*")
+// consoleDecl reads one tool's row, or reports that there is none.
+func consoleDecl(ctx context.Context, db *storage.DB, server, name string) (ops.ToolMetadata, bool) {
+	metas, err := toolreg.NewDBSource(db).Load(ctx)
 	if err != nil {
-		return err
+		return ops.ToolMetadata{}, false
 	}
-	name := tmp.Name()
-	defer os.Remove(name) // a no-op once the rename has succeeded
-	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
-		return err
+	for _, m := range metas {
+		if m.Server == server && m.Name == name {
+			return m, true
+		}
 	}
-	if err := tmp.Close(); err != nil {
-		return err
+	return ops.ToolMetadata{}, false
+}
+
+// sourceOf names where a resolved entry's declaration came from, for the page.
+func sourceOf(m ops.ToolMetadata, declaredInConsole bool) string {
+	switch {
+	case declaredInConsole:
+		return "console"
+	case m.Server != "":
+		return "file"
+	default:
+		return "builtin"
 	}
-	if err := os.Chmod(name, 0o644); err != nil {
-		return err
-	}
-	return os.Rename(name, path)
 }
 
 func declKey(server, name string) string { return server + "/" + name }
@@ -366,21 +309,6 @@ func declKey(server, name string) string { return server + "/" + name }
 func hasConsoleFields(m ops.ToolMetadata) bool {
 	return m.Description != "" || len(m.UseCases) > 0 || len(m.Examples) > 0 ||
 		len(m.AntiExamples) > 0 || len(m.Suites) > 0 || m.Produces != "" || m.SideEffect != ""
-}
-
-// readDecls loads the console's file, treating any problem as "nothing
-// declared yet" — the file is ours, a missing one is the normal first state,
-// and a corrupt one must not stop the page from working.
-func readDecls(path string) []ops.ToolMetadata {
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return nil
-	}
-	var f metadataFile
-	if err := yaml.Unmarshal(b, &f); err != nil {
-		return nil
-	}
-	return f.Tools
 }
 
 func evidenceKinds() []map[string]string {
@@ -412,4 +340,23 @@ func validKind(v string) bool {
 		}
 	}
 	return false
+}
+
+// trimmed and cleaned normalise an optional field without losing the
+// distinction the pointer carries: nil stays nil, because "said nothing" and
+// "said empty" mean different things to SaveDecl.
+func trimmed(s *string) *string {
+	if s == nil {
+		return nil
+	}
+	t := strings.TrimSpace(*s)
+	return &t
+}
+
+func cleaned(v *[]string) *[]string {
+	if v == nil {
+		return nil
+	}
+	c := cleanNames(*v)
+	return &c
 }

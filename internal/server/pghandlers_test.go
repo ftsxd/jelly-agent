@@ -97,9 +97,13 @@ func TestSessionReadsToleratePostgresWithoutADKTables(t *testing.T) {
 	if dsn == "" {
 		t.Skip("set JELLY_PG_DSN")
 	}
-	dropADKTables(t, dsn)
-
+	// The lock first, and it matters twice. Dropping before taking it does the
+	// destructive part while another package may be mid-AutoMigrate; and
+	// cleanups run last-in-first-out, so a lock taken second is released
+	// before the tables are put back — leaving the next package to migrate a
+	// schema that is half gone.
 	exclusive(t, dsn)
+	dropADKTables(t, dsn)
 	cfg := &config.Config{
 		DefaultProvider: "test",
 		Providers:       []config.Provider{{Name: "test", BaseURL: "http://x", APIKey: "sk-test", Model: "m"}},

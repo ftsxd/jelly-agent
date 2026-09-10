@@ -46,9 +46,6 @@ type Server struct {
 	// session on the page.
 	previewOnce sync.Once
 	previewLRU  *previewCache
-	// declMu serialises writes to the console's tool-metadata file. Every save
-	// is a read-modify-write of one file, and the page saves a field at a time.
-	declMu sync.Mutex
 
 	// recordsProbe answers which runs of a set of sessions stored anything.
 	//

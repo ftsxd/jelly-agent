@@ -6,6 +6,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"gopkg.in/yaml.v3"
+	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/jelly-agent/jelly-agent/internal/ops"
@@ -334,3 +337,76 @@ func emptyToNil(s *string) *string {
 // comparison — the guard test in internal/storage bans the native types, and
 // the error value is reachable through the same package that owns them.
 func isNoRows(err error) bool { return errors.Is(err, sql.ErrNoRows) }
+
+// ImportConsoleFile moves an existing console.yaml into the table, once.
+//
+// The console's layer used to be that file. A deployment upgrading across
+// this change has one, and it holds decisions somebody made — which tools are
+// PromQL, what a tool is for — that would otherwise silently stop applying.
+//
+// Runs only when the table is empty, so it cannot overwrite anything decided
+// since. The file is renamed rather than deleted: an import that got something
+// wrong should be recoverable by a person, and the rename is also what stops
+// the next start from importing it again.
+//
+// Returns how many declarations moved. A missing file is zero and no error —
+// that is a fresh deployment, which is the common case.
+func ImportConsoleFile(ctx context.Context, db *storage.DB, path string) (int, error) {
+	var existing int
+	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM tool_decls`).Scan(&existing); err != nil {
+		return 0, fmt.Errorf("toolreg: count decls: %w", err)
+	}
+	if existing > 0 {
+		return 0, nil
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil
+		}
+		return 0, fmt.Errorf("toolreg: read %s: %w", path, err)
+	}
+	var f metadataFile
+	if err := yaml.Unmarshal(raw, &f); err != nil {
+		return 0, fmt.Errorf("toolreg: parse %s: %w", path, err)
+	}
+
+	n := 0
+	for _, m := range f.Tools {
+		if m.Name == "" {
+			continue
+		}
+		// Every field is carried, empty ones included, and they still do not
+		// become overrides — emptyToNil stores an empty value as NULL, which
+		// is how the table says "not declared". An earlier version filtered
+		// them here as well; no input could tell the two apart, so the filter
+		// went rather than staying as a branch nothing exercises.
+		//
+		// A YAML zero value meant "not declared", and this is where those two
+		// representations meet.
+		produces, effect := string(m.Produces), string(m.SideEffect)
+		d := Decl{
+			Server: m.Server, Name: m.Name,
+			Description:  &m.Description,
+			Produces:     &produces,
+			SideEffect:   &effect,
+			UseCases:     &m.UseCases,
+			Examples:     &m.Examples,
+			AntiExamples: &m.AntiExamples,
+			Suites:       &m.Suites,
+		}
+		if err := SaveDecl(ctx, db, d, "import:"+filepath.Base(path)); err != nil {
+			return n, fmt.Errorf("toolreg: import %s/%s: %w", m.Server, m.Name, err)
+		}
+		n++
+	}
+
+	if err := os.Rename(path, path+".imported"); err != nil {
+		// The rows are in. Reporting a failure here would make a caller retry
+		// an import that already happened — and the count check above would
+		// then make the retry a no-op anyway. Worth a mention, not a failure.
+		return n, fmt.Errorf("toolreg: 已导入 %d 条，但重命名 %s 失败（下次启动会跳过，因为表已非空）: %w",
+			n, path, err)
+	}
+	return n, nil
+}

@@ -23,6 +23,7 @@ func TestProbeADKAutoMigrateOnPostgres(t *testing.T) {
 	if dsn == "" {
 		t.Skip("set JELLY_PG_DSN to probe a real PostgreSQL")
 	}
+	exclusive(t, dsn)
 	svc, err := database.NewSessionService(postgres.Open(dsn),
 		&gorm.Config{Logger: logger.Default.LogMode(logger.Silent)})
 	if err != nil {

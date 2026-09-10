@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -86,6 +87,7 @@ func TestPostgresDialectAgainstRealDatabase(t *testing.T) {
 	if dsn == "" {
 		t.Skip("set JELLY_PG_DSN to test the storage dialect against PostgreSQL")
 	}
+	lockPG(t, dsn)
 	db, err := Open(dsn)
 	if err != nil {
 		t.Fatal(err)
@@ -170,4 +172,21 @@ func TestMissingTableIsRecognisedOnBothDialects(t *testing.T) {
 	if !IsMissingTable(err) {
 		t.Errorf("SQLite 的缺表没被识别: %v", err)
 	}
+}
+
+// lockPG is internal/storage's own version of the helper every other package
+// has: `go test ./...` runs packages in parallel and several exercise the
+// PostgreSQL paths, so they meet at one development database.
+func lockPG(t *testing.T, dsn string) {
+	t.Helper()
+	db, err := Open(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	release, err := LockExclusively(context.Background(), db)
+	if err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { release(); db.Close() })
 }

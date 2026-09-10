@@ -1,14 +1,15 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/jelly-agent/jelly-agent/internal/toolreg"
 	"net/http"
 	"os"
 	"path/filepath"
 	"reflect"
 	"slices"
-	"strings"
 	"sync"
 	"testing"
 
@@ -17,10 +18,9 @@ import (
 )
 
 type declBody struct {
-	Dir   string        `json:"dir"`
-	File  string        `json:"file"`
-	Tools []toolDeclDTO `json:"tools"`
-	Kinds []struct {
+	StoredIn string        `json:"stored_in"`
+	Tools    []toolDeclDTO `json:"tools"`
+	Kinds    []struct {
 		Value string `json:"value"`
 		Label string `json:"label"`
 	} `json:"kinds"`
@@ -44,8 +44,8 @@ func TestDeclaringAToolFromTheConsole(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &before); err != nil {
 		t.Fatal(err)
 	}
-	if before.Dir != dir || before.File != consoleFile {
-		t.Errorf("dir = %q file = %q", before.Dir, before.File)
+	if before.StoredIn != "tool_decls" {
+		t.Errorf("stored_in = %q", before.StoredIn)
 	}
 	if len(before.Kinds) == 0 {
 		t.Error("the console has no vocabulary to offer")
@@ -61,13 +61,10 @@ func TestDeclaringAToolFromTheConsole(t *testing.T) {
 		t.Fatalf("save status = %d: %s", w.Code, w.Body.String())
 	}
 
-	// It is on disk, in the file the console owns.
-	raw, err := os.ReadFile(filepath.Join(dir, consoleFile))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !contains(string(raw), "query_instant") || !contains(string(raw), "metric_series") {
-		t.Errorf("file = %s", raw)
+	// It is in the table the console owns.
+	stored := declStored(t, s, "n9e-mcp", "query_instant")
+	if stored.Produces != "metric_series" || stored.SideEffect != "read_only" {
+		t.Errorf("stored = %+v", stored)
 	}
 
 	// And the registry has it, which is the only thing that makes it real.
@@ -105,7 +102,7 @@ func TestConsoleEditsSelectionMetadata(t *testing.T) {
 		t.Fatalf("save status = %d: %s", w.Code, w.Body.String())
 	}
 
-	got := declOnDisk(t, dir, "n9e-mcp", "query_range")
+	got := declStored(t, s, "n9e-mcp", "query_range")
 	if got.Description != "查询一段时间的监控指标" ||
 		!slices.Equal(got.UseCases, []string{"查询指标曲线", "按集群 ID 查询"}) ||
 		!slices.Equal(got.Examples, []string{"查看集群 CPU 使用率"}) ||
@@ -130,9 +127,10 @@ func TestClearingADeclarationRemovesIt(t *testing.T) {
 	do(t, s, "POST", "/api/tools/metadata", `{"name":"query_range","server":"n9e-mcp","produces":"metric_series"}`)
 	do(t, s, "POST", "/api/tools/metadata", `{"name":"query_range","server":"n9e-mcp","produces":""}`)
 
-	raw, _ := os.ReadFile(filepath.Join(dir, consoleFile))
-	if contains(string(raw), "query_range") {
-		t.Errorf("the cleared declaration is still on disk: %s", raw)
+	for _, m := range allStored(t, s) {
+		if m.Name == "query_range" {
+			t.Errorf("清空之后这条声明还在: %+v", m)
+		}
 	}
 }
 
@@ -260,7 +258,7 @@ func TestSavingOneFieldLeavesTheOtherAlone(t *testing.T) {
 		t.Fatalf("status = %d: %s", w.Code, w.Body.String())
 	}
 
-	got := declOnDisk(t, dir, "k8s-mcp", "restart_pod")
+	got := declStored(t, s, "k8s-mcp", "restart_pod")
 	if string(got.SideEffect) != "mutating_risky" {
 		t.Errorf("side_effect = %q；只改 produces 的那次把副作用等级抹掉了", got.SideEffect)
 	}
@@ -274,7 +272,7 @@ func TestSavingOneFieldLeavesTheOtherAlone(t *testing.T) {
 		`{"name":"restart_pod","server":"k8s-mcp","side_effect":""}`); w.Code != http.StatusOK {
 		t.Fatalf("status = %d: %s", w.Code, w.Body.String())
 	}
-	if got := declOnDisk(t, dir, "k8s-mcp", "restart_pod"); string(got.SideEffect) != "" {
+	if got := declStored(t, s, "k8s-mcp", "restart_pod"); string(got.SideEffect) != "" {
 		t.Errorf("显式清空没有生效: %q", got.SideEffect)
 	}
 }
@@ -305,80 +303,48 @@ func TestConcurrentSavesDoNotLoseEachOther(t *testing.T) {
 	}
 	wg.Wait()
 
-	decls := readDecls(filepath.Join(dir, consoleFile))
+	decls := allStored(t, s)
 	if len(decls) != n {
 		t.Errorf("declarations = %d, want %d — 并发保存互相覆盖了: %+v", len(decls), n, decls)
 	}
 }
 
-// declOnDisk reads one declaration out of the console's file.
-func declOnDisk(t *testing.T, dir, server, name string) ops.ToolMetadata {
+// allStored reads every declaration back out of the table.
+func allStored(t *testing.T, s *Server) []ops.ToolMetadata {
 	t.Helper()
-	for _, m := range readDecls(filepath.Join(dir, consoleFile)) {
+	db, err := s.engine().StateDB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	metas, err := toolreg.NewDBSource(db).Load(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return metas
+}
+
+// declStored reads one declaration back out of the table.
+//
+// It used to read the console's YAML file. The layer moved into the database
+// after a save cleared a field with no history to recover it from; these
+// assertions are about the same behaviour, asked of the new store.
+func declStored(t *testing.T, s *Server, server, name string) ops.ToolMetadata {
+	t.Helper()
+	db, err := s.engine().StateDB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	metas, err := toolreg.NewDBSource(db).Load(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range metas {
 		if m.Server == server && m.Name == name {
 			return m
 		}
 	}
-	t.Fatalf("%s/%s 不在 %s 里", server, name, consoleFile)
+	t.Fatalf("%s/%s 不在 tool_decls 里", server, name)
 	return ops.ToolMetadata{}
-}
-
-// A reader must never catch the file half-written.
-//
-// The registry watches this directory and re-reads on any change, so it is a
-// reader nobody here controls. os.WriteFile truncates and then writes, so a
-// re-read landing in between sees an empty or partial file — which parses as
-// "nothing declared" and would drop every tool's declaration until the next
-// save put them back.
-func TestTheDeclarationFileIsNeverSeenHalfWritten(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, consoleFile)
-	old := []byte("tools:\n" + strings.Repeat("  - name: a\n", 4000))
-	fresh := []byte("tools:\n" + strings.Repeat("  - name: b\n", 4000))
-	if err := writeFileAtomic(path, old); err != nil {
-		t.Fatal(err)
-	}
-
-	stop := make(chan struct{})
-	bad := make(chan int, 1)
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		for {
-			select {
-			case <-stop:
-				return
-			default:
-			}
-			b, err := os.ReadFile(path)
-			if err != nil {
-				continue // a rename can briefly race an open; that is not a torn read
-			}
-			if len(b) != len(old) && len(b) != len(fresh) {
-				select {
-				case bad <- len(b):
-				default:
-				}
-				return
-			}
-		}
-	}()
-
-	for range 200 {
-		if err := writeFileAtomic(path, fresh); err != nil {
-			t.Fatal(err)
-		}
-		if err := writeFileAtomic(path, old); err != nil {
-			t.Fatal(err)
-		}
-	}
-	close(stop)
-	<-done
-	select {
-	case n := <-bad:
-		t.Errorf("读到了 %d 字节的半成品文件；注册表会把它当成「什么都没声明」", n)
-	default:
-	}
 }
 
 // The page may only claim what is true.

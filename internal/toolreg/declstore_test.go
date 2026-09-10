@@ -241,3 +241,99 @@ func TestTheDatabaseLayerPatchesTheFileLayer(t *testing.T) {
 		t.Errorf("控制台只改了一个字段，却把文件里的其余部分冲掉了: %+v", got)
 	}
 }
+
+// A deployment upgrading across this change has a console.yaml holding
+// decisions somebody made, and they must survive.
+func TestImportingAnExistingConsoleFile(t *testing.T) {
+	ctx := context.Background()
+	db := declDB(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, ConsoleFile)
+	if err := os.WriteFile(path, []byte(`tools:
+  - name: query_range
+    server: n9e-mcp
+    produces: metric_series
+    side_effect: read_only
+    suites: [promql]
+  - name: query_logs
+    server: n9e-mcp
+    description: ""
+    suites: [logs]
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	n, err := ImportConsoleFile(ctx, db, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 2 {
+		t.Fatalf("导入了 %d 条，want 2", n)
+	}
+
+	got := loadOne(t, db, "n9e-mcp", "query_range")
+	if !slices.Equal(got.Suites, []string{"promql"}) ||
+		got.Produces != "metric_series" || got.SideEffect != "read_only" {
+		t.Errorf("导入的内容不对: %+v", got)
+	}
+
+	// A field the file left blank must not become an explicit override. A
+	// YAML zero value meant "not declared", and carrying it in as an empty
+	// string would turn every unset field into one — the exact confusion the
+	// table exists to remove.
+	logs := loadOne(t, db, "n9e-mcp", "query_logs")
+	if logs.Description != "" {
+		t.Errorf("空描述被当成了覆盖: %q", logs.Description)
+	}
+	hist, err := History(ctx, db, "n9e-mcp", "query_logs", 5)
+	if err != nil || len(hist) != 1 {
+		t.Fatalf("history = %d, %v", len(hist), err)
+	}
+	if hist[0].Snapshot == nil || hist[0].Snapshot.Description != "" {
+		t.Errorf("快照里带上了空描述: %+v", hist[0].Snapshot)
+	}
+
+	// Renamed, which is both the record and what stops the next start from
+	// importing it again.
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Error("导入之后原文件还在原地")
+	}
+	if _, err := os.Stat(path + ".imported"); err != nil {
+		t.Errorf("原文件没有被保留下来: %v", err)
+	}
+}
+
+// Importing runs once. A table with anything in it has already been decided
+// on, and a second import would undo whatever was decided since.
+func TestImportingSkipsATableThatIsNotEmpty(t *testing.T) {
+	ctx := context.Background()
+	db := declDB(t)
+	if err := SaveDecl(ctx, db, Decl{Name: "web_search", Suites: list("research")}, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, ConsoleFile)
+	if err := os.WriteFile(path, []byte("tools:\n  - name: query_range\n    suites: [promql]\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	n, err := ImportConsoleFile(ctx, db, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Errorf("表非空却导入了 %d 条", n)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Error("没有导入，却把文件改名了")
+	}
+}
+
+// A fresh deployment has no file, which is the common case and not an error.
+func TestImportingWithNoFileIsFine(t *testing.T) {
+	n, err := ImportConsoleFile(context.Background(), declDB(t),
+		filepath.Join(t.TempDir(), ConsoleFile))
+	if err != nil || n != 0 {
+		t.Errorf("n = %d, err = %v", n, err)
+	}
+}

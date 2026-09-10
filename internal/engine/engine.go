@@ -43,6 +43,7 @@ import (
 	"github.com/jelly-agent/jelly-agent/internal/schedule"
 	"github.com/jelly-agent/jelly-agent/internal/storage"
 	"github.com/jelly-agent/jelly-agent/internal/task"
+	"path/filepath"
 )
 
 // Wire a default audit sink so every sandboxed script run leaves a log line for
@@ -422,16 +423,12 @@ func (e *Engine) toolRegistry() (*toolreg.Store, *gateway.Gateway) {
 	e.toolsOnce.Do(func() {
 		e.toolStore = toolreg.NewStore()
 
-		sources := []toolreg.Source{jellytool.BuiltinMetadata()}
-		// Always consulted, because the directory now has a default: the
-		// declarations are how an MCP tool says what it produces, and a layer
-		// reachable only by setting a path nobody knows about is a layer
-		// nobody uses. A missing directory is not an error — it means nothing
-		// has been declared yet.
-		if dir := e.ToolMetadataDir(); dir != "" {
-			sources = append(sources, toolreg.NewFileSource(dir))
-		}
-		e.toolStore.Swap(buildRegistry(sources))
+		// The file layer is always consulted, because the directory now has a
+		// default: declarations are how an MCP tool says what it produces,
+		// and a layer reachable only by setting a path nobody knows about is
+		// a layer nobody uses. A missing directory is not an error — it means
+		// nothing has been declared yet. See metadataSources for the layering.
+		e.toolStore.Swap(buildRegistry(e.metadataSources()))
 
 		if e.contextUnguarded() {
 			slog.Warn("上下文无任何上限保护：history.max_tokens 为 0 关闭了压缩，而 tools.max_result_bytes 为 0 不限制单次返回。"+
@@ -804,6 +801,20 @@ func (e *Engine) StateDB() (*storage.DB, error) {
 				e.stateDB.Close()
 				e.stateDB, e.stateErr = nil, err
 				return
+			}
+		}
+		// A deployment upgrading across the move from console.yaml to the
+		// table has one, holding decisions somebody made. Once, and only into
+		// an empty table — see ImportConsoleFile.
+		if dir := e.ToolMetadataDir(); dir != "" {
+			path := filepath.Join(dir, toolreg.ConsoleFile)
+			switch n, err := toolreg.ImportConsoleFile(context.Background(), e.stateDB, path); {
+			case err != nil:
+				slog.Warn("导入 console.yaml 失败，控制台的旧声明这次没有生效",
+					"path", path, logging.Err(err))
+			case n > 0:
+				slog.Info("已把 console.yaml 导入 tool_decls", "declarations", n,
+					"renamed_to", path+".imported")
 			}
 		}
 	})
@@ -1538,11 +1549,31 @@ func buildRegistry(sources []toolreg.Source) *toolreg.Registry {
 // store; this is what it was for.
 func (e *Engine) ReloadToolMetadata() {
 	store, _ := e.toolRegistry() // ensure it exists before swapping into it
+	store.Swap(buildRegistry(e.metadataSources()))
+}
+
+// metadataSources is where tool metadata comes from, in layers.
+//
+// Builtins and the files under the metadata directory declare tools; the
+// database declares fields of them and is applied last as a patch (see
+// toolreg.Overlay). The order in this slice does not decide that — the
+// overlay marker does — but the layering is the thing to see here.
+//
+// A database that will not open leaves the file layers in place rather than
+// failing the registry. The console cannot save without it either way, and a
+// deployment that still answers with what its files say is more useful than
+// one that answers with nothing.
+func (e *Engine) metadataSources() []toolreg.Source {
 	sources := []toolreg.Source{jellytool.BuiltinMetadata()}
 	if dir := e.ToolMetadataDir(); dir != "" {
 		sources = append(sources, toolreg.NewFileSource(dir))
 	}
-	store.Swap(buildRegistry(sources))
+	db, err := e.StateDB()
+	if err != nil {
+		slog.Warn("状态库打不开，控制台声明这一层没有生效", logging.Err(err))
+		return sources
+	}
+	return append(sources, toolreg.NewDBSource(db))
 }
 
 // ToolMetadataDir is where this deployment's tool declarations live.
