@@ -25,20 +25,28 @@ type Conflict struct {
 	Target string
 }
 
-// keyText renders a key for a person, which is a different job from keyOf's.
-func keyText(row []any, keyIdx []int) string {
+// keyText renders a key for a person, which is a different job from keyOf's:
+// this one has to be read, that one only has to be unique.
+//
+// Named and quoted, not joined. tool_results is keyed by five text columns,
+// and a bare "jelly-agent,local-user,s,1,i,c" leaves the reader counting
+// commas to find out whether the session is "s" or "s,1" — on the one line
+// whose whole purpose is to say which row to go and look at. Naming the
+// columns also means a reader does not have to know the key's column order
+// to use it.
+func keyText(row []any, keyIdx []int, pk []string) string {
 	parts := make([]string, len(keyIdx))
 	for i, k := range keyIdx {
-		parts[i] = canon(row[k])
+		parts[i] = pk[i] + "=" + strconv.Quote(canon(row[k]))
 	}
-	return strings.Join(parts, ",")
+	return strings.Join(parts, " ")
 }
 
 func (c Conflict) String() string {
 	if c.Column == "" {
-		return fmt.Sprintf("%s[%s]: 目标库里根本没有这一行，插入却被某个唯一约束挡住了", c.Table, c.Key)
+		return fmt.Sprintf("%s（%s）: 目标库里根本没有这一行，插入却被某个唯一约束挡住了", c.Table, c.Key)
 	}
-	return fmt.Sprintf("%s[%s].%s: 源 %q，目标 %q", c.Table, c.Key, c.Column, c.Source, c.Target)
+	return fmt.Sprintf("%s（%s）的 %s: 源 %q，目标 %q", c.Table, c.Key, c.Column, c.Source, c.Target)
 }
 
 // ConflictError says the target already held rows with the same primary key
@@ -137,7 +145,7 @@ func compareExisting(ctx context.Context, dst *storage.DB, table string, cols []
 			// not there and the copy did not say so.
 			total++
 			if len(out) < maxConflictExamples {
-				out = append(out, Conflict{Table: table, Key: keyText(row, keyIdx)})
+				out = append(out, Conflict{Table: table, Key: keyText(row, keyIdx, pk)})
 			}
 			continue
 		}
@@ -148,7 +156,7 @@ func compareExisting(ctx context.Context, dst *storage.DB, table string, cols []
 			}
 			total++
 			if len(out) < maxConflictExamples {
-				out = append(out, Conflict{Table: table, Key: keyText(row, keyIdx), Column: c, Source: s, Target: d})
+				out = append(out, Conflict{Table: table, Key: keyText(row, keyIdx, pk), Column: c, Source: s, Target: d})
 			}
 			break // one column is enough to know this row differs
 		}

@@ -38,11 +38,15 @@ type botManager struct {
 // StartBots launches the configured platform bots and keeps them running until
 // ctx is cancelled. Called once from each server entrypoint, alongside Watch.
 func (s *Server) StartBots(ctx context.Context) {
+	// The same lock reload takes: startup and a config-file edit noticed at
+	// the same moment are two writers to the same set of bots.
+	s.restartMu.Lock()
 	s.bots.mu.Lock()
 	s.bots.ctx = ctx
 	s.bots.mu.Unlock()
 
 	s.restartBots(s.engine().Config())
+	s.restartMu.Unlock()
 
 	go func() {
 		<-ctx.Done()
@@ -52,6 +56,10 @@ func (s *Server) StartBots(ctx context.Context) {
 
 // restartBots stops any running bots and starts the enabled ones from cfg. Safe
 // to call on every config reload; a no-op until StartBots has supplied a ctx.
+//
+// Callers hold s.restartMu. It stops, builds and stores in three steps, and
+// two of these running at once each store their own set while the other's
+// bots keep running — see reload.
 func (s *Server) restartBots(cfg *config.Config) {
 	s.bots.mu.Lock()
 	ctx := s.bots.ctx

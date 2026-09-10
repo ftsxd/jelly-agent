@@ -27,10 +27,13 @@ import (
 // engine is swappable behind a mutex so config edits hot-reload without a
 // restart (PLAN §1.5 "配置热重载，对话不中断").
 type Server struct {
-	mu         sync.RWMutex
-	ref        *engineRef // the current engine, plus the work still using it
-	static     fs.FS      // embedded SPA build (dist); nil disables static serving
-	configPath string     // explicit --config path for reloads ("" = auto-resolve)
+	mu  sync.RWMutex
+	ref *engineRef // the current engine, plus the work still using it
+	// restartMu serialises everything that replaces a long-lived piece of the
+	// server — the engine, the bots, the cron. See reload.
+	restartMu  sync.Mutex
+	static     fs.FS  // embedded SPA build (dist); nil disables static serving
+	configPath string // explicit --config path for reloads ("" = auto-resolve)
 
 	pollInterval time.Duration // config-watch poll interval; 0 = defaultConfigPoll
 
@@ -132,11 +135,26 @@ func (s *Server) stateDB(w http.ResponseWriter, r *http.Request) (*storage.DB, b
 
 // reload re-reads config from disk and swaps in a fresh engine, so subsequent
 // requests (new chats build their agent per-request) use the updated providers.
+//
+// One reload at a time, and the whole of it. s.mu covers only the engine
+// pointer; the bots and the cron are replaced afterwards by code that stops
+// what is running, builds the replacement, and then stores it. Two reloads
+// interleaving there each see nothing to stop and each store their own, so
+// the first one's cron and the first one's bots keep running with nobody
+// holding them — a duplicate of every scheduled task, and a second bot
+// answering the same chat. Saving twice quickly in the console is enough.
+//
+// It also keeps the pieces consistent with each other: without it the last
+// engine to be swapped in and the last bots to be built can come from
+// different reloads, so the console reports a config the bots are not using.
 func (s *Server) reload() error {
 	cfg, err := config.LoadOrEnv(s.configPath)
 	if err != nil {
 		return err
 	}
+	s.restartMu.Lock()
+	defer s.restartMu.Unlock()
+
 	s.mu.Lock()
 	old := s.ref
 	s.ref = &engineRef{eng: engine.New(cfg)}
@@ -145,6 +163,7 @@ func (s *Server) reload() error {
 	if old != nil {
 		old.retire() // closes once the requests still on it have finished
 	}
+	duringReload()     // a seam, so a test can hold one reload open while another starts
 	s.restartBots(cfg) // pick up platform changes; bots answer via the new engine
 	s.restartSchedules()
 	return nil
@@ -242,3 +261,9 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 
 // Version is the server version, overridable at build time via -ldflags.
 var Version = "0.2.0-dev"
+
+// duringReload is the point between swapping the engine and replacing the
+// bots and the cron — the window two concurrent reloads used to interleave
+// in. A test holds one reload here and starts another; nothing in production
+// replaces it.
+var duringReload = func() {}

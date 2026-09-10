@@ -429,6 +429,7 @@ func (e *Engine) toolRegistry() (*toolreg.Store, *gateway.Gateway) {
 		// a layer nobody uses. A missing directory is not an error — it means
 		// nothing has been declared yet. See metadataSources for the layering.
 		e.toolStore.Swap(buildRegistry(e.metadataSources()))
+		e.watchDeclarations()
 
 		if e.contextUnguarded() {
 			slog.Warn("上下文无任何上限保护：history.max_tokens 为 0 关闭了压缩，而 tools.max_result_bytes 为 0 不限制单次返回。"+
@@ -1546,6 +1547,44 @@ func buildRegistry(sources []toolreg.Source) *toolreg.Registry {
 		slog.Error("工具注册冲突，该条目未生效", "detail", c.Error())
 	}
 	return reg
+}
+
+// declPoll is how often watchDeclarations asks whether another process
+// changed a declaration. A variable so a test does not have to wait it out.
+var declPoll = 0 * time.Second
+
+// watchDeclarations rebuilds the registry when a declaration changes in the
+// database, including one this process did not make.
+//
+// The table was put in the database so several processes would agree about
+// what a tool is, and tool_decl_log was made to double as the notice — every
+// process polls its highest id and reloads when it moves. That was built and
+// then not connected to anything: a save in one console updated that
+// process's registry (ReloadToolMetadata, right below) and no other's, so a
+// two-process deployment quietly disagreed about tool metadata until someone
+// restarted it. This is the consumer.
+//
+// Silent when the database will not open, like every other user of the
+// overlay: the file layers still apply and the console cannot save anyway.
+//
+// Stops with the engine — the context is the one Close cancels — so a
+// replaced engine's watcher goes away with it rather than swapping into a
+// registry nobody reads.
+func (e *Engine) watchDeclarations() {
+	db, err := e.StateDB()
+	if err != nil {
+		return
+	}
+	ch := toolreg.NewDBSource(db).WithPoll(declPoll).Watch(e.mcpCtx)
+	go func() {
+		for range ch {
+			// The whole stack, not the set the watch handed over: that set is
+			// the overlay alone, and the registry is every layer with the
+			// overlay applied last.
+			e.toolStore.Swap(buildRegistry(e.metadataSources()))
+			slog.Info("工具声明有变化，已重建注册表")
+		}
+	}()
 }
 
 // ReloadToolMetadata re-reads the declarations and swaps the registry.

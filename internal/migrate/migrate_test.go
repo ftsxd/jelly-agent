@@ -852,7 +852,11 @@ func TestTwoRowsWhoseKeysJoinToTheSameStringAreNotConfused(t *testing.T) {
 	if _, err := migrate.Run(ctx, src, dst, migrate.Options{}); !errors.As(err, &ce) {
 		t.Fatalf("改过的那一行没有被认出来: %v", err)
 	}
-	if c := ce.Conflicts[0]; !strings.Contains(c.Key, "s,1") {
-		t.Errorf("报错指的不是被改的那一行: %+v", c)
+	// Named and quoted, so a reader can tell which of the two rows it is —
+	// the whole point of the line. `session_id="s,1"` says it; a bare
+	// comma-joined key would not, because "s,1" and "s" followed by a field
+	// starting with "1" read the same.
+	if c := ce.Conflicts[0]; !strings.Contains(c.Key, `session_id="s,1"`) {
+		t.Errorf("报错没说清是哪一行: %+v", c)
 	}
 }

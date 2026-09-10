@@ -193,3 +193,40 @@ func TestAHandlerKeepsItsDatabaseAcrossTwoConfigSaves(t *testing.T) {
 		t.Fatal("请求没结束")
 	}
 }
+
+// A handler that saves config must not answer from its pinned engine.
+//
+// persist replaces the engine on purpose, so after it the pinned one is stale
+// by construction — reporting its state back tells the request that just
+// turned something on that it is still off. Three handlers had this and two
+// of them had no test; the third was found by a reader. A rule is cheaper
+// than a reader.
+func TestHandlersThatSaveConfigAnswerFromTheNewEngine(t *testing.T) {
+	files, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range files {
+		if strings.HasSuffix(f, "_test.go") {
+			continue
+		}
+		src, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		lines := strings.Split(string(src), "\n")
+		saved := 0 // line of the persist call in the function being read
+		for i, line := range lines {
+			switch {
+			case strings.HasPrefix(line, "func "):
+				saved = 0
+			case strings.Contains(line, "s.persist(") || strings.Contains(line, "s.reload()"):
+				saved = i + 1
+			case saved > 0 && strings.Contains(line, "s.engineFor(r)"):
+				t.Errorf("%s:%d 在第 %d 行重载配置之后，还从 pin 住的旧引擎上读状态 —— "+
+					"这里要用 s.engineAfterReload()：\n\t%s",
+					f, i+1, saved, strings.TrimSpace(line))
+			}
+		}
+	}
+}

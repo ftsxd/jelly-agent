@@ -33,6 +33,19 @@ func NewDBSource(db *storage.DB) *DBSource {
 	return &DBSource{db: db, poll: declPollInterval}
 }
 
+// WithPoll sets how often Watch asks. Returns s, so it reads as one
+// expression at the call site.
+//
+// For tests, which would otherwise have to wait out the production interval
+// to find out whether anything is wired to Watch at all — and a test that
+// takes three seconds to answer that is a test people stop running.
+func (s *DBSource) WithPoll(d time.Duration) *DBSource {
+	if d > 0 {
+		s.poll = d
+	}
+	return s
+}
+
 // declPollInterval is how often Watch asks whether anything changed.
 //
 // It asks for one integer — the highest id in the change log — so the cost of

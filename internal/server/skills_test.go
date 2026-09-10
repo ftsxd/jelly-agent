@@ -87,6 +87,12 @@ func TestAllowScriptsToggle(t *testing.T) {
 	if w.Code != http.StatusOK || !s.engine().Config().Skills.AllowScripts {
 		t.Fatalf("enable failed: code=%d on=%v", w.Code, s.engine().Config().Skills.AllowScripts)
 	}
+	// The response describes the save that just happened. Saving replaces the
+	// engine, so a handler reading its own pinned one answers "still off" to
+	// the request that turned it on.
+	if !strings.Contains(w.Body.String(), `"allow_scripts":true`) {
+		t.Fatalf("开关响应里回的还是旧引擎的状态: %s", w.Body.String())
+	}
 	w = do(t, s, "GET", "/api/skills", "")
 	if !strings.Contains(w.Body.String(), `"allow_scripts":true`) {
 		t.Fatalf("list missing allow_scripts: %s", w.Body.String())

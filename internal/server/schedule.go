@@ -24,10 +24,13 @@ import (
 )
 
 type scheduler struct {
-	mu      sync.Mutex
-	c       *cron.Cron
-	cancel  context.CancelFunc
-	base    context.Context
+	mu   sync.Mutex
+	c    *cron.Cron
+	base context.Context
+	// jobs is the context a triggered run gets. It is the process context,
+	// not one this package cancels — see stopSchedules. Kept as a field so a
+	// test can assert that a restart leaves it alive.
+	jobs    context.Context
 	running map[string]bool
 }
 
@@ -118,22 +121,29 @@ func (s *Server) deleteSchedule(name string) error {
 }
 
 func (s *Server) StartSchedules(ctx context.Context) {
+	s.restartMu.Lock()
+	defer s.restartMu.Unlock()
+	s.startSchedules(ctx)
+}
+
+// startSchedules is StartSchedules with s.restartMu already held, which is
+// how the reload path reaches it.
+func (s *Server) startSchedules(ctx context.Context) {
 	s.stopSchedules()
 	c := cron.New()
-	runCtx, cancel := context.WithCancel(ctx)
 	for _, t := range s.engine().Config().Schedules {
 		if !t.Enabled {
 			continue
 		}
 		task := t
-		if _, err := c.AddFunc(task.Cron, func() { s.runSchedule(runCtx, task) }); err != nil {
+		if _, err := c.AddFunc(task.Cron, func() { s.runSchedule(ctx, task) }); err != nil {
 			slog.Error("周期任务 Cron 表达式无效", "task", task.Name, "cron", task.Cron, logging.Err(err))
 		}
 	}
 	s.schedule.mu.Lock()
 	s.schedule.c = c
-	s.schedule.cancel = cancel
 	s.schedule.base = ctx
+	s.schedule.jobs = ctx
 	if s.schedule.running == nil {
 		s.schedule.running = map[string]bool{}
 	}
@@ -145,24 +155,38 @@ func (s *Server) restartSchedules() {
 	ctx := s.schedule.base
 	s.schedule.mu.Unlock()
 	if ctx != nil {
-		s.StartSchedules(ctx)
+		s.startSchedules(ctx) // reload holds s.restartMu
 	}
 }
+
+// stopSchedules stops the cron from firing anything new. Runs already going
+// keep going.
+//
+// They used to be cancelled. Every restart — and a restart is what every
+// config save does — derived the jobs' context from one this function
+// cancelled, so saving a provider's API key in the console killed a nightly
+// inspection that was eight minutes into its work. The run died mid-turn and
+// the record of it was never written, which an operator reads as "the
+// schedule did not fire".
+//
+// Nothing is lost by letting them finish: the run holds the engine it started
+// on (runSchedule pins it) and writes its record there, and the new cron
+// cannot double-fire the same task because runSchedule refuses a name that is
+// already running. Shutdown still stops them — the jobs' context is the
+// process context, and that one really is cancelled.
+//
+// The lock is not held across the stop, either: cron's Stop reports when
+// running jobs finish, and those jobs take this same lock on their way out.
+// Waiting for them while holding it was a five-second stall on every save.
 func (s *Server) stopSchedules() {
 	s.schedule.mu.Lock()
-	defer s.schedule.mu.Unlock()
-	if s.schedule.cancel != nil {
-		s.schedule.cancel()
-	}
-	if s.schedule.c != nil {
-		ctx := s.schedule.c.Stop()
-		select {
-		case <-ctx.Done():
-		case <-time.After(5 * time.Second):
-		}
-	}
+	c := s.schedule.c
 	s.schedule.c = nil
-	s.schedule.cancel = nil
+	s.schedule.jobs = nil
+	s.schedule.mu.Unlock()
+	if c != nil {
+		c.Stop() // stops the schedule; does not wait for what is running
+	}
 }
 func (s *Server) runSchedule(ctx context.Context, t config.ScheduleTask) {
 	s.schedule.mu.Lock()

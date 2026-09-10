@@ -240,7 +240,7 @@ func (s *Server) handleSetAllowScripts(w http.ResponseWriter, r *http.Request) {
 	if err := s.persist(w, raw, path); err != nil {
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "allow_scripts": s.engineFor(r).Config().Skills.AllowScripts})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "allow_scripts": s.engineAfterReload().Config().Skills.AllowScripts})
 }
 
 // handleDeleteSkill removes a skill file (idempotent).
