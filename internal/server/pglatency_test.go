@@ -49,44 +49,64 @@ func TestHotPathLatency(t *testing.T) {
 	)
 
 	type result struct {
-		kind            string
-		timeline, tasks time.Duration
-		sessionsPage    time.Duration
+		kind                      string
+		coldTasks, coldFilterMiss time.Duration
+		timeline, tasks           time.Duration
+		sessionsPage              time.Duration
 	}
 	var results []result
 
 	for _, ref := range []string{filepath.Join(t.TempDir(), "state.db"), dsn} {
 		kind, _ := storage.KindOf(ref)
 		s, first := seedForLatency(t, ref, sessions, eventsEach, resultsEach)
+
+		// Cold first, and measured once — a second sample would be warm.
+		// This is the number a person waits for when a process has just
+		// started, and it is the one the earlier version of this test never
+		// reported: median() warms before timing, so everything below it is
+		// a hot-cache figure.
+		cold := timeOnce(t, s, "/api/tasks?limit=20")
+		coldMiss := timeOnce(t, s, "/api/tasks?limit=20&status=blocked")
+
 		results = append(results, result{
-			kind:         string(kind),
-			timeline:     median(t, samples, func() { get(t, s, "/api/sessions/"+first+"/timeline") }),
-			tasks:        median(t, samples, func() { get(t, s, "/api/tasks?limit=20") }),
-			sessionsPage: median(t, samples, func() { get(t, s, "/api/sessions?limit=20") }),
+			kind:           string(kind),
+			coldTasks:      cold,
+			coldFilterMiss: coldMiss,
+			timeline:       median(t, samples, func() { get(t, s, "/api/sessions/"+first+"/timeline") }),
+			tasks:          median(t, samples, func() { get(t, s, "/api/tasks?limit=20") }),
+			sessionsPage:   median(t, samples, func() { get(t, s, "/api/sessions?limit=20") }),
 		})
 	}
 
 	t.Logf("每个库 %d 个会话 × %d 条事件，其中 %d 条带产物；每项取 %d 次的中位数",
 		sessions, eventsEach, resultsEach, samples)
-	t.Logf("%-10s %14s %14s %14s", "", "会话时间线", "任务列表", "会话列表")
+	t.Logf("%-10s %14s %16s %14s %14s %14s", "",
+		"任务列表(冷)", "过滤不中(冷)", "任务列表(热)", "会话时间线", "会话列表")
 	for _, r := range results {
-		t.Logf("%-10s %14s %14s %14s", r.kind,
-			r.timeline.Round(time.Microsecond),
+		t.Logf("%-10s %14s %16s %14s %14s %14s", r.kind,
+			r.coldTasks.Round(time.Microsecond),
+			r.coldFilterMiss.Round(time.Microsecond),
 			r.tasks.Round(time.Microsecond),
+			r.timeline.Round(time.Microsecond),
 			r.sessionsPage.Round(time.Microsecond))
 	}
 	if len(results) == 2 {
-		t.Logf("%-10s %13.1f× %13.1f× %13.1f×", "倍数",
-			ratio(results[1].timeline, results[0].timeline),
+		t.Logf("%-10s %13.1f× %15.1f× %13.1f× %13.1f× %13.1f×", "倍数",
+			ratio(results[1].coldTasks, results[0].coldTasks),
+			ratio(results[1].coldFilterMiss, results[0].coldFilterMiss),
 			ratio(results[1].tasks, results[0].tasks),
+			ratio(results[1].timeline, results[0].timeline),
 			ratio(results[1].sessionsPage, results[0].sessionsPage))
 	}
 
 	// A page a person waits for. Loose on purpose — this is a guard against a
-	// path that became a per-row round trip, not a latency budget.
+	// path that became a per-row round trip, not a latency budget. The cold
+	// numbers are held to it too, which is the point: they used to be twelve
+	// seconds.
 	const tooSlow = 5 * time.Second
 	for _, r := range results {
 		for name, d := range map[string]time.Duration{
+			"任务列表(冷)": r.coldTasks, "过滤不中(冷)": r.coldFilterMiss,
 			"会话时间线": r.timeline, "任务列表": r.tasks, "会话列表": r.sessionsPage,
 		} {
 			if d > tooSlow {
@@ -203,4 +223,15 @@ func seedForLatency(t *testing.T, ref string, sessions, eventsEach, resultsEach 
 	t.Cleanup(func() { tr.Close(); eng.Close() })
 	eng.SetMetrics(tr)
 	return New(eng, nil), first
+}
+
+// timeOnce measures a single request, with no warm-up.
+//
+// Separate from median for exactly that reason: median calls the function
+// once before timing, so it can only ever report a warm figure.
+func timeOnce(t *testing.T, s *Server, path string) time.Duration {
+	t.Helper()
+	start := time.Now()
+	get(t, s, path)
+	return time.Since(start)
 }

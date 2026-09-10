@@ -15,7 +15,39 @@ import (
 // DDL here would be a second definition of somebody else's schema, silently
 // drifting the next time ADK changes its models. The read and delete helpers
 // in this package already tolerate the tables not being there yet.
+// EnsureSchema is a no-op: the tables belong to ADK. The indexes on them do
+// not — see EnsureIndexes, which runs after AutoMigrate has created the
+// tables to put them on.
 func EnsureSchema(*storage.DB) error { return nil }
+
+// EnsureIndexes adds the indexes ADK's tables need and ADK does not create.
+//
+// Its models declare only composite primary keys — events is keyed
+// (id, app_name, user_id, session_id), with id first — so "the events of this
+// session" and "sessions newest first" both scan. Measured with 650 sessions:
+// the task scan's fifteen pages took 3.8 seconds on SQLite and 3.1 on
+// PostgreSQL, essentially all of it here.
+//
+// Added rather than declared: writing out ADK's tables would be a second
+// definition of someone else's schema, drifting the next time they change a
+// model. An index is additive — it names columns that have to exist for the
+// table to work at all.
+//
+// Called after AutoMigrate, because that is when there is a table to put them
+// on.
+func EnsureIndexes(db *storage.DB) error {
+	for _, ddl := range []string{
+		`CREATE INDEX IF NOT EXISTS idx_events_session
+			ON events (app_name, user_id, session_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_sessions_recent
+			ON sessions (app_name, user_id, update_time DESC, id DESC)`,
+	} {
+		if _, err := db.Exec(ddl); err != nil && !storage.IsMissingTable(err) {
+			return fmt.Errorf("session: create index: %w", err)
+		}
+	}
+	return nil
+}
 
 // SessionMeta is a lightweight session row for the list UI: id, event count and
 // last-update epoch (seconds) only — no event bodies, so listing stays cheap as
@@ -49,15 +81,22 @@ func ListPage(db *storage.DB, appName, userID string, limit, offset int) (rows [
 		return nil, 0, fmt.Errorf("count sessions: %w", err)
 	}
 
+	// The event count is a correlated subquery, not a join with a GROUP BY.
+	//
+	// Joining and grouping computes a count for every session in the table
+	// and only then applies LIMIT, so one page costs a pass over every event
+	// — and the task scan walks up to fifteen pages. Measured on SQLite with
+	// 650 sessions: 3.8 seconds for the walk, against 30ms for reading all
+	// their events. A subquery in the projection is evaluated for the rows
+	// that survive LIMIT, which is the page.
 	q := `
 SELECT s.id,
        ` + db.EpochSeconds("s.update_time") + ` AS last_update,
-       COUNT(e.id) AS events
+       (SELECT COUNT(*) FROM events e
+         WHERE e.app_name = s.app_name AND e.user_id = s.user_id
+           AND e.session_id = s.id) AS events
 FROM sessions s
-LEFT JOIN events e
-  ON e.app_name = s.app_name AND e.user_id = s.user_id AND e.session_id = s.id
 WHERE s.app_name = ? AND s.user_id = ?
-GROUP BY s.id, s.update_time
 ORDER BY s.update_time DESC, s.id DESC
 LIMIT ? OFFSET ?`
 	res, err := db.Query(q, appName, userID, limit, offset)

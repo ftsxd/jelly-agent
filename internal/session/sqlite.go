@@ -85,5 +85,12 @@ func New(ref string) (adksession.Service, func() error, error) {
 		db.Close()
 		return nil, nil, fmt.Errorf("migrate session db: %w", err)
 	}
+	// After AutoMigrate, because that is when the tables exist. See
+	// EnsureIndexes: ADK declares no index beyond its composite primary keys,
+	// and both queries this repo runs against those tables scan without them.
+	if err := EnsureIndexes(db); err != nil {
+		db.Close()
+		return nil, nil, err
+	}
 	return svc, db.Close, nil
 }

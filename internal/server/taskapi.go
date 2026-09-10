@@ -22,6 +22,7 @@ import (
 	"github.com/jelly-agent/jelly-agent/internal/ops"
 	"github.com/jelly-agent/jelly-agent/internal/record"
 	jellysession "github.com/jelly-agent/jelly-agent/internal/session"
+	"github.com/jelly-agent/jelly-agent/internal/storage"
 	"github.com/jelly-agent/jelly-agent/internal/task"
 )
 
@@ -112,6 +113,51 @@ type sessionVersion struct {
 
 func (v sessionVersion) usable() bool { return v.Events > 0 || v.LastUpdate > 0 }
 
+// framesForPage projects a whole page of sessions, reading the events of the
+// ones it does not already have in one query.
+//
+// The cache is consulted first and filled afterwards, so a warm page costs
+// nothing and a cold one costs a single round trip — rather than one per
+// session, which is what it cost when each session went through ADK's Get.
+//
+// A session whose events cannot be read is absent from the result rather than
+// present and empty: the caller skips it, which is what it did before, and an
+// empty projection would show a session that has work in it as having none.
+func (s *Server) framesForPage(r *http.Request, db *storage.DB, metas []jellysession.SessionMeta) map[string][]map[string]any {
+	out := make(map[string][]map[string]any, len(metas))
+	var missing []string
+	for _, m := range metas {
+		key := frameKey(m.ID, m.LastUpdate, m.Events)
+		if frames, ok := s.frames().get(key); ok {
+			out[m.ID] = frames
+			continue
+		}
+		missing = append(missing, m.ID)
+	}
+	if len(missing) == 0 {
+		return out
+	}
+
+	events, err := jellysession.EventsOf(r.Context(), db, engine.AppName, engine.UserID, missing)
+	if err != nil {
+		// Reported by the page as sessions it could not project, which is
+		// how a session that vanished mid-scan already behaved.
+		slog.Warn("批量读取会话事件失败，这一页的部分任务无法投影", logging.Err(err))
+		return out
+	}
+	byID := map[string]jellysession.SessionMeta{}
+	for _, m := range metas {
+		byID[m.ID] = m
+	}
+	for id, evs := range events {
+		frames, _ := projectAll(evs)
+		out[id] = frames
+		m := byID[id]
+		s.frames().put(frameKey(id, m.LastUpdate, m.Events), frames)
+	}
+	return out
+}
+
 // framesOf projects one session's events, reusing the last projection when the
 // session has not changed.
 //
@@ -191,12 +237,10 @@ func (s *Server) recordedRuns(ctx context.Context, sessionIDs []string) map[stri
 
 // handleTasks lists tasks, reading back through the sessions until it has
 // enough of them to answer.
+// It no longer opens the session service at all. That is the shape of the
+// fix: the list reads events for a page in one query instead of asking the
+// service for one session at a time.
 func (s *Server) handleTasks(w http.ResponseWriter, r *http.Request) {
-	svc, err := s.engine().NewSessionService()
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error())
-		return
-	}
 
 	infoOf := s.toolInfoResolver()
 	wantStatus := strings.TrimSpace(r.URL.Query().Get("status"))
@@ -264,14 +308,16 @@ func (s *Server) handleTasks(w http.ResponseWriter, r *http.Request) {
 		// scan stop one session too early. A bound that is nearly right is not
 		// a bound.
 		frontier := (metas[len(metas)-1].LastUpdate + 1) * 1000
+		// Every session's events, in one query rather than one per session.
+		//
+		// This is what makes the cold path flat: the round trips are a
+		// function of the page size, not of how many sessions the scan walks.
+		// The cache below still helps a warm request, but it is no longer
+		// what keeps the first one from being 600 round trips.
+		batch := s.framesForPage(r, stateDB, metas)
 		for _, m := range metas {
-			// The version comes from the listing, which already read it —
-			// so a session that has not changed is projected once and reused
-			// on every later page and refresh.
-			frames, err := s.framesOf(r, svc, m.ID, sessionVersion{
-				LastUpdate: m.LastUpdate, Events: m.Events,
-			})
-			if err != nil {
+			frames, ok := batch[m.ID]
+			if !ok {
 				continue // a session that vanished mid-scan is not an error for the list
 			}
 			tasks := s.foldWithStatus(m.ID, frames, infoOf, links[m.ID])
