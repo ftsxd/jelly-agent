@@ -89,6 +89,50 @@ func Owns(taskID, sessionID string) error {
 // Runs with no row are absent from the map, which the caller reads as "its own
 // task" — the common case, and the only case for anything written before this
 // table existed.
+// OfSessions is OfSession for a page of them, in one query.
+//
+// The task list projects a page of sessions at a time and asked this per
+// session — one round trip each, free against a local file and 20ms against
+// PostgreSQL. Chunked for the same reason every other IN (…) here is: the
+// list comes from a page whose size the caller chooses.
+func OfSessions(db *storage.DB, sessionIDs []string) (map[string]map[string]string, error) {
+	out := map[string]map[string]string{}
+	kept := make([]string, 0, len(sessionIDs))
+	for _, id := range sessionIDs {
+		if id != "" {
+			kept = append(kept, id)
+		}
+	}
+	if len(kept) == 0 {
+		return out, nil
+	}
+	err := storage.ForEachChunk(kept, func(chunk []string) error {
+		args := make([]any, len(chunk))
+		for i, id := range chunk {
+			args[i] = id
+		}
+		rows, err := db.Query(
+			`SELECT session_id, invocation_id, task_id FROM task_runs WHERE session_id IN (`+
+				storage.Placeholders(len(chunk))+`)`, args...)
+		if err != nil {
+			return fmt.Errorf("task: runs of %d sessions: %w", len(chunk), err)
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var session, inv, id string
+			if err := rows.Scan(&session, &inv, &id); err != nil {
+				return err
+			}
+			if out[session] == nil {
+				out[session] = map[string]string{}
+			}
+			out[session][inv] = id
+		}
+		return rows.Err()
+	})
+	return out, err
+}
+
 func OfSession(db *storage.DB, sessionID string) (map[string]string, error) {
 	rows, err := db.Query(
 		`SELECT invocation_id, task_id FROM task_runs WHERE session_id = ?`, sessionID)

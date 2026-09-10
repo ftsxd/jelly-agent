@@ -87,6 +87,44 @@ func (s *Server) toolInfoResolver() func(string) ToolInfo {
 
 // tasksOf folds one session into the tasks it contains.
 func (s *Server) tasksOf(r *http.Request, svc adksession.Service, id string, infoOf func(string) ToolInfo) ([]Task, error) {
+	frames, err := s.framesOf(r, svc, id, sessionVersion{})
+	if err != nil {
+		return nil, err
+	}
+	var links map[string]string
+	if db, err := s.engine().StateDB(); err == nil {
+		if got, err := task.OfSession(db, id); err == nil {
+			links = got
+		}
+	}
+	return s.foldWithStatus(id, frames, infoOf, links), nil
+}
+
+// sessionVersion is what makes a cached projection safe to reuse.
+//
+// Zero means "do not cache" — the detail view asks for one session and has no
+// version in hand, and a projection cached under a version nobody can compare
+// is a projection that goes stale silently.
+type sessionVersion struct {
+	LastUpdate int64
+	Events     int
+}
+
+func (v sessionVersion) usable() bool { return v.Events > 0 || v.LastUpdate > 0 }
+
+// framesOf projects one session's events, reusing the last projection when the
+// session has not changed.
+//
+// The load is the expensive half — every event of the session, through ADK's
+// service, which has no batch API — and it is the half that depends only on
+// the events. See frameCache.
+func (s *Server) framesOf(r *http.Request, svc adksession.Service, id string, v sessionVersion) ([]map[string]any, error) {
+	key := frameKey(id, v.LastUpdate, v.Events)
+	if v.usable() {
+		if frames, ok := s.frames().get(key); ok {
+			return frames, nil
+		}
+	}
 	resp, err := svc.Get(r.Context(), &adksession.GetRequest{
 		AppName: engine.AppName, UserID: engine.UserID, SessionID: id,
 	})
@@ -98,27 +136,28 @@ func (s *Server) tasksOf(r *http.Request, svc adksession.Service, id string, inf
 		events = append(events, ev)
 	}
 	frames, _ := projectAll(events)
-
-	// Which runs were joined to an earlier task. Empty for everything written
-	// before that was possible, which is what makes historical data fold into
-	// one task per run rather than not at all.
-	// A failure here loses the run's task membership, which folds historical
-	// data into one task per run rather than not at all — the same degradation
-	// as a session written before the table existed. Not worth a 500.
-	var links map[string]string
-	if db, err := s.engine().StateDB(); err == nil {
-		if got, err := task.OfSession(db, id); err == nil {
-			links = got
-		}
+	if v.usable() {
+		s.frames().put(key, frames)
 	}
-	tasks := foldTasks(id, frames, infoOf, links)
+	return frames, nil
+}
 
+// foldWithStatus turns frames into tasks and applies what is running now.
+//
+// Kept out of the cache on purpose: the fold needs the tool metadata and the
+// task links, and both change without the session changing. Recomputing it is
+// cheap — it walks frames already in memory — so the cache never has to know
+// about a second kind of change.
+func (s *Server) foldWithStatus(id string, frames []map[string]any,
+	infoOf func(string) ToolInfo, links map[string]string,
+) []Task {
+	tasks := foldTasks(id, frames, infoOf, links)
 	for i := range tasks {
 		if st, known := s.runs().status(tasks[i].ID); known {
 			tasks[i].Status = st
 		}
 	}
-	return tasks, nil
+	return tasks
 }
 
 // recordedRuns reports which runs of these sessions left something in the
@@ -198,6 +237,15 @@ func (s *Server) handleTasks(w http.ResponseWriter, r *http.Request) {
 			ids = append(ids, m.ID)
 		}
 		recorded := s.recordedRuns(r.Context(), ids)
+		// One query for the whole page rather than one per session. Same
+		// reason as recordedRuns above it: a round trip per row is free
+		// against a local file and 20ms against PostgreSQL.
+		links := map[string]map[string]string{}
+		if db, err := s.engine().StateDB(); err == nil {
+			if got, err := task.OfSessions(db, ids); err == nil {
+				links = got
+			}
+		}
 		// The oldest update time in this page bounds everything still
 		// unscanned: sessions come back newest-updated first, so no session
 		// after these can have been touched later than this.
@@ -217,10 +265,16 @@ func (s *Server) handleTasks(w http.ResponseWriter, r *http.Request) {
 		// a bound.
 		frontier := (metas[len(metas)-1].LastUpdate + 1) * 1000
 		for _, m := range metas {
-			tasks, err := s.tasksOf(r, svc, m.ID, infoOf)
+			// The version comes from the listing, which already read it —
+			// so a session that has not changed is projected once and reused
+			// on every later page and refresh.
+			frames, err := s.framesOf(r, svc, m.ID, sessionVersion{
+				LastUpdate: m.LastUpdate, Events: m.Events,
+			})
 			if err != nil {
 				continue // a session that vanished mid-scan is not an error for the list
 			}
+			tasks := s.foldWithStatus(m.ID, frames, infoOf, links[m.ID])
 			runs := recorded[m.ID]
 			for _, t := range tasks {
 				// Conversation is not work. "你好" belongs in the sessions

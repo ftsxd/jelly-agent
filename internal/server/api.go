@@ -371,6 +371,7 @@ func (s *Server) purgeSessionTraces(ctx context.Context, ids []string) error {
 	// and this is where both delete paths meet — putting it in either handler
 	// would mean the other one kept a deleted conversation's first line.
 	s.previews().forget(ids...)
+	s.frames().forget(ids...)
 	// Detached from the request, deliberately.
 	//
 	// The sessions are already gone by the time this runs, and nothing here

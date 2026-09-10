@@ -46,6 +46,11 @@ type Server struct {
 	// session on the page.
 	previewOnce sync.Once
 	previewLRU  *previewCache
+	// frameOnce guards the task list's projection cache. See frameCache:
+	// projecting a session means loading every event of it, once per session
+	// on the page.
+	frameOnce sync.Once
+	frameLRU  *frameCache
 
 	// recordsProbe answers which runs of a set of sessions stored anything.
 	//

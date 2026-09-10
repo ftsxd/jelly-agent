@@ -1648,3 +1648,13 @@ func (e *Engine) NewRunner(a agent.Agent, search *memory.Search) (*runner.Runner
 	}
 	return r, svc, nil
 }
+
+// SetSessionServiceForTest replaces the session store.
+//
+// Tests need this to observe what the handlers ask of it — how many full
+// session loads one page of the task list costs, which is the thing that made
+// that page 642ms against PostgreSQL. Nothing in production calls it.
+func (e *Engine) SetSessionServiceForTest(svc adksession.Service) {
+	e.sessionOnce.Do(func() {}) // so a later NewSessionService does not overwrite this
+	e.sessionSvc, e.sessionErr = svc, nil
+}
