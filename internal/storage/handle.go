@@ -111,3 +111,12 @@ func (d *DB) inTx(ctx context.Context, opts *sql.TxOptions, fn func(*Tx) error) 
 	}
 	return nil
 }
+
+// SupportsRowLocks says whether SELECT … FOR UPDATE means anything here.
+//
+// PostgreSQL has row locks and a connection pool, so a read-modify-write in a
+// transaction needs one or two of them interleave and the second erases the
+// first. SQLite has neither: one writer at a time, and this package allows one
+// connection per handle, so the sequence cannot interleave and the clause is
+// not valid syntax to send.
+func (t *Tx) SupportsRowLocks() bool { return t.dialect.rowLocks() }

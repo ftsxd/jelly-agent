@@ -73,6 +73,24 @@ func TestMigrateSQLiteToPostgres(t *testing.T) {
 		t.Errorf("行数对不上 —— %s", m)
 	}
 
+	// Before any subtest writes to the target: resuming is about a copy that
+	// was interrupted, and by definition the service has not started yet.
+	t.Run("重跑是幂等的", func(t *testing.T) {
+		again, err := migrate.Run(ctx, src, dst, migrate.Options{})
+		if err != nil {
+			t.Fatalf("second run: %v", err)
+		}
+		for _, table := range again.Order {
+			if again.Copied[table] != 0 {
+				t.Errorf("%s 第二遍又复制了 %d 行", table, again.Copied[table])
+			}
+			if again.Skipped[table] != rep.Copied[table] {
+				t.Errorf("%s 第一遍搬了 %d 行，第二遍只认出 %d 行已存在",
+					table, rep.Copied[table], again.Skipped[table])
+			}
+		}
+	})
+
 	t.Run("产物能通过句柄读回来", func(t *testing.T) {
 		store, err := record.Open(dsn)
 		if err != nil {
@@ -168,15 +186,16 @@ func TestMigrateSQLiteToPostgres(t *testing.T) {
 		}
 	})
 
-	t.Run("重跑是幂等的", func(t *testing.T) {
-		again, err := migrate.Run(ctx, src, dst, migrate.Options{})
-		if err != nil {
-			t.Fatalf("second run: %v", err)
-		}
-		for _, table := range again.Order {
-			if again.Copied[table] != 0 {
-				t.Errorf("%s 第二遍又复制了 %d 行", table, again.Copied[table])
-			}
+	t.Run("目标库被写过之后，重跑会说出来", func(t *testing.T) {
+		// The subtests above opened the stores against the target and wrote
+		// through them, which is what a deployment does the moment it comes
+		// up on the new database. Re-running the migration then is a mistake
+		// — the target has moved on — and it has to be said rather than
+		// skipped over as "已存在".
+		_, err := migrate.Run(ctx, src, dst, migrate.Options{})
+		var ce *migrate.ConflictError
+		if !errors.As(err, &ce) {
+			t.Fatalf("目标库已经被服务写过，重跑却报成功: %v", err)
 		}
 	})
 }
@@ -274,6 +293,15 @@ func freshPostgres(t *testing.T, dsn string) *storage.DB {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { db.Close() })
+	// Sequences too, not just rows. DELETE leaves an identity counter where
+	// it was, so a target emptied but not reset starts ahead of the ids the
+	// migration copies — which hides exactly the bug that the migration has
+	// to advance them itself. "Fresh" has to mean what a new database means.
+	resetSequences := func() {
+		for _, table := range migrate.Tables {
+			db.Exec(`SELECT setval(pg_get_serial_sequence('` + table + `', 'id'), 1, false)`)
+		}
+	}
 	empty := func() {
 		for i := len(migrate.Tables) - 1; i >= 0; i-- { // children before parents
 			// A missing table is tolerated: a test may have dropped ADK's on
@@ -284,6 +312,7 @@ func freshPostgres(t *testing.T, dsn string) *storage.DB {
 			}
 		}
 		db.Exec(`DELETE FROM memory_fts`)
+		resetSequences()
 	}
 	empty()
 	t.Cleanup(empty)
@@ -542,5 +571,227 @@ func dropADKTables(t *testing.T, db *storage.DB) {
 		if _, err := db.Exec(`DROP TABLE IF EXISTS ` + tbl + ` CASCADE`); err != nil {
 			t.Fatalf("drop %s: %v", tbl, err)
 		}
+	}
+}
+
+// The service has to be able to write after a migration.
+//
+// Rows arrive with their ids, so PostgreSQL's identity sequences never
+// advance — and the first row written afterwards asks for id 1, which the
+// migration already used. Demonstrated before the fix: three rows copied,
+// then a plain insert fails with duplicate key on the primary key. The
+// migration reports success and the deployment cannot write.
+func TestWritingWorksAfterAMigration(t *testing.T) {
+	dsn := os.Getenv("JELLY_PG_DSN")
+	if dsn == "" {
+		t.Skip("set JELLY_PG_DSN")
+	}
+	exclusive(t, dsn)
+	ctx := context.Background()
+
+	srcPath := filepath.Join(t.TempDir(), "state.db")
+	seedSQLite(t, srcPath)
+	src, err := storage.Open(srcPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer src.Close()
+	dst := freshPostgres(t, dsn)
+
+	if _, err := migrate.Run(ctx, src, dst, migrate.Options{}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Every table with a generated id, written through the store that owns
+	// it — which is what a running service does the moment it comes up.
+	rec, err := metrics.NewRecorder(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { rec.Close() })
+	if err := rec.Record(metrics.ToolCall{
+		SessionID: sess, InvocationID: "after", CallID: "c1", Tool: "query_range",
+		OK: true, At: time.Now(),
+	}); err != nil {
+		t.Errorf("迁移后写不进 tool_calls: %v", err)
+	}
+
+	db := dst
+	if err := schedule.Record(db, "after-migration", time.Now(),
+		"succeeded", "", "", sess, "after"); err != nil {
+		t.Errorf("迁移后写不进 schedule_runs: %v", err)
+	}
+	if err := toolreg.SaveDecl(ctx, db, toolreg.Decl{
+		Name: "after_migration", Suites: &[]string{"x"},
+	}, "tester"); err != nil {
+		t.Errorf("迁移后写不进 tool_decls/tool_decl_log: %v", err)
+	}
+}
+
+// emptiedSQLite builds a SQLite database with every table the migration
+// touches and nothing in them.
+//
+// Built by seeding and clearing rather than by running DDL here: the schema is
+// whatever the stores create on open, and a copy of it in this file would be a
+// fourth definition that drifts.
+func emptiedSQLite(t *testing.T, path string) *storage.DB {
+	t.Helper()
+	seedSQLite(t, path)
+	db, err := storage.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	for i := len(migrate.Tables) - 1; i >= 0; i-- {
+		if _, err := db.Exec(`DELETE FROM ` + migrate.Tables[i]); err != nil &&
+			!storage.IsMissingTable(err) {
+			t.Fatalf("clear %s: %v", migrate.Tables[i], err)
+		}
+	}
+	return db
+}
+
+// A row the target already holds under the same primary key, saying something
+// different, has to stop the migration.
+//
+// This is the case the row-count check is blind to by construction: ON
+// CONFLICT DO NOTHING keeps the row that is already there, so the counts come
+// out equal and the run reports success while the target disagrees with the
+// source about what that row says.
+func TestARowTheTargetAlreadyHasWithOtherContentStopsTheCopy(t *testing.T) {
+	ctx := context.Background()
+	srcPath := filepath.Join(t.TempDir(), "src.db")
+	seedSQLite(t, srcPath)
+	src, err := storage.Open(srcPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer src.Close()
+	dst := emptiedSQLite(t, filepath.Join(t.TempDir(), "dst.db"))
+
+	if _, err := migrate.Run(ctx, src, dst, migrate.Options{}); err != nil {
+		t.Fatal(err)
+	}
+	// Somebody else's row under a key this migration also carries.
+	if _, err := dst.Exec(`UPDATE tool_calls SET tool = ?`, "别人的工具"); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = migrate.Run(ctx, src, dst, migrate.Options{})
+	var ce *migrate.ConflictError
+	if !errors.As(err, &ce) {
+		t.Fatalf("目标库的行和源库不一样，迁移却说成功了: %v", err)
+	}
+	if ce.Table != "tool_calls" || ce.Total != 1 || len(ce.Conflicts) != 1 {
+		t.Fatalf("报错没说清是哪张表哪几行: %+v", ce)
+	}
+	if c := ce.Conflicts[0]; c.Column != "tool" || c.Target != "别人的工具" || c.Source != "query_range" {
+		t.Errorf("报错没说清是哪一列、两边各是什么: %+v", c)
+	}
+	if !strings.Contains(ce.Error(), "别人的工具") {
+		t.Errorf("错误文本里看不到冲突的值: %s", ce.Error())
+	}
+}
+
+// …and an unchanged re-run must not report one. A comparison that cries wolf
+// on a row it copied itself is worse than no comparison: it turns "run it
+// again" into a dead end.
+func TestReRunningOverIdenticalRowsReportsNoConflict(t *testing.T) {
+	ctx := context.Background()
+	srcPath := filepath.Join(t.TempDir(), "src.db")
+	seedSQLite(t, srcPath)
+	src, err := storage.Open(srcPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer src.Close()
+	dst := emptiedSQLite(t, filepath.Join(t.TempDir(), "dst.db"))
+
+	first, err := migrate.Run(ctx, src, dst, migrate.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := migrate.Run(ctx, src, dst, migrate.Options{})
+	if err != nil {
+		t.Fatalf("重跑报了冲突: %v", err)
+	}
+	for _, table := range first.Order {
+		if first.Copied[table] == 0 {
+			continue
+		}
+		if second.Copied[table] != 0 {
+			t.Errorf("%s 第二遍又复制了 %d 行", table, second.Copied[table])
+		}
+		if second.Skipped[table] != first.Copied[table] {
+			t.Errorf("%s 第一遍搬了 %d 行，第二遍只认出 %d 行已存在",
+				table, first.Copied[table], second.Skipped[table])
+		}
+	}
+}
+
+// The same check against a real PostgreSQL, which is the half that can go
+// wrong in the other direction.
+//
+// SQLite keeps a timestamp as RFC3339 text and PostgreSQL hands the same
+// column back as a time.Time, so a comparison that does not fold the two
+// spellings together calls every copied row a conflict — and a migration that
+// refuses to resume is a worse bug than one that skips silently. Both
+// directions are asserted here: identical rows are quiet, a changed one is
+// not.
+func TestConflictDetectionOnPostgres(t *testing.T) {
+	dsn := os.Getenv("JELLY_PG_DSN")
+	if dsn == "" {
+		t.Skip("set JELLY_PG_DSN")
+	}
+	ctx := context.Background()
+
+	exclusive(t, dsn)
+	srcPath := filepath.Join(t.TempDir(), "state.db")
+	seedSQLite(t, srcPath)
+	src, err := storage.Open(srcPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer src.Close()
+	dst := freshPostgres(t, dsn)
+
+	if _, err := migrate.Run(ctx, src, dst, migrate.Options{}); err != nil {
+		t.Fatal(err)
+	}
+	// Quiet on a resume: every row is already there and identical.
+	if _, err := migrate.Run(ctx, src, dst, migrate.Options{}); err != nil {
+		t.Fatalf("原样重跑被当成冲突了 —— 大概率是两种方言的同一个值没有归一化: %v", err)
+	}
+
+	// Loud on a row that differs. tool_results.payload is bytes on both
+	// sides, tool_calls.tool is text, and events.content is the JSON blob the
+	// session store writes — one of each, so a normalisation that only works
+	// for strings does not pass.
+	for _, tc := range []struct{ table, set, col, want string }{
+		{"tool_calls", `UPDATE tool_calls SET tool = '别人的工具'`, "tool", "别人的工具"},
+		{"tool_results", `UPDATE tool_results SET payload = '别人的产物'`, "payload", "别人的产物"},
+	} {
+		t.Run(tc.table, func(t *testing.T) {
+			var before string
+			if err := dst.QueryRow(`SELECT ` + tc.col + ` FROM ` + tc.table).Scan(&before); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := dst.Exec(tc.set); err != nil {
+				t.Fatal(err)
+			}
+			defer dst.Exec(`UPDATE `+tc.table+` SET `+tc.col+` = ?`, before)
+
+			_, err := migrate.Run(ctx, src, dst, migrate.Options{})
+			var ce *migrate.ConflictError
+			if !errors.As(err, &ce) {
+				t.Fatalf("目标库的 %s 和源库不一样，迁移却说成功了: %v", tc.table, err)
+			}
+			if ce.Table != tc.table {
+				t.Fatalf("报的是 %s，改的是 %s", ce.Table, tc.table)
+			}
+			if c := ce.Conflicts[0]; c.Column != tc.col || c.Target != tc.want {
+				t.Errorf("报错没说清是哪一列、目标库里是什么: %+v", c)
+			}
+		})
 	}
 }

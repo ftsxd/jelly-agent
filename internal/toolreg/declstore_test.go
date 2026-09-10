@@ -5,7 +5,9 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/jelly-agent/jelly-agent/internal/ops"
 	"github.com/jelly-agent/jelly-agent/internal/storage"
@@ -377,5 +379,222 @@ func TestTheOverlayFoldsIntoTheFileLayer(t *testing.T) {
 	if got.Description != "查询一段时间的指标曲线" || got.SideEffect != "read_only" ||
 		!slices.Equal(got.Aliases, []string{"range_query"}) {
 		t.Errorf("覆盖一个字段把文件层的其余部分冲掉了: %+v", got)
+	}
+}
+
+// Two saves for the same tool must not erase each other.
+//
+// This is the incident the table was created to fix, and the first
+// implementation of it reintroduced the same shape: read the row, apply this
+// request's field, write the row. Under READ COMMITTED both saves read the
+// row as it was and the second write erases the first one's field.
+//
+// Interleaved by hand rather than with goroutines, which is the only way to
+// make it deterministic — two goroutines rarely overlap inside a transaction
+// that short, and a test that usually passes is worse than none.
+func TestTwoSavesForOneToolDoNotEraseEachOther(t *testing.T) {
+	dsn := os.Getenv("JELLY_PG_DSN")
+	if dsn == "" {
+		t.Skip("需要 JELLY_PG_DSN：SQLite 一次只有一个写者，这个交错在那里不可能发生")
+	}
+	exclusive(t, dsn)
+	ctx := context.Background()
+
+	first, err := storage.Open(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Close()
+	second, err := storage.Open(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Close()
+	if err := EnsureSchema(first); err != nil {
+		t.Fatal(err)
+	}
+	for _, tbl := range []string{"tool_decl_log", "tool_decls"} {
+		first.Exec(`DELETE FROM ` + tbl)
+	}
+	t.Cleanup(func() {
+		first.Exec(`DELETE FROM tool_decl_log`)
+		first.Exec(`DELETE FROM tool_decls`)
+	})
+
+	// One save has to land before the other starts, or there is no row to
+	// lock and the primary key does the work instead — a different path,
+	// tested below.
+	if err := SaveDecl(ctx, first, Decl{
+		Server: "n9e", Name: "query_range", Description: str("先有的描述"),
+	}, "seed"); err != nil {
+		t.Fatal(err)
+	}
+
+	// The interleaving, forced. A holds its transaction open between reading
+	// the row and writing it; B runs to completion inside that window. With
+	// the row lock, B waits and then patches what A left. Without it, B reads
+	// the row as it was and its write erases A's field — which is what makes
+	// this test fail when the lock is removed, and what two goroutines racing
+	// on their own would almost never reproduce.
+	inWindow := make(chan struct{})
+	letGo := make(chan struct{})
+	restore := holdAfterRead(t, inWindow, letGo)
+	defer restore()
+
+	aDone := make(chan error, 1)
+	go func() {
+		aDone <- SaveDecl(ctx, first, Decl{
+			Server: "n9e", Name: "query_range", Suites: list("promql"),
+		}, "A")
+	}()
+	<-inWindow // A has read, and has not written
+
+	bDone := make(chan error, 1)
+	go func() {
+		bDone <- SaveDecl(ctx, second, Decl{
+			Server: "n9e", Name: "query_range", Produces: str("metric_series"),
+		}, "B")
+	}()
+	// B is either waiting on A's row lock, or (without it) already past its
+	// own read. Either way, let A finish.
+	time.Sleep(150 * time.Millisecond)
+	close(letGo)
+
+	if err := <-aDone; err != nil {
+		t.Fatalf("A: %v", err)
+	}
+	if err := <-bDone; err != nil {
+		t.Fatalf("B: %v", err)
+	}
+
+	got := loadOne(t, first, "n9e", "query_range")
+	if len(got.Suites) == 0 {
+		t.Error("suites 被另一个保存冲掉了")
+	}
+	if got.Produces == "" {
+		t.Error("produces 被另一个保存冲掉了")
+	}
+	if got.Description != "先有的描述" {
+		t.Errorf("两个都没碰的字段也丢了: %q", got.Description)
+	}
+}
+
+// Two first-saves for a tool nobody has declared have no row to lock, and the
+// primary key is what keeps them from losing each other.
+func TestTwoFirstSavesForOneToolMerge(t *testing.T) {
+	dsn := os.Getenv("JELLY_PG_DSN")
+	if dsn == "" {
+		t.Skip("需要 JELLY_PG_DSN")
+	}
+	exclusive(t, dsn)
+	ctx := context.Background()
+	db := declDB(t)
+
+	done := make(chan error, 2)
+	start := make(chan struct{})
+	for _, d := range []Decl{
+		{Server: "n9e", Name: "brand_new", Suites: list("promql")},
+		{Server: "n9e", Name: "brand_new", Produces: str("metric_series")},
+	} {
+		go func(d Decl) { <-start; done <- SaveDecl(ctx, db, d, "concurrent") }(d)
+	}
+	close(start)
+	for range 2 {
+		if err := <-done; err != nil {
+			t.Fatalf("save: %v", err)
+		}
+	}
+	// One of them may lose its field to the other's insert — the row did not
+	// exist for either to patch. What must not happen is a failed save or a
+	// row with neither field.
+	got := loadOne(t, db, "n9e", "brand_new")
+	if len(got.Suites) == 0 && got.Produces == "" {
+		t.Error("两个字段都没有留下")
+	}
+}
+
+// holdAfterRead makes the first save through SaveDecl pause between reading
+// the row and writing it, and lets a test decide when it continues.
+func holdAfterRead(t *testing.T, entered chan<- struct{}, release <-chan struct{}) func() {
+	t.Helper()
+	prev := afterRead
+	var once sync.Once
+	afterRead = func() {
+		once.Do(func() {
+			close(entered)
+			<-release
+			// Only the first save waits. B must run to completion inside the
+			// window rather than stopping in it too.
+			afterRead = prev
+		})
+	}
+	return func() { afterRead = prev }
+}
+
+// An import that fails partway must leave nothing behind.
+//
+// Applied one declaration at a time, a failure after the second left the
+// first one in the table — and the emptiness check then made that permanent:
+// the next start finds a non-empty table, skips the import, and the rest of
+// the file is gone for good while the file itself still sits there looking
+// un-imported. Nobody would find out; the tools would just quietly stop
+// being scored the way somebody decided.
+func TestAnImportThatFailsPartwayLeavesNothingBehind(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	db := declDB(t)
+	path := filepath.Join(t.TempDir(), ConsoleFile)
+	if err := os.WriteFile(path, []byte(`tools:
+  - name: query_range
+    server: n9e-mcp
+    suites: [promql]
+  - name: query_logs
+    server: n9e-mcp
+    suites: [logs]
+  - name: list_active_alerts
+    server: n9e-mcp
+    suites: [alerts]
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Break it after the second declaration has been read, so the first is
+	// already written: the half-imported state, deliberately.
+	seen := 0
+	prev := afterRead
+	afterRead = func() {
+		prev()
+		seen++
+		if seen == 2 {
+			cancel()
+		}
+	}
+	t.Cleanup(func() { afterRead = prev })
+
+	if _, err := ImportConsoleFile(ctx, db, path); err == nil {
+		t.Fatal("导入中途失败了，却报成功")
+	}
+	for _, table := range []string{"tool_decls", "tool_decl_log"} {
+		var rows int
+		if err := db.QueryRow(`SELECT count(*) FROM ` + table).Scan(&rows); err != nil {
+			t.Fatal(err)
+		}
+		if rows != 0 {
+			t.Errorf("导入失败却在 %s 留下了 %d 行 —— 下次启动会以为已经导过，剩下的声明就永远进不来了",
+				table, rows)
+		}
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Errorf("导入失败却把文件改名了: %v", err)
+	}
+
+	// And it really does come back: a later start imports the whole file.
+	afterRead = prev
+	n, err := ImportConsoleFile(context.Background(), db, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 3 {
+		t.Errorf("重试只导入了 %d 条，want 3", n)
 	}
 }

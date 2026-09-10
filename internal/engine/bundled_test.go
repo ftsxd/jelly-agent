@@ -1,6 +1,8 @@
 package engine
 
 import (
+	"context"
+	adksession "google.golang.org/adk/session"
 	"os"
 	"path/filepath"
 	"testing"
@@ -206,5 +208,51 @@ func TestOpeningWithNoConfiguredDirectoryLeavesTheDefaultOneAlone(t *testing.T) 
 	}
 	if _, err := os.Stat(console + ".imported"); err == nil {
 		t.Error("文件被改名了 —— 这正是那次事故")
+	}
+}
+
+// The session store lives in the same database as everything that joins
+// against it.
+//
+// NewSessionService took the raw field rather than the resolved reference, so
+// a deployment with a config file but no DSN put sessions and events in
+// ~/.jelly-agent/state.db while tool results, call records, task links and
+// the console's declarations went beside the config. Every join in the
+// console is (session_id, invocation_id), so the two halves being apart means
+// the console shows a session with no work in it and a task with no session.
+func TestTheSessionStoreUsesTheSameDatabaseAsEverythingElse(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	elsewhere := t.TempDir()
+
+	e := New(&config.Config{SourcePath: filepath.Join(elsewhere, "config.yaml")})
+	t.Cleanup(e.Close)
+
+	svc, err := e.NewSessionService()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.Create(context.Background(), &adksession.CreateRequest{
+		AppName: AppName, UserID: UserID, SessionID: "s1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// The session must be visible through the shared handle — that is what
+	// "same database" means, and it is what every join needs.
+	db, err := e.StateDB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var n int
+	if err := db.QueryRow(`SELECT count(*) FROM sessions WHERE id = ?`, "s1").Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Errorf("会话不在共享库里 —— 会话服务写到别处去了")
+	}
+	// And not in the home default, which is where it used to go.
+	if _, err := os.Stat(filepath.Join(home, ".jelly-agent", "state.db")); err == nil {
+		t.Error("会话服务在 home 下建了第二个库")
 	}
 }

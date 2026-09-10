@@ -137,3 +137,13 @@ func (sqliteDialect) columns(db *DB, table string) ([]string, error) {
 func (sqliteDialect) columnTypes(db *DB, table string) (map[string]string, error) {
 	return scanPairs(db, `SELECT name, type FROM pragma_table_info(?)`, table)
 }
+
+// primaryKey reads pragma_table_info's pk column, which is 0 for a column
+// outside the key and 1-based position inside it.
+func (sqliteDialect) primaryKey(db *DB, table string) ([]string, error) {
+	return scanStrings(db, `SELECT name FROM pragma_table_info(?) WHERE pk > 0 ORDER BY pk`, table)
+}
+
+// rowLocks is false: SQLite serialises writers, so there is nothing for a row
+// lock to prevent — and FOR UPDATE is not syntax it accepts.
+func (sqliteDialect) rowLocks() bool { return false }

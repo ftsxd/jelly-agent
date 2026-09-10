@@ -1671,7 +1671,16 @@ func (e *Engine) StateRef() string { return e.stateRef }
 // a GORM database, not per-request state.
 func (e *Engine) NewSessionService() (adksession.Service, error) {
 	e.sessionOnce.Do(func() {
-		e.sessionSvc, e.sessionClose, e.sessionErr = jellysession.New(e.stateRef)
+		// stateReference, not the raw field. They differ when no DSN is set
+		// but the config came from a file: everything else then lives beside
+		// that file, while an empty string sends the session store to
+		// ~/.jelly-agent/state.db — putting sessions and events in one
+		// database and every table that joins against them in another.
+		var ref string
+		if ref, e.sessionErr = e.stateReference(); e.sessionErr != nil {
+			return
+		}
+		e.sessionSvc, e.sessionClose, e.sessionErr = jellysession.New(ref)
 	})
 	return e.sessionSvc, e.sessionErr
 }

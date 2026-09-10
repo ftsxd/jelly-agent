@@ -126,3 +126,19 @@ func (postgresDialect) columnTypes(db *DB, table string) (map[string]string, err
 		SELECT column_name, data_type FROM information_schema.columns
 		WHERE table_schema = current_schema() AND table_name = ?`, table)
 }
+
+// primaryKey reads the constraint rather than an index, so a unique index that
+// is not the key does not answer here.
+func (postgresDialect) primaryKey(db *DB, table string) ([]string, error) {
+	return scanStrings(db, `
+		SELECT a.attname
+		FROM pg_index i
+		JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey)
+		WHERE i.indrelid = to_regclass(?) AND i.indisprimary
+		ORDER BY array_position(i.indkey, a.attnum)`, table)
+}
+
+// rowLocks is true: a pool means two transactions can be inside the same
+// read-modify-write at once, and a row lock is what makes the second one wait
+// for the first rather than overwrite it.
+func (postgresDialect) rowLocks() bool { return true }

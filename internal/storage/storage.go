@@ -322,6 +322,20 @@ func ColumnTypes(db *DB, table string) (map[string]string, error) {
 	return db.dialect.columnTypes(db, table)
 }
 
+// PrimaryKey lists a table's primary-key columns, in key order.
+//
+// For telling one row from another without a fourth definition of the schema.
+// The migrator needs it to say *which* rows the target already had, which is
+// the difference between "the copy skipped 3 rows" and "these 3 rows in the
+// target say something different from the source".
+//
+// Empty means the table has no primary key, which the caller has to handle
+// rather than treat as an error: a table without one has no way to match a
+// source row to a target row at all.
+func PrimaryKey(db *DB, table string) ([]string, error) {
+	return db.dialect.primaryKey(db, table)
+}
+
 // scanPairs collects a two-column result into a map.
 func scanPairs(db *DB, query string, args ...any) (map[string]string, error) {
 	rows, err := db.Query(query, args...)
@@ -339,3 +353,10 @@ func scanPairs(db *DB, query string, args ...any) (map[string]string, error) {
 	}
 	return out, rows.Err()
 }
+
+// HasIdentitySequences says whether generated columns are backed by a
+// separate counter that a copied row does not advance.
+//
+// PostgreSQL's identity columns are; SQLite's AUTOINCREMENT reads MAX(rowid),
+// so a row copied with an explicit id moves it by existing.
+func (d *DB) HasIdentitySequences() bool { return d.Kind() == KindPostgres }

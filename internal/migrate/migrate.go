@@ -140,5 +140,13 @@ func Run(ctx context.Context, src, dst *storage.DB, opts Options) (Report, error
 			opts.Progress(table, copied, skipped)
 		}
 	}
+	if !opts.DryRun {
+		// Rows arrived with their ids, so the target's sequences never moved
+		// and the first row the service writes would collide. See
+		// advanceIdentities.
+		if err := advanceIdentities(ctx, dst, rep.Order); err != nil {
+			return rep, err
+		}
+	}
 	return rep, nil
 }

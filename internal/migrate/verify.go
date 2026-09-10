@@ -25,11 +25,11 @@ func (m Mismatch) String() string {
 // happen — a table skipped, a batch that errored and was swallowed, a copy run
 // against the wrong database.
 //
-// It is not a checksum. Comparing content would mean deciding what "equal"
-// means for a timestamp that is text on one side and a timestamp on the other,
-// and that decision belongs to the schema rather than to the verifier. The
-// end-to-end tests read the copied rows back through the stores, which is the
-// stronger check and the one that knows what the values mean.
+// It is not a content check, and it cannot be one on its own: the rows it
+// would have to compare are the ones ON CONFLICT DO NOTHING kept, and by the
+// time Verify runs there is nothing left to say which those were. That check
+// happens where the answer is free — at insert time, from what RETURNING did
+// not return. See compareExisting and ConflictError.
 //
 // A target with more rows than the source is reported too: it means the copy
 // ran into a database that was already being written to, which is a different

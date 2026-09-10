@@ -92,28 +92,53 @@ func SaveDecl(ctx context.Context, db *storage.DB, d Decl, changedBy string) err
 	}
 	now := time.Now().UTC()
 	return db.InTx(ctx, func(tx *storage.Tx) error {
-		cur, err := readDecl(ctx, tx, d.Server, d.Name)
-		if err != nil {
-			return err
-		}
-		next := patch(cur, d)
-
-		if isEmptyDecl(next) {
-			// Nothing left declared. The row goes rather than staying as a
-			// row of NULLs: "not declared" and "declared as nothing" look the
-			// same to every reader, and only the first is true.
-			if _, err := tx.ExecContext(ctx,
-				`DELETE FROM tool_decls WHERE server=? AND name=?`, d.Server, d.Name); err != nil {
-				return fmt.Errorf("toolreg: delete decl: %w", err)
-			}
-			return appendLog(ctx, tx, d.Server, d.Name, "delete", nil, now, changedBy)
-		}
-
-		if err := upsertDecl(ctx, tx, next, now, changedBy); err != nil {
-			return err
-		}
-		return appendLog(ctx, tx, d.Server, d.Name, "upsert", &next, now, changedBy)
+		return saveDecl(ctx, tx, d, now, changedBy)
 	})
+}
+
+// saveDecl is SaveDecl's body, inside a transaction somebody else owns.
+//
+// Split out for the import, which applies a file's worth of declarations and
+// has to do it as one unit — see ImportConsoleFile.
+func saveDecl(ctx context.Context, tx *storage.Tx, d Decl, now time.Time, changedBy string) error {
+	// The row is locked before it is read, and that is the whole point.
+	//
+	// Read-modify-write without it is the bug this table was created to
+	// fix, reintroduced: under READ COMMITTED two saves for the same tool
+	// both read the row as it was, each applies its own field, and the
+	// second write erases the first one's. Demonstrated on PostgreSQL —
+	// A sets suites, B sets produces, and suites is gone.
+	//
+	// A lock rather than a compare-and-set retry because these are
+	// patches, not proposals: the second save's field is still wanted, it
+	// just has to be applied to what the first one left behind. Waiting a
+	// few milliseconds for that is the correct outcome, and there is at
+	// most one console.
+	if err := lockDecl(ctx, tx, d.Server, d.Name); err != nil {
+		return err
+	}
+	cur, err := readDecl(ctx, tx, d.Server, d.Name)
+	if err != nil {
+		return err
+	}
+	afterRead() // a seam, so a test can hold one save between its read and its write
+	next := patch(cur, d)
+
+	if isEmptyDecl(next) {
+		// Nothing left declared. The row goes rather than staying as a
+		// row of NULLs: "not declared" and "declared as nothing" look the
+		// same to every reader, and only the first is true.
+		if _, err := tx.ExecContext(ctx,
+			`DELETE FROM tool_decls WHERE server=? AND name=?`, d.Server, d.Name); err != nil {
+			return fmt.Errorf("toolreg: delete decl: %w", err)
+		}
+		return appendLog(ctx, tx, d.Server, d.Name, "delete", nil, now, changedBy)
+	}
+
+	if err := upsertDecl(ctx, tx, next, now, changedBy); err != nil {
+		return err
+	}
+	return appendLog(ctx, tx, d.Server, d.Name, "upsert", &next, now, changedBy)
 }
 
 // storedDecl is a row as it sits in the table: every column nullable.
@@ -121,6 +146,29 @@ type storedDecl struct {
 	Server, Name                             string
 	Description, Produces, SideEffect        *string
 	UseCases, Examples, AntiExamples, Suites *[]string
+}
+
+// lockDecl takes the row lock the patch needs, creating nothing.
+//
+// SELECT … FOR UPDATE locks a row that exists. A tool nobody has declared yet
+// has none, so two first-saves for the same tool could still race — and the
+// primary key is what catches that: one insert wins, the other conflicts and
+// its DO UPDATE then runs against the winner's row, which is the merge the
+// lock would have produced. The lock is what makes the common case (a tool
+// already declared, being edited) correct without a retry.
+//
+// SQLite has no row locks and needs none: one writer at a time, and this
+// package's handle allows one connection. The clause is simply not sent.
+func lockDecl(ctx context.Context, tx *storage.Tx, server, name string) error {
+	if !tx.SupportsRowLocks() {
+		return nil
+	}
+	_, err := tx.ExecContext(ctx,
+		`SELECT 1 FROM tool_decls WHERE server=? AND name=? FOR UPDATE`, server, name)
+	if err != nil {
+		return fmt.Errorf("toolreg: lock decl %s/%s: %w", server, name, err)
+	}
+	return nil
 }
 
 func readDecl(ctx context.Context, tx *storage.Tx, server, name string) (storedDecl, error) {
@@ -245,6 +293,19 @@ func appendLog(ctx context.Context, tx *storage.Tx, server, name, op string,
 	return nil
 }
 
+// afterRead is the point between reading the row and writing it back.
+//
+// The window this whole function is about: without the row lock above, a
+// second save slipping in here reads the row as it was and then erases what
+// the first one wrote. Two goroutines almost never land in it on their own —
+// the transaction is microseconds long — so the test that proves the lock
+// works has to be able to hold one save open, and a mutation that removes the
+// lock has to actually fail.
+//
+// A variable rather than a parameter because every caller would otherwise
+// pass nil, and a nil check at every call site is more to read than this.
+var afterRead = func() {}
+
 // DeclHistory is one recorded change.
 type DeclHistory struct {
 	ID        int64             `json:"id"`
@@ -349,6 +410,13 @@ func isNoRows(err error) bool { return errors.Is(err, sql.ErrNoRows) }
 // wrong should be recoverable by a person, and the rename is also what stops
 // the next start from importing it again.
 //
+// All of it in one transaction, and that is not tidiness. Saved one at a time,
+// a failure partway — a crash, a declaration the table refuses — leaves some
+// rows in and the rest out, and the emptiness check then makes that permanent:
+// the next start sees a non-empty table, skips the import, and the
+// declarations that never made it are gone while the file still sits there
+// looking un-imported. Either the whole file is in the table or none of it is.
+//
 // Returns how many declarations moved. A missing file is zero and no error —
 // that is a fresh deployment, which is the common case.
 func ImportConsoleFile(ctx context.Context, db *storage.DB, path string) (int, error) {
@@ -372,33 +440,61 @@ func ImportConsoleFile(ctx context.Context, db *storage.DB, path string) (int, e
 	}
 
 	n := 0
-	for _, m := range f.Tools {
-		if m.Name == "" {
-			continue
-		}
-		// Every field is carried, empty ones included, and they still do not
-		// become overrides — emptyToNil stores an empty value as NULL, which
-		// is how the table says "not declared". An earlier version filtered
-		// them here as well; no input could tell the two apart, so the filter
-		// went rather than staying as a branch nothing exercises.
+	if err := db.InTx(ctx, func(tx *storage.Tx) error {
+		// Counted again inside the transaction. The check above is a fast
+		// path that avoids reading the file on every start; this one is the
+		// one that decides, and it sees a table that cannot change underneath
+		// it while the rows go in.
 		//
-		// A YAML zero value meant "not declared", and this is where those two
-		// representations meet.
-		produces, effect := string(m.Produces), string(m.SideEffect)
-		d := Decl{
-			Server: m.Server, Name: m.Name,
-			Description:  &m.Description,
-			Produces:     &produces,
-			SideEffect:   &effect,
-			UseCases:     &m.UseCases,
-			Examples:     &m.Examples,
-			AntiExamples: &m.AntiExamples,
-			Suites:       &m.Suites,
+		// Two processes starting at the same moment on a fresh database can
+		// both find it empty and both import. That is harmless rather than
+		// prevented: the declarations are the same ones, the primary key
+		// merges them, and the only trace is a duplicate pair of audit
+		// entries. Serialising it would need a lock held across a file read
+		// for a case that happens once in a deployment's life.
+		n = 0
+		var existing int
+		if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM tool_decls`).Scan(&existing); err != nil {
+			return fmt.Errorf("toolreg: count decls: %w", err)
 		}
-		if err := SaveDecl(ctx, db, d, "import:"+filepath.Base(path)); err != nil {
-			return n, fmt.Errorf("toolreg: import %s/%s: %w", m.Server, m.Name, err)
+		if existing > 0 {
+			return nil
 		}
-		n++
+		now := time.Now().UTC()
+		for _, m := range f.Tools {
+			if m.Name == "" {
+				continue
+			}
+			// Every field is carried, empty ones included, and they still do not
+			// become overrides — emptyToNil stores an empty value as NULL, which
+			// is how the table says "not declared". An earlier version filtered
+			// them here as well; no input could tell the two apart, so the filter
+			// went rather than staying as a branch nothing exercises.
+			//
+			// A YAML zero value meant "not declared", and this is where those two
+			// representations meet.
+			produces, effect := string(m.Produces), string(m.SideEffect)
+			d := Decl{
+				Server: m.Server, Name: m.Name,
+				Description:  &m.Description,
+				Produces:     &produces,
+				SideEffect:   &effect,
+				UseCases:     &m.UseCases,
+				Examples:     &m.Examples,
+				AntiExamples: &m.AntiExamples,
+				Suites:       &m.Suites,
+			}
+			if err := saveDecl(ctx, tx, d, now, "import:"+filepath.Base(path)); err != nil {
+				return fmt.Errorf("toolreg: import %s/%s: %w", m.Server, m.Name, err)
+			}
+			n++
+		}
+		return nil
+	}); err != nil {
+		// Nothing was written: the transaction rolled back, so a later start
+		// finds the table still empty and the file still in place, and tries
+		// again.
+		return 0, err
 	}
 
 	if err := os.Rename(path, path+".imported"); err != nil {
