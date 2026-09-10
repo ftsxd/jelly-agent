@@ -15,10 +15,19 @@ import (
 // DDL here would be a second definition of somebody else's schema, silently
 // drifting the next time ADK changes its models. The read and delete helpers
 // in this package already tolerate the tables not being there yet.
-// EnsureSchema is a no-op: the tables belong to ADK. The indexes on them do
-// not — see EnsureIndexes, which runs after AutoMigrate has created the
-// tables to put them on.
-func EnsureSchema(*storage.DB) error { return nil }
+// EnsureSchema creates no table — those belong to ADK — but it does add the
+// indexes on them, because ADK ships none. See EnsureIndexes.
+//
+// Called when the shared handle opens, which is the only path an upgrading
+// deployment is guaranteed to take: its tables already exist from an earlier
+// version, so AutoMigrate never runs, and a person who opens the task list
+// before anything touches the session service would otherwise get the
+// unindexed scan this exists to prevent.
+//
+// Running twice is free — CREATE INDEX IF NOT EXISTS — and on a fresh install
+// the tables are not there yet, which EnsureIndexes tolerates and
+// NewSessionService covers by calling it again after AutoMigrate.
+func EnsureSchema(db *storage.DB) error { return EnsureIndexes(db) }
 
 // EnsureIndexes adds the indexes ADK's tables need and ADK does not create.
 //

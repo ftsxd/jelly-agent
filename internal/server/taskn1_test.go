@@ -4,7 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/jelly-agent/jelly-agent/internal/config"
+	"github.com/jelly-agent/jelly-agent/internal/engine"
+	"github.com/jelly-agent/jelly-agent/internal/metrics"
+	"github.com/jelly-agent/jelly-agent/internal/storage"
 	"net/http"
+	"path/filepath"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -308,4 +313,86 @@ func TestTheIndexesOnADKsTablesExist(t *testing.T) {
 			t.Errorf("%s 上缺少 %s —— 任务列表会退回全表扫描", table, want)
 		}
 	}
+}
+
+// An upgrading deployment gets the indexes without ever opening the session
+// service.
+//
+// This is the shape of a real upgrade: the tables already exist from an
+// earlier version, so AutoMigrate never runs — and the indexes used to be
+// created only after it. A person who starts the new binary and opens the
+// task list before anything touches the session service would have got the
+// unindexed scan, which is 3.8 seconds at the ceiling.
+//
+// Staged by dropping the indexes from a database that already has ADK's
+// tables, then going through StateDB and the task list only.
+func TestAnUpgradedDatabaseGetsTheIndexesWithoutTheSessionService(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.db")
+
+	// An old deployment: ADK's tables exist, its indexes do not.
+	old := newServerOn(t, path)
+	newSession(t, old, "from-before")
+	oldDB, err := old.engine().StateDB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, idx := range []string{"idx_events_session", "idx_sessions_recent"} {
+		if _, err := oldDB.Exec(`DROP INDEX IF EXISTS ` + idx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n := indexCount(t, oldDB); n != 0 {
+		t.Fatalf("precondition: 还剩 %d 条索引", n)
+	}
+	old.engine().Close()
+
+	// The new binary starting on it. Nothing here opens the session service:
+	// StateDB, then the task list, which no longer needs one.
+	upgraded := newServerOn(t, path)
+	db, err := upgraded.engine().StateDB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := indexCount(t, db); n != 2 {
+		t.Errorf("只开 StateDB 之后有 %d 条索引，want 2 —— 升级的部署拿不到它们", n)
+	}
+	if w := do(t, upgraded, "GET", "/api/tasks?limit=20", ""); w.Code != http.StatusOK {
+		t.Fatalf("task list: %d %s", w.Code, w.Body.String())
+	}
+	if n := indexCount(t, db); n != 2 {
+		t.Errorf("走完任务列表之后有 %d 条索引，want 2", n)
+	}
+}
+
+func indexCount(t *testing.T, db *storage.DB) int {
+	t.Helper()
+	var n int
+	if err := db.QueryRow(
+		`SELECT count(*) FROM sqlite_master WHERE type='index'
+		   AND name IN ('idx_events_session','idx_sessions_recent')`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
+// newServerOn is newTestServer against a database that already exists, for
+// the tests that stage an upgrade.
+func newServerOn(t *testing.T, path string) *Server {
+	t.Helper()
+	cfg := &config.Config{
+		DefaultProvider: "test",
+		Providers:       []config.Provider{{Name: "test", BaseURL: "http://x", APIKey: "sk-test", Model: "m"}},
+		Storage:         config.Storage{DSN: path},
+	}
+	cfg.Memory.Core.Dir = t.TempDir()
+	eng := engine.New(cfg)
+	rec, err := metrics.NewRecorder(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr := metrics.NewTracker(rec)
+	t.Cleanup(func() { tr.Close(); eng.Close() })
+	eng.SetMetrics(tr)
+	return New(eng, nil)
 }

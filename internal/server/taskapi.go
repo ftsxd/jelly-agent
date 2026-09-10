@@ -138,12 +138,15 @@ func (s *Server) framesForPage(r *http.Request, db *storage.DB, metas []jellyses
 		return out
 	}
 
+	// Partial success is the normal shape here: a session whose events do not
+	// decode is left out of the result and reported, and the rest of the page
+	// is fine. Logged with the session, event and column, because a decode
+	// failure means the stored shape is not what this code expects — and
+	// silently showing those tasks with their content missing would look like
+	// tasks that did nothing.
 	events, err := jellysession.EventsOf(r.Context(), db, engine.AppName, engine.UserID, missing)
 	if err != nil {
-		// Reported by the page as sessions it could not project, which is
-		// how a session that vanished mid-scan already behaved.
-		slog.Warn("批量读取会话事件失败，这一页的部分任务无法投影", logging.Err(err))
-		return out
+		slog.Warn("部分会话的事件读不回来，这些会话不会出现在任务列表里", logging.Err(err))
 	}
 	byID := map[string]jellysession.SessionMeta{}
 	for _, m := range metas {

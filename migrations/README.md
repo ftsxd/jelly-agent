@@ -453,6 +453,11 @@ PG **733ms** 一次，占时间线总耗时的 85%。改成 `sync.Once`。
   ADK 的服务没有批量接口，但它把 `content` / `actions` 存成自己公开类型的
   普通 JSON（见 `database.createEventFromStorageEvent`），所以直接读表是
   可行的，也是唯一能让往返次数不随会话数增长的办法。
+
+  读别人的表，风险是对方换写法。`TestBatchReadMatchesWhatADKReadsBack`
+  通过 ADK 写入、两边分别读回来逐字段比对（含顺序），升 ADK 时会红。
+  某一列解不开时不会静默降级：报出 session、event、列名，并把**那个会话**
+  整个排除在外——带着残缺内容显示，会让它看起来像一个什么都没做的任务。
   `handleTasks` 现在**根本不打开会话服务**。
 
   投影缓存还在，但它降级成纯加速：**冷缓存下的往返次数也已经是常数**，
@@ -465,8 +470,15 @@ PG **733ms** 一次，占时间线总耗时的 85%。改成 `sync.Once`。
 可用前缀；`sessions` 上没有 `update_time` 的索引，「按最近排序」要排整张表。
 
 650 个会话时，任务扫描翻 15 页要 **SQLite 3.8 秒 / PG 3.1 秒**，几乎全在这里。
-`session.EnsureIndexes` 在 `AutoMigrate` 之后补两条索引——加索引是增量的，
-不像手写一份 ADK 的建表语句那样会随它改模型而漂。
+`session.EnsureIndexes` 补两条索引，在**两个**地方各跑一次：
+
+- `AutoMigrate` 之后——全新安装，那时表才刚建出来；
+- 打开共享句柄时（`EnsureSchema`）——**升级中的部署走的是这条**。它的表来自
+  旧版本，`AutoMigrate` 不会跑；而任务列表已经不打开会话服务了，所以一个人
+  启动新二进制、直接打开任务页，只经过这条路径。
+
+`CREATE INDEX IF NOT EXISTS` 跑两遍是免费的，表还不存在时跳过。加索引是增量
+的，不像手写一份 ADK 的建表语句那样会随它改模型而漂。
 
 | | 加索引前 | 加索引后 |
 |---|---|---|

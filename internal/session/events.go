@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -41,6 +42,13 @@ func EventsOf(ctx context.Context, db *storage.DB, appName, userID string, sessi
 		return out, nil
 	}
 
+	// Sessions whose events would not decode, and why. Reported rather than
+	// swallowed: a decode failure means the stored shape is not what this
+	// code expects — corruption, or ADK changing how it writes a column on an
+	// upgrade — and passing it off as "this task has no content" hides
+	// exactly the thing somebody needs to see.
+	failed := map[string][]error{}
+
 	err := storage.ForEachChunk(kept, func(chunk []string) error {
 		args := make([]any, 0, len(chunk)+2)
 		args = append(args, appName, userID)
@@ -67,14 +75,59 @@ func EventsOf(ctx context.Context, db *storage.DB, appName, userID string, sessi
 		for rows.Next() {
 			session, ev, err := scanEvent(rows)
 			if err != nil {
+				var de *DecodeError
+				if errors.As(err, &de) {
+					// One session's events cannot be trusted, and the rest of
+					// the page can. Dropping that session is the same
+					// degradation as one that vanished mid-scan, which the
+					// caller already handles — showing it with its damaged
+					// events omitted would be worse, because a task missing
+					// half its steps looks like a task that did half the work.
+					failed[session] = append(failed[session], err)
+					continue
+				}
 				return err
 			}
 			out[session] = append(out[session], ev)
 		}
 		return rows.Err()
 	})
-	return out, err
+	if err != nil {
+		return out, err
+	}
+	if len(failed) > 0 {
+		problems := make([]error, 0, len(failed))
+		for id, errs := range failed {
+			delete(out, id) // absent, not present and incomplete
+			problems = append(problems, errors.Join(errs...))
+			_ = id
+		}
+		// The map is still usable — every other session decoded — so this is
+		// returned alongside it rather than instead of it.
+		return out, errors.Join(problems...)
+	}
+	return out, nil
 }
+
+// DecodeError says a stored event could not be read back.
+//
+// Named fields rather than a wrapped message, because the useful question
+// after one of these is "which column, on which event, in which session" —
+// and the answer decides whether it is one corrupt row or ADK having changed
+// how it writes that column.
+type DecodeError struct {
+	SessionID string
+	EventID   string
+	Field     string
+	Err       error
+}
+
+func (e *DecodeError) Error() string {
+	return fmt.Sprintf("session %s 的事件 %s：%s 列解不开（存的格式和这里预期的不一致，"+
+		"可能是数据损坏，也可能是 ADK 换了写法）: %v", e.SessionID, e.EventID, e.Field, e.Err)
+}
+
+func (e *DecodeError) Unwrap() error { return e.Err }
 
 // scanEvent decodes one row into the event the projection expects.
 //
@@ -122,10 +175,9 @@ func scanEvent(rows rowScanner) (string, *adksession.Event, error) {
 			continue
 		}
 		if err := json.Unmarshal(f.raw, f.dst); err != nil {
-			// One unreadable column must not lose the event: the projection
-			// still has its author, its round and its timestamp, and a
-			// timeline missing one message is better than a page that fails.
-			continue
+			return sessionID, nil, &DecodeError{
+				SessionID: sessionID, EventID: id, Field: f.as, Err: err,
+			}
 		}
 	}
 	return sessionID, ev, nil
