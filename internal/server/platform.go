@@ -175,7 +175,8 @@ func (s *Server) runTurnText(ctx context.Context, provider string, mcpNames []st
 // handleChatStream: same BuildAgent → NewRunner → Run (SSE) sequence, reusing or
 // creating a deterministic session so multi-turn context persists.
 func (s *Server) runTurnStream(ctx context.Context, provider string, mcpNames []string, sessionID, text string, onUpdate func(string)) (string, error) {
-	eng := s.engine()
+	eng, unpin := s.pin() // a config save must not close this engine mid-turn
+	defer unpin()
 	a, _, _, search, err := eng.BuildAgentWith(provider, mcpNames)
 	if err != nil {
 		return "", err

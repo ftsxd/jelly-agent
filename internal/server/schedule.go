@@ -229,7 +229,8 @@ type runRef struct {
 }
 
 func (s *Server) runScheduledAgent(ctx context.Context, t config.ScheduleTask, prompt string) (string, runRef, error) {
-	eng := s.engine()
+	eng, unpin := s.pin() // a config save must not close this engine mid-run
+	defer unpin()
 	name := t.Agent
 	if name == "" && eng.HasAgents() {
 		name = eng.DefaultAgentName()

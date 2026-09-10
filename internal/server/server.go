@@ -28,9 +28,9 @@ import (
 // restart (PLAN §1.5 "配置热重载，对话不中断").
 type Server struct {
 	mu         sync.RWMutex
-	eng        *engine.Engine
-	static     fs.FS  // embedded SPA build (dist); nil disables static serving
-	configPath string // explicit --config path for reloads ("" = auto-resolve)
+	ref        *engineRef // the current engine, plus the work still using it
+	static     fs.FS      // embedded SPA build (dist); nil disables static serving
+	configPath string     // explicit --config path for reloads ("" = auto-resolve)
 
 	pollInterval time.Duration // config-watch poll interval; 0 = defaultConfigPoll
 
@@ -89,7 +89,7 @@ func New(eng *engine.Engine, staticFS fs.FS) *Server {
 			slog.Info("清理孤儿检索索引", "rows", n)
 		}
 	}
-	s := &Server{eng: eng, static: staticFS, auth: newAuthManager()}
+	s := &Server{ref: &engineRef{eng: eng}, static: staticFS, auth: newAuthManager()}
 	s.attachScheduleTools(eng)
 	return s
 }
@@ -102,10 +102,14 @@ func (s *Server) WithConfigPath(path string) *Server {
 }
 
 // engine returns the current engine under a read lock.
+//
+// For anything that holds the engine across a long operation — a chat turn, a
+// scheduled run, a bot reply — take it from engineFor or pin instead, so a
+// config save cannot close it mid-flight. See enginepin.go.
 func (s *Server) engine() *engine.Engine {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.eng
+	return s.ref.eng
 }
 
 // stateDB is the shared handle on the state database, or an error a handler
@@ -134,12 +138,12 @@ func (s *Server) reload() error {
 		return err
 	}
 	s.mu.Lock()
-	old := s.eng
-	s.eng = engine.New(cfg)
-	s.attachScheduleTools(s.eng)
+	old := s.ref
+	s.ref = &engineRef{eng: engine.New(cfg)}
+	s.attachScheduleTools(s.ref.eng)
 	s.mu.Unlock()
 	if old != nil {
-		old.Close() // terminate the previous engine's stdio MCP subprocesses
+		old.retire() // closes once the requests still on it have finished
 	}
 	s.restartBots(cfg) // pick up platform changes; bots answer via the new engine
 	s.restartSchedules()
@@ -212,7 +216,7 @@ func (s *Server) Handler() http.Handler {
 	if s.static != nil {
 		mux.Handle("/", s.spaHandler())
 	}
-	return s.authMiddleware(mux)
+	return s.pinEngine(s.authMiddleware(mux))
 }
 
 // writeJSON encodes v as a JSON response with the given status.

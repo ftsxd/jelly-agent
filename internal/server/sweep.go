@@ -24,7 +24,8 @@ const sweepInterval = time.Hour
 // StartResultSweeper expires overdue tool results until ctx is done.
 func (s *Server) StartResultSweeper(ctx context.Context) {
 	sweep := func() {
-		eng := s.engine()
+		eng, unpin := s.pin()
+		defer unpin()
 		if !eng.RetentionEnabled() {
 			return
 		}

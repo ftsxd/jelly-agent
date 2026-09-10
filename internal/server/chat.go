@@ -60,7 +60,7 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	eng := s.engine() // pin one engine for this whole turn
+	eng := s.engineFor(r) // the engine pinned for this request; see enginepin.go
 	// Pick a named agent tree when one is requested or configured by default;
 	// otherwise fall back to the legacy single agent on the chosen provider.
 	agentName := strings.TrimSpace(req.Agent)
