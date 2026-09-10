@@ -1,9 +1,14 @@
 package server
 
 import (
+	"context"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
+	"time"
+
+	"github.com/jelly-agent/jelly-agent/internal/platform"
 )
 
 // TestPlatformCreateUpdateDelete drives the /api/platforms CRUD end to end:
@@ -141,5 +146,93 @@ func TestPlatformCreateRequiresCredentials(t *testing.T) {
 	w = do(t, s, "POST", "/api/platforms", `{"name":"w","type":"wechat","client_id":"a","client_secret":"b","provider":"","enabled":true}`)
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400 (unsupported type)", w.Code)
+	}
+}
+
+// fakeBot behaves the way both real bots do: Stop can only close what Start
+// has already installed. dingTalkBot has nothing to Close until the Stream
+// client is built; weChatPadProBot has no cancel until run is launched. A
+// Stop that arrives first is a no-op on either.
+type fakeBot struct {
+	mu        sync.Mutex
+	connected bool
+	closed    bool
+	starts    int
+	release   chan struct{} // Start blocks here until the test lets it finish
+	entered   chan struct{}
+}
+
+func (b *fakeBot) Start(context.Context) error {
+	b.mu.Lock()
+	b.starts++
+	b.mu.Unlock()
+	if b.entered != nil {
+		close(b.entered)
+	}
+	if b.release != nil {
+		<-b.release
+	}
+	b.mu.Lock()
+	b.connected = true
+	b.mu.Unlock()
+	return nil
+}
+
+func (b *fakeBot) Stop() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.connected { // nothing to close before that, exactly like the real ones
+		b.closed = true
+		b.connected = false
+	}
+}
+
+func (b *fakeBot) Status() platform.Status { return platform.Status{} }
+
+func (b *fakeBot) state() (connected, closed bool, starts int) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.connected, b.closed, b.starts
+}
+
+// A bot replaced before it finished connecting must not be left connected.
+//
+// Start is asynchronous, so a restart's Stop can land while the connection is
+// still being made — and it finds nothing to close, because neither bot has
+// anything to close until Start has installed it. The connection then comes
+// up with nobody holding it: an orphan answering the same group chat next to
+// its replacement, until the process exits.
+func TestABotStoppedWhileConnectingDoesNotStayConnected(t *testing.T) {
+	b := &fakeBot{release: make(chan struct{}), entered: make(chan struct{})}
+	m := &managedBot{Bot: b}
+	go m.run(context.Background(), "dt")
+
+	<-b.entered // Start is in flight
+	m.Stop()    // the restart, arriving mid-connect
+	close(b.release)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		connected, closed, _ := b.state()
+		if closed && !connected {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("换掉的机器人连上之后没人关它 —— 它会和新的一起回同一个群（connected=%v closed=%v）",
+				connected, closed)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// …and one stopped before it ever started must not connect at all.
+func TestABotStoppedBeforeItStartsNeverConnects(t *testing.T) {
+	b := &fakeBot{}
+	m := &managedBot{Bot: b}
+	m.Stop()
+	m.run(context.Background(), "dt")
+
+	if connected, _, starts := b.state(); connected || starts != 0 {
+		t.Errorf("已经停掉的机器人还是连上去了: connected=%v starts=%d", connected, starts)
 	}
 }

@@ -124,28 +124,57 @@ func (s *DBSource) Load(ctx context.Context) ([]ops.ToolMetadata, error) {
 // what the file source did and which no second process could see. The log's
 // highest id is a version number that every process reads the same way, so an
 // edit made in one console tab reaches the other one's registry.
+//
+// A caller that has already loaded should use WatchFrom with the version it
+// read *before* that load — see the window described there.
 func (s *DBSource) Watch(ctx context.Context) <-chan []ops.ToolMetadata {
+	since, _ := s.Version(ctx)
+	return s.WatchFrom(ctx, since)
+}
+
+// WatchFrom is Watch with the baseline supplied.
+//
+// The baseline is which change the caller has already seen, and it has to be
+// read before the load it goes with, not after. Read after, a change that
+// lands between the load and the baseline read is in the baseline but not in
+// what was loaded — so it is never reported and never will be, because the
+// only thing that triggers a report is the version moving past the baseline
+// it is already past. The registry then stays wrong until the next unrelated
+// edit. Taking the baseline first can only cause a redundant reload, which
+// costs one query and changes nothing.
+func (s *DBSource) WatchFrom(ctx context.Context, since int64) <-chan []ops.ToolMetadata {
 	ch := make(chan []ops.ToolMetadata, 1)
 	go func() {
 		defer close(ch)
 		t := time.NewTicker(s.poll)
 		defer t.Stop()
-		seen := s.version(ctx) // baseline, so the first tick is not a false positive
+		seen := since
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case <-t.C:
 			}
-			v := s.version(ctx)
-			if v == seen {
+			v, err := s.Version(ctx)
+			if err != nil || v == seen {
+				// A failed poll leaves the baseline where it was. Treating an
+				// unreadable log as version zero would report a change that
+				// did not happen, and then miss the next one that did.
 				continue
 			}
-			seen = v
 			metas, err := s.Load(ctx)
 			if err != nil {
-				continue // reported by the next successful load; a poll is not a request
+				// The baseline stays behind, so the next tick tries this same
+				// change again. Advancing it here — which is what this did —
+				// spent the notification on a load that produced nothing: one
+				// transient error and the edit is lost until somebody makes
+				// another one.
+				continue
 			}
+			// v, read before the load: a change that landed in between is
+			// already in metas and will be reported once more. Redundant is
+			// the safe direction.
+			seen = v
 			select {
 			case ch <- metas:
 			case <-ctx.Done():
@@ -156,14 +185,18 @@ func (s *DBSource) Watch(ctx context.Context) <-chan []ops.ToolMetadata {
 	return ch
 }
 
-// version is the highest id in the change log, or zero.
-func (s *DBSource) version(ctx context.Context) int64 {
+// Version is the highest id in the change log, or zero when it is empty.
+//
+// Exported so a caller can take the baseline before loading; see WatchFrom.
+// An unreadable log is an error rather than zero, because zero is a real
+// version and a caller cannot tell the two apart.
+func (s *DBSource) Version(ctx context.Context) (int64, error) {
 	var v *int64
 	if err := s.db.QueryRowContext(ctx, `SELECT MAX(id) FROM tool_decl_log`).Scan(&v); err != nil {
-		return 0
+		return 0, err
 	}
 	if v == nil {
-		return 0
+		return 0, nil
 	}
-	return *v
+	return *v, nil
 }

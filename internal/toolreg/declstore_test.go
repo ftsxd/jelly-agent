@@ -174,11 +174,18 @@ func TestTheLogIsTheVersion(t *testing.T) {
 	ctx := context.Background()
 	db := declDB(t)
 	src := NewDBSource(db)
-	before := src.version(ctx)
+	before, err := src.Version(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := SaveDecl(ctx, db, Decl{Name: "fetch_url", Suites: list("web")}, ""); err != nil {
 		t.Fatal(err)
 	}
-	if after := src.version(ctx); after <= before {
+	after, err := src.Version(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after <= before {
 		t.Errorf("保存之后版本号没有前进：%d → %d", before, after)
 	}
 }

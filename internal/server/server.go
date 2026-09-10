@@ -147,13 +147,23 @@ func (s *Server) stateDB(w http.ResponseWriter, r *http.Request) (*storage.DB, b
 // It also keeps the pieces consistent with each other: without it the last
 // engine to be swapped in and the last bots to be built can come from
 // different reloads, so the console reports a config the bots are not using.
+//
+// The file is read inside the lock, not before it. Read outside, two reloads
+// can each pick up a different version and then apply them in the other
+// order — the one that read the older file takes the lock second and installs
+// it, so a save is silently undone by a save that happened before it. The
+// console shows the newer values (they are on disk) while the process runs
+// the older ones, and nothing looks wrong until somebody wonders why the new
+// API key is not being used.
 func (s *Server) reload() error {
+	reloadStep("start")
+	s.restartMu.Lock()
+	defer s.restartMu.Unlock()
+
 	cfg, err := config.LoadOrEnv(s.configPath)
 	if err != nil {
 		return err
 	}
-	s.restartMu.Lock()
-	defer s.restartMu.Unlock()
 
 	s.mu.Lock()
 	old := s.ref
@@ -163,7 +173,7 @@ func (s *Server) reload() error {
 	if old != nil {
 		old.retire() // closes once the requests still on it have finished
 	}
-	duringReload()     // a seam, so a test can hold one reload open while another starts
+	reloadStep("swapped")
 	s.restartBots(cfg) // pick up platform changes; bots answer via the new engine
 	s.restartSchedules()
 	return nil
@@ -262,8 +272,9 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 // Version is the server version, overridable at build time via -ldflags.
 var Version = "0.2.0-dev"
 
-// duringReload is the point between swapping the engine and replacing the
-// bots and the cron — the window two concurrent reloads used to interleave
-// in. A test holds one reload here and starts another; nothing in production
-// replaces it.
-var duringReload = func() {}
+// reloadStep marks the two points a test needs to hold a reload at: "start",
+// before it takes the lock or reads anything, and "swapped", between
+// installing the engine and replacing the bots and the cron. Both are
+// windows two concurrent reloads used to interleave in. Nothing in
+// production replaces it.
+var reloadStep = func(string) {}

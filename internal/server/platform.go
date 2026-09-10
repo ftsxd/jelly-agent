@@ -84,12 +84,9 @@ func (s *Server) restartBots(cfg *config.Config) {
 			slog.Warn("平台已跳过", "platform", pb.Name, logging.Err(err))
 			continue
 		}
-		started = append(started, bot)
-		go func(b platform.Bot, name string) {
-			if err := b.Start(ctx); err != nil {
-				slog.Error("平台启动失败", "platform", name, logging.Err(err))
-			}
-		}(bot, pb.Name)
+		m := &managedBot{Bot: bot}
+		started = append(started, m)
+		go m.run(ctx, pb.Name)
 	}
 
 	s.bots.mu.Lock()
@@ -433,4 +430,63 @@ func indexOfPlatform(ps []config.PlatformBot, name string) int {
 		}
 	}
 	return -1
+}
+
+// managedBot makes Stop reliable whatever moment it arrives in.
+//
+// Start is asynchronous — connecting to DingTalk takes a round trip, and the
+// server does not wait for it — so a restart's Stop can land before the bot
+// has connected. Both implementations only have something to close once
+// Start has installed it (the Stream client, the run goroutine's cancel), so
+// that Stop finds nothing, returns, and the connection comes up a moment
+// later with nobody holding it: an orphan that keeps answering the group
+// chat, alongside its replacement, until the process exits. Two saves in the
+// console produce it.
+//
+// So the intent to stop is remembered rather than acted on once. A Stop
+// before Start cancels the start; a Stop during it is applied again when
+// Start returns, which is the first moment there is anything to close.
+//
+// Here rather than in each bot: the manager is what knows a bot is being
+// replaced, and the two implementations would otherwise both need the same
+// state for the same reason.
+type managedBot struct {
+	platform.Bot
+
+	mu      sync.Mutex
+	stopped bool
+	running bool
+}
+
+func (m *managedBot) run(ctx context.Context, name string) {
+	m.mu.Lock()
+	if m.stopped {
+		m.mu.Unlock()
+		return // stopped before it ever started; nothing to connect
+	}
+	m.running = true
+	m.mu.Unlock()
+
+	err := m.Bot.Start(ctx)
+
+	m.mu.Lock()
+	m.running = false
+	stopped := m.stopped
+	m.mu.Unlock()
+	if err != nil {
+		slog.Error("平台启动失败", "platform", name, logging.Err(err))
+		return
+	}
+	if stopped {
+		// Stop came while this was connecting, and found nothing to close.
+		// Now there is.
+		m.Bot.Stop()
+	}
+}
+
+func (m *managedBot) Stop() {
+	m.mu.Lock()
+	m.stopped = true
+	m.mu.Unlock()
+	m.Bot.Stop() // no-op if Start has not installed anything yet; run() redoes it
 }

@@ -428,8 +428,13 @@ func (e *Engine) toolRegistry() (*toolreg.Store, *gateway.Gateway) {
 		// and a layer reachable only by setting a path nobody knows about is
 		// a layer nobody uses. A missing directory is not an error — it means
 		// nothing has been declared yet. See metadataSources for the layering.
+		// The baseline comes before the load, not after — a change that
+		// lands in between would otherwise be in the baseline and not in the
+		// registry, and nothing would ever report it. See WatchFrom.
+		src, since := e.declWatchBaseline()
 		e.toolStore.Swap(buildRegistry(e.metadataSources()))
-		e.watchDeclarations()
+		afterFirstRegistry() // a seam; the window this ordering closes
+		e.watchDeclarations(src, since)
 
 		if e.contextUnguarded() {
 			slog.Warn("上下文无任何上限保护：history.max_tokens 为 0 关闭了压缩，而 tools.max_result_bytes 为 0 不限制单次返回。"+
@@ -1570,12 +1575,11 @@ var declPoll = 0 * time.Second
 // Stops with the engine — the context is the one Close cancels — so a
 // replaced engine's watcher goes away with it rather than swapping into a
 // registry nobody reads.
-func (e *Engine) watchDeclarations() {
-	db, err := e.StateDB()
-	if err != nil {
+func (e *Engine) watchDeclarations(src *toolreg.DBSource, since int64) {
+	if src == nil {
 		return
 	}
-	ch := toolreg.NewDBSource(db).WithPoll(declPoll).Watch(e.mcpCtx)
+	ch := src.WatchFrom(e.mcpCtx, since)
 	go func() {
 		for range ch {
 			// The whole stack, not the set the watch handed over: that set is
@@ -1586,6 +1590,30 @@ func (e *Engine) watchDeclarations() {
 		}
 	}()
 }
+
+// declWatchBaseline opens the declaration source and reads which change it is
+// already at, before anything loads from it. Nil when the database will not
+// open, which is not an error here — see watchDeclarations.
+func (e *Engine) declWatchBaseline() (*toolreg.DBSource, int64) {
+	db, err := e.StateDB()
+	if err != nil {
+		return nil, 0
+	}
+	src := toolreg.NewDBSource(db).WithPoll(declPoll)
+	since, err := src.Version(e.mcpCtx)
+	if err != nil {
+		// Unreadable now, so start from zero: the first tick reports a change
+		// that may not be one, which costs a rebuild and is the safe way to
+		// be wrong.
+		return src, 0
+	}
+	return src, since
+}
+
+// afterFirstRegistry is the moment between the registry's first load and the
+// watcher starting — the window a change had to land in to be lost. A test
+// writes a declaration here; nothing in production replaces it.
+var afterFirstRegistry = func() {}
 
 // ReloadToolMetadata re-reads the declarations and swaps the registry.
 //

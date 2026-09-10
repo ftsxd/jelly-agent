@@ -3,8 +3,11 @@ package server
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/jelly-agent/jelly-agent/internal/config"
 )
 
 // A config save must not kill a scheduled run that is already going.
@@ -58,13 +61,16 @@ func TestTwoReloadsAtOnceDoNotLeaveADuplicateRunning(t *testing.T) {
 
 	entered := make(chan struct{}, 8) // one per reload that got past the swap
 	release := make(chan struct{})
-	prev := duringReload
+	prev := reloadStep
 	var once sync.Once
-	duringReload = func() {
+	reloadStep = func(step string) {
+		if step != "swapped" {
+			return
+		}
 		entered <- struct{}{}
 		once.Do(func() { <-release }) // only the first one waits
 	}
-	t.Cleanup(func() { duringReload = prev })
+	t.Cleanup(func() { reloadStep = prev })
 
 	done := make(chan error, 2)
 	go func() { done <- s.reload() }()
@@ -85,5 +91,58 @@ func TestTwoReloadsAtOnceDoNotLeaveADuplicateRunning(t *testing.T) {
 		if err := <-done; err != nil {
 			t.Fatal(err)
 		}
+	}
+}
+
+// The last save on disk is the one that ends up running.
+//
+// reload read the config file before taking the lock, so two of them could
+// each pick up a different version and then apply them in the other order:
+// the one holding the older file takes the lock second and installs it,
+// silently undoing a save that happened after it. The console shows the newer
+// values — they are on disk — while the process runs the older ones, and
+// nothing looks wrong until somebody wonders why the new API key is not being
+// used.
+func TestTheConfigOnDiskIsTheOneThatEndsUpRunning(t *testing.T) {
+	s, path := newProviderServer(t)
+
+	held := make(chan struct{})
+	release := make(chan struct{})
+	prev := reloadStep
+	var first atomic.Bool
+	reloadStep = func(step string) {
+		// Only the first reload waits, and a plain flag rather than sync.Once
+		// because Do blocks every later caller until the first returns —
+		// which is the second reload, the one this test needs to get past.
+		if step == "start" && first.CompareAndSwap(false, true) {
+			close(held)
+			<-release
+		}
+	}
+	t.Cleanup(func() { reloadStep = prev })
+
+	slow := make(chan error, 1)
+	go func() { slow <- s.reload() }()
+	<-held // one reload is about to run, and has read nothing yet
+
+	// Meanwhile the config changes and another reload applies it.
+	raw, err := config.LoadRaw(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw.Providers[0].Model = "写在后面的那个模型"
+	if err := config.Save(raw, path); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.reload(); err != nil {
+		t.Fatal(err)
+	}
+
+	close(release)
+	if err := <-slow; err != nil {
+		t.Fatal(err)
+	}
+	if got := s.engine().Config().Providers[0].Model; got != "写在后面的那个模型" {
+		t.Errorf("后保存的配置被一次更早开始的 reload 覆盖回去了: model = %q", got)
 	}
 }
