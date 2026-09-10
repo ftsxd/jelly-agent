@@ -3,6 +3,7 @@ package migrate_test
 import (
 	"context"
 	"errors"
+	"github.com/jelly-agent/jelly-agent/internal/toolreg"
 	"os"
 	"path/filepath"
 	"slices"
@@ -127,6 +128,32 @@ func TestMigrateSQLiteToPostgres(t *testing.T) {
 		}
 	})
 
+	t.Run("控制台声明与它的审计历史", func(t *testing.T) {
+		// The console's layer is state now, not a file. A migration that left
+		// it behind would silently drop every declaration an operator made —
+		// which is the layer that decides how tools get scored.
+		metas, err := toolreg.NewDBSource(dst).Load(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var found bool
+		for _, m := range metas {
+			if m.Name == "query_range" && slices.Contains(m.Suites, "promql") {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("控制台声明没有迁过来: %+v", metas)
+		}
+		hist, err := toolreg.History(ctx, dst, "n9e-mcp", "query_range", 5)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(hist) != 1 || hist[0].ChangedBy != "alice" {
+			t.Errorf("审计历史没有迁过来: %+v", hist)
+		}
+	})
+
 	t.Run("任务归属与排程记录", func(t *testing.T) {
 		links, err := task.OfSession(dst, sess)
 		if err != nil || links["inv1"] == "" {
@@ -195,6 +222,12 @@ func seedSQLite(t *testing.T, path string) seedResult {
 		t.Fatal(err)
 	}
 
+	if err := toolreg.SaveDecl(ctx, db, toolreg.Decl{
+		Server: "n9e-mcp", Name: "query_range", Suites: &[]string{"promql"},
+	}, "alice"); err != nil {
+		t.Fatal(err)
+	}
+
 	rec, err := metrics.NewRecorder(path)
 	if err != nil {
 		t.Fatal(err)
@@ -243,7 +276,10 @@ func freshPostgres(t *testing.T, dsn string) *storage.DB {
 	t.Cleanup(func() { db.Close() })
 	empty := func() {
 		for i := len(migrate.Tables) - 1; i >= 0; i-- { // children before parents
-			if _, err := db.Exec(`DELETE FROM ` + migrate.Tables[i]); err != nil {
+			// A missing table is tolerated: a test may have dropped ADK's on
+			// purpose, and clearing what is not there is what "empty" means.
+			if _, err := db.Exec(`DELETE FROM ` + migrate.Tables[i]); err != nil &&
+				!storage.IsMissingTable(err) {
 				t.Fatalf("clear %s: %v", migrate.Tables[i], err)
 			}
 		}
@@ -360,5 +396,151 @@ func TestColumnOnlyInTheSourceStopsTheCopy(t *testing.T) {
 	}
 	if rep.Copied["task_runs"] != 1 {
 		t.Errorf("task_runs 复制了 %d 行，want 1", rep.Copied["task_runs"])
+	}
+}
+
+// A dry run is asked before the target is ready — that is what it is for.
+//
+// It used to refuse: the first table it reached was one of ADK's, which the
+// migration file does not create, so it errored out before reporting a single
+// count. An operator deciding whether to migrate got nothing.
+func TestDryRunWorksBeforeTheTargetHasADKsTables(t *testing.T) {
+	dsn := os.Getenv("JELLY_PG_DSN")
+	if dsn == "" {
+		t.Skip("set JELLY_PG_DSN")
+	}
+	exclusive(t, dsn)
+	ctx := context.Background()
+
+	srcPath := filepath.Join(t.TempDir(), "state.db")
+	seedSQLite(t, srcPath)
+	src, err := storage.Open(srcPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer src.Close()
+
+	dst := freshPostgres(t, dsn)
+	dropADKTables(t, dst)
+	// Put them back for whatever runs next: they belong to ADK's AutoMigrate,
+	// and a package that leaves the shared database missing them makes the
+	// next one fail for a reason that has nothing to do with it.
+	t.Cleanup(func() {
+		if _, _, err := jellysession.New(dsn); err != nil {
+			t.Logf("恢复 ADK 的表失败: %v", err)
+		}
+	})
+
+	rep, err := migrate.Run(ctx, src, dst, migrate.Options{DryRun: true})
+	if err != nil {
+		t.Fatalf("目标还没准备好时 dry-run 就失败了: %v", err)
+	}
+	if rep.Copied["sessions"] == 0 {
+		t.Error("dry-run 没有报出 sessions 会搬多少")
+	}
+	if rep.Copied["tool_results"] == 0 {
+		t.Error("dry-run 没有报出 tool_results 会搬多少")
+	}
+	// And it wrote nothing, including the tables AutoMigrate would create.
+	var n int
+	if err := dst.QueryRow(`SELECT count(*) FROM tool_results`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Errorf("dry-run 写进了 %d 行", n)
+	}
+}
+
+// A column the target lacks but the source never filled is not data loss.
+//
+// tool_results carries a vestigial `label` from a schema nobody writes any
+// more — every row has the empty string in it. Refusing to migrate over it
+// would stop every real upgrade for no reason, and it did: the first
+// end-to-end run of this migration against a real database failed on it.
+func TestAnEmptyColumnTheTargetLacksDoesNotStopTheCopy(t *testing.T) {
+	dsn := os.Getenv("JELLY_PG_DSN")
+	if dsn == "" {
+		t.Skip("set JELLY_PG_DSN")
+	}
+	exclusive(t, dsn)
+	ctx := context.Background()
+
+	srcPath := filepath.Join(t.TempDir(), "state.db")
+	seedSQLite(t, srcPath)
+	src, err := storage.Open(srcPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer src.Close()
+	if _, err := src.Exec(
+		`ALTER TABLE task_runs ADD COLUMN vestigial TEXT NOT NULL DEFAULT ''`); err != nil {
+		t.Fatal(err)
+	}
+	dst := freshPostgres(t, dsn)
+
+	var notes []string
+	rep, err := migrate.Run(ctx, src, dst, migrate.Options{
+		Notes: func(s string) { notes = append(notes, s) },
+	})
+	if err != nil {
+		t.Fatalf("一个全空的列就让迁移停住了: %v", err)
+	}
+	if rep.Copied["task_runs"] != 1 {
+		t.Errorf("task_runs 复制了 %d 行，want 1", rep.Copied["task_runs"])
+	}
+	// Said out loud, because a schema difference is worth knowing about even
+	// when nothing is lost by it.
+	var mentioned bool
+	for _, n := range notes {
+		if strings.Contains(n, "vestigial") {
+			mentioned = true
+		}
+	}
+	if !mentioned {
+		t.Errorf("跳过的空列没有被说出来: %v", notes)
+	}
+}
+
+// A column with real content still stops it.
+func TestAColumnWithValuesTheTargetLacksStillStopsTheCopy(t *testing.T) {
+	dsn := os.Getenv("JELLY_PG_DSN")
+	if dsn == "" {
+		t.Skip("set JELLY_PG_DSN")
+	}
+	exclusive(t, dsn)
+	ctx := context.Background()
+
+	srcPath := filepath.Join(t.TempDir(), "state.db")
+	seedSQLite(t, srcPath)
+	src, err := storage.Open(srcPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer src.Close()
+	if _, err := src.Exec(
+		`ALTER TABLE task_runs ADD COLUMN only_here TEXT NOT NULL DEFAULT 'something'`); err != nil {
+		t.Fatal(err)
+	}
+	dst := freshPostgres(t, dsn)
+
+	_, err = migrate.Run(ctx, src, dst, migrate.Options{})
+	var dropped *migrate.DroppedColumnsError
+	if !errors.As(err, &dropped) {
+		t.Fatalf("有值的列被静默丢掉了: %v", err)
+	}
+	if !slices.Contains(dropped.Columns, "only_here") {
+		t.Errorf("报告的不是那一列: %+v", dropped)
+	}
+}
+
+// dropADKTables removes the tables ADK creates, leaving the ones the migration
+// file defines — the state an operator is in after running the migration and
+// before starting the service.
+func dropADKTables(t *testing.T, db *storage.DB) {
+	t.Helper()
+	for _, tbl := range []string{"events", "sessions", "app_states", "user_states"} {
+		if _, err := db.Exec(`DROP TABLE IF EXISTS ` + tbl + ` CASCADE`); err != nil {
+			t.Fatalf("drop %s: %v", tbl, err)
+		}
 	}
 }

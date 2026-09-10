@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"github.com/jelly-agent/jelly-agent/internal/migrate"
 	"os"
 	"path/filepath"
 	"slices"
@@ -49,13 +50,23 @@ func TestSQLiteAndPostgresSchemasAgree(t *testing.T) {
 	}
 	t.Cleanup(func() { pg.Close() })
 
-	// ADK's four are not compared: they are created by GORM AutoMigrate on
-	// both sides from one set of models, so they cannot drift the way two
-	// hand-written definitions can.
-	for _, table := range []string{
-		"tool_results", "tool_result_seq", "tool_calls",
-		"task_runs", "schedule_runs", "memory_fts",
-	} {
+	// Derived from what the migration command copies rather than listed
+	// here. A hand-written list is a third place to forget a table, and
+	// forgetting one means its two definitions drift with nothing watching.
+	//
+	// ADK's four are excluded: they are created by GORM AutoMigrate on both
+	// sides from one set of models, so they cannot drift the way two
+	// hand-written definitions can. memory_fts is added because it is not
+	// copied — it is a derived index, rebuilt rather than migrated — but its
+	// two definitions are still hand-written.
+	adk := map[string]bool{"sessions": true, "events": true, "app_states": true, "user_states": true}
+	tables := []string{"memory_fts"}
+	for _, t := range migrate.Tables {
+		if !adk[t] {
+			tables = append(tables, t)
+		}
+	}
+	for _, table := range tables {
 		t.Run(table, func(t *testing.T) {
 			a, err := storage.Columns(lite, table)
 			if err != nil {

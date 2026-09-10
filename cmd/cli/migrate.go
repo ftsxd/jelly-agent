@@ -89,6 +89,7 @@ func newMigrateCmd() *cobra.Command {
 			rep, err := migrate.Run(cmd.Context(), src, dst, migrate.Options{
 				DryRun:               dryRun,
 				AllowDroppingColumns: allowDrop,
+				Notes:                func(msg string) { fmt.Fprintln(os.Stderr, "  "+msg) },
 				Progress: func(table string, copied, skipped int64) {
 					fmt.Fprintf(w, "%s\t%d\t%d\n", table, copied, skipped)
 					w.Flush()

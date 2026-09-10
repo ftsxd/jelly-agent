@@ -806,7 +806,15 @@ func (e *Engine) StateDB() (*storage.DB, error) {
 		// A deployment upgrading across the move from console.yaml to the
 		// table has one, holding decisions somebody made. Once, and only into
 		// an empty table — see ImportConsoleFile.
-		if dir := e.ToolMetadataDir(); dir != "" {
+		//
+		// Only when the two came from the same place. ToolMetadataDir falls
+		// back to ~/.jelly-agent/tools when nothing is configured, so a
+		// process pointed at some other database — a test with a temp file,
+		// a one-off run against a copy — would otherwise import the real
+		// deployment's file into its own database and rename the original out
+		// of the way. Reading it there is harmless; renaming it is not, and
+		// it happened.
+		if dir := e.importableMetadataDir(); dir != "" {
 			path := filepath.Join(dir, toolreg.ConsoleFile)
 			switch n, err := toolreg.ImportConsoleFile(context.Background(), e.stateDB, path); {
 			case err != nil:
@@ -1552,6 +1560,27 @@ func (e *Engine) ReloadToolMetadata() {
 	store.Swap(buildRegistry(e.metadataSources()))
 }
 
+// importableMetadataDir is the metadata directory this deployment configured,
+// or empty when it did not configure one.
+//
+// The difference from ToolMetadataDir matters for exactly one caller: the
+// console.yaml import, which moves a file out of the way. Reading a file
+// nobody pointed at is harmless; renaming it is not.
+//
+// ToolMetadataDir falls back to ~/.jelly-agent/tools when nothing is
+// configured, so a process pointed at some other database would otherwise
+// import the real deployment's file and rename the original. That happened,
+// to a developer's own machine, during a test run.
+func (e *Engine) importableMetadataDir() string {
+	if e.cfg != nil && strings.TrimSpace(e.cfg.Tools.MetadataDir) != "" {
+		return e.cfg.Tools.MetadataDir
+	}
+	if dir := e.configDir(); dir != "" {
+		return filepath.Join(dir, "tools")
+	}
+	return ""
+}
+
 // metadataSources is where tool metadata comes from, in layers.
 //
 // Builtins and the files under the metadata directory declare tools; the
@@ -1597,7 +1626,27 @@ func (e *Engine) stateReference() (string, error) {
 	if e.stateRef != "" {
 		return e.stateRef, nil
 	}
+	// Beside the config file, the same way the metadata directory is.
+	//
+	// These two used to disagree: config.ToolMetadataDir derives from where
+	// the config came from, while DefaultDBPath was hardcoded at
+	// ~/.jelly-agent/state.db. A deployment whose config lived anywhere else
+	// therefore had its declarations read from one place and its database in
+	// another — and the console.yaml import, which reads one and writes the
+	// other, moved a file out of one deployment and put its rows in another.
+	// That happened, to a developer's own machine, during a test run.
+	if p := e.configDir(); p != "" {
+		return filepath.Join(p, "state.db"), nil
+	}
 	return jellysession.DefaultDBPath()
+}
+
+// configDir is the directory the running config came from, or empty.
+func (e *Engine) configDir() string {
+	if e.cfg == nil || e.cfg.SourcePath == "" || e.cfg.SourcePath == "(env)" {
+		return ""
+	}
+	return filepath.Dir(e.cfg.SourcePath)
 }
 
 // StateRef names the state database. Empty means the shared default, which

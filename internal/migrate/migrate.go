@@ -49,6 +49,13 @@ var Tables = []string{
 	"tool_calls",
 	"task_runs",
 	"schedule_runs",
+	// The console's own layer and its audit log. They were a file
+	// (console.yaml) until this branch moved them into the database, so a
+	// deployment migrating from a SQLite that already had them would
+	// otherwise leave every declaration — and every record of who changed
+	// what — behind.
+	"tool_decls",
+	"tool_decl_log",
 }
 
 // Report is what one run copied, per table.
@@ -88,6 +95,16 @@ type Options struct {
 	AllowDroppingColumns bool
 	// Progress, when set, is called after each table.
 	Progress func(table string, copied, skipped int64)
+	// Notes, when set, receives remarks that are not failures — a column the
+	// target does not have but nothing is lost by skipping, say.
+	Notes func(string)
+}
+
+// Note passes a remark to the caller, if it wants them.
+func (o Options) Note(s string) {
+	if o.Notes != nil {
+		o.Notes(s)
+	}
 }
 
 const defaultBatch = 200

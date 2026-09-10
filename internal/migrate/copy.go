@@ -31,21 +31,50 @@ func copyTable(ctx context.Context, src, dst *storage.DB, table string, opts Opt
 		return 0, 0, fmt.Errorf("target columns: %w", err)
 	}
 	if len(dstTypes) == 0 {
+		if opts.DryRun {
+			// A dry run is asked before the target is ready — that is what it
+			// is for. Reporting the count it would copy is more useful than
+			// refusing to look, and it writes nothing either way.
+			n, err := countRows(ctx, src, table)
+			return n, 0, err
+		}
 		return 0, 0, fmt.Errorf("目标库没有这张表 —— 先跑 migrations/postgres/0001_init.sql，"+
 			"ADK 的 sessions/events/app_states/user_states 由程序启动时 AutoMigrate 建（表: %s）", table)
 	}
 
 	cols := make([]string, 0, len(srcCols))
-	var dropped []string
+	var dropped, empty []string
 	for _, c := range srcCols {
 		if _, ok := dstTypes[c]; ok {
 			cols = append(cols, c)
 			continue
 		}
-		dropped = append(dropped, c)
+		// Only a column that actually holds something. tool_results carries a
+		// vestigial `label` from a schema nobody writes any more — every row
+		// has the empty string in it — and refusing to migrate over a column
+		// with nothing in it would stop every real upgrade for no reason.
+		//
+		// Checked rather than listed: a hardcoded exception would be a fourth
+		// place to describe the schema, and it would go stale.
+		has, err := columnHasValues(ctx, src, table, c)
+		if err != nil {
+			return 0, 0, err
+		}
+		if has {
+			dropped = append(dropped, c)
+		} else {
+			empty = append(empty, c)
+		}
 	}
 	if len(cols) == 0 {
 		return 0, 0, fmt.Errorf("两边没有共同的列")
+	}
+	if len(empty) > 0 {
+		// Worth saying: a column the target does not have is a schema
+		// difference somebody may want to know about, even when nothing is
+		// lost by ignoring it.
+		opts.Note(fmt.Sprintf("%s 跳过了目标库没有的空列 %s（源库里这些列没有任何值）",
+			table, strings.Join(empty, ", ")))
 	}
 	if len(dropped) > 0 && !opts.AllowDroppingColumns {
 		// Refused, not skipped.
@@ -147,4 +176,22 @@ func insertBatch(ctx context.Context, dst *storage.DB, table string, cols []stri
 		return int64(len(batch)), nil
 	}
 	return n, nil
+}
+
+// columnHasValues reports whether any row has something in this column.
+//
+// "Something" excludes NULL and the empty string: a column left at its zero
+// value by every row carries no information, and treating it as data to
+// preserve would block a migration over a schema difference that costs
+// nothing.
+func columnHasValues(ctx context.Context, db *storage.DB, table, column string) (bool, error) {
+	var n int
+	err := db.QueryRowContext(ctx,
+		`SELECT count(*) FROM `+table+` WHERE `+column+` IS NOT NULL AND `+column+` <> ''`).Scan(&n)
+	if err != nil {
+		// A type that cannot be compared to '' (a blob, a number) is a column
+		// with real content as far as this is concerned.
+		return true, nil //nolint:nilerr // see above
+	}
+	return n > 0, nil
 }

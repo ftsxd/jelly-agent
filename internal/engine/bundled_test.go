@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -86,5 +87,124 @@ func TestBundledDeclarationsCarryNoBackend(t *testing.T) {
 		if !visible[name] {
 			t.Errorf("%s 对 Available(nil) 不可见", name)
 		}
+	}
+}
+
+// The console.yaml import must not touch a directory this process did not
+// configure.
+//
+// ToolMetadataDir falls back to ~/.jelly-agent/tools when nothing is set, so
+// a process pointed at some other database — a test with a temp file, a
+// one-off run against a copy — would import the real deployment's file into
+// its own database and rename the original out of the way. Reading it there
+// is harmless; renaming it is not, and it happened: a test run moved this
+// developer's console.yaml to console.yaml.imported while writing the rows
+// into a temporary database.
+func TestTheImportOnlyTouchesAConfiguredDirectory(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		cfg  *config.Config
+		want bool
+	}{
+		{"什么都没配", &config.Config{}, false},
+		{"只配了库", &config.Config{Storage: config.Storage{DSN: "/tmp/x.db"}}, false},
+		{"显式配了元数据目录", func() *config.Config {
+			c := &config.Config{}
+			c.Tools.MetadataDir = "/tmp/tools"
+			return c
+		}(), true},
+		{"配置来自文件（目录随它推导）", &config.Config{SourcePath: "/etc/jelly/config.yaml"}, true},
+		{"配置来自环境变量", &config.Config{SourcePath: "(env)"}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := New(tc.cfg)
+			if got := e.importableMetadataDir() != ""; got != tc.want {
+				t.Errorf("importable = %v, want %v (dir=%q)", got, tc.want, e.importableMetadataDir())
+			}
+		})
+	}
+}
+
+// And the fallback still applies to reading, which was never the problem.
+func TestReadingStillFallsBackToTheDefaultDirectory(t *testing.T) {
+	e := New(&config.Config{})
+	if e.ToolMetadataDir() == "" {
+		t.Error("默认目录没了 —— 这会让不配置任何东西的部署读不到自己的声明")
+	}
+}
+
+// The state database sits beside the config, the same way the metadata
+// directory does.
+//
+// They used to disagree: config.ToolMetadataDir derives from where the config
+// came from, while DefaultDBPath was hardcoded at ~/.jelly-agent/state.db. A
+// deployment whose config lived anywhere else read its declarations from one
+// place and kept its database in another — and the console.yaml import, which
+// reads one and writes the other, then moved a file out of one deployment and
+// put its rows in another.
+func TestTheStateDatabaseSitsBesideTheConfig(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	elsewhere := t.TempDir()
+
+	e := New(&config.Config{SourcePath: filepath.Join(elsewhere, "config.yaml")})
+	got, err := e.stateReference()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Join(elsewhere, "state.db"); got != want {
+		t.Errorf("state db = %q, want %q", got, want)
+	}
+
+	// With no config file it is still the home default, which is what an
+	// untouched deployment gets.
+	bare := New(&config.Config{})
+	got, err = bare.stateReference()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Join(home, ".jelly-agent", "state.db"); got != want {
+		t.Errorf("no-config state db = %q, want %q", got, want)
+	}
+}
+
+// A process that did not configure a metadata directory must not rename a
+// file in the default one.
+//
+// This is the failure as it happened: a test run, whose engine had a temp
+// database and no metadata directory, imported this developer's real
+// ~/.jelly-agent/tools/console.yaml into that temp database and renamed the
+// original to console.yaml.imported. The rows went nowhere useful; the
+// deployment's declarations stopped applying.
+func TestOpeningWithNoConfiguredDirectoryLeavesTheDefaultOneAlone(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	tools := filepath.Join(home, ".jelly-agent", "tools")
+	if err := os.MkdirAll(tools, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	console := filepath.Join(tools, "console.yaml")
+	const body = "tools:\n  - name: query_range\n    server: n9e-mcp\n    suites: [promql]\n"
+	if err := os.WriteFile(console, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// A database somewhere else entirely, and no metadata directory named.
+	e := New(&config.Config{Storage: config.Storage{
+		DSN: filepath.Join(t.TempDir(), "state.db"),
+	}})
+	t.Cleanup(e.Close)
+	if _, err := e.StateDB(); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := os.Stat(console); err != nil {
+		t.Errorf("没有配置过的目录里的 console.yaml 被动了: %v", err)
+	}
+	if got, err := os.ReadFile(console); err == nil && string(got) != body {
+		t.Error("文件内容被改了")
+	}
+	if _, err := os.Stat(console + ".imported"); err == nil {
+		t.Error("文件被改名了 —— 这正是那次事故")
 	}
 }
