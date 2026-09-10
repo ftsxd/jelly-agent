@@ -1,9 +1,13 @@
 package server
 
 import (
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
+	"regexp"
+	"strings"
 	"testing"
 	"time"
 )
@@ -95,5 +99,97 @@ func TestTheReplacedEngineIsClosedOnceTheRequestFinishes(t *testing.T) {
 			t.Fatal("请求跑完了，被替换的引擎还没关 —— 每次保存配置都漏一套连接池和 MCP 子进程")
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// Every handler has to reach the engine through the request, not through
+// whatever is current.
+//
+// The pin only guarantees the engine a request *started* on. A handler that
+// calls s.engine() gets the one that is current at that moment, which after a
+// config save is a different engine — and after a second one, an engine that
+// may already have closed its database handles while this request is still
+// using them. The middleware cannot prevent that on its own; it only makes
+// the right engine available, and this is what makes handlers take it.
+//
+// s.engine().Config() is allowed: a *config.Config is plain data that outlives
+// the engine it came from, so reading the newest one mid-request is safe.
+func TestHandlersReachTheEngineThroughTheRequest(t *testing.T) {
+	files, err := filepath.Glob(filepath.Join("*.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// s.engine() followed by anything other than .Config().
+	live := regexp.MustCompile(`s\.engine\(\)(?:\.Config\(\))?`)
+	for _, f := range files {
+		if strings.HasSuffix(f, "_test.go") || f == "enginepin.go" {
+			continue
+		}
+		src, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i, line := range strings.Split(string(src), "\n") {
+			for _, m := range live.FindAllString(line, -1) {
+				if m == "s.engine()" {
+					t.Errorf("%s:%d 用 s.engine() 取了引擎持有的东西 —— "+
+						"请求里要用 s.engineFor(r)，后台任务用 s.pin()：\n\t%s",
+						f, i+1, strings.TrimSpace(line))
+				}
+			}
+		}
+	}
+}
+
+// Two config saves during one request, which is what the middleware alone
+// does not survive.
+//
+// The handler here takes its database handle the way every handler does —
+// s.stateDB(w, r) — but only after the first save. If that resolves to
+// "whatever is current" it hands back the second engine, which nothing has
+// pinned; the second save then retires it with no users and closes it, and
+// the handle dies in the middle of a request that is still running.
+func TestAHandlerKeepsItsDatabaseAcrossTwoConfigSaves(t *testing.T) {
+	s, _ := newProviderServer(t)
+	s.ref.eng.SetStateRef(filepath.Join(t.TempDir(), "state.db"))
+
+	started := make(chan struct{})
+	firstSave := make(chan struct{})
+	secondSave := make(chan struct{})
+	done := make(chan error, 1)
+
+	h := s.pinEngine(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(started)
+		<-firstSave
+		db, ok := s.stateDB(w, r) // the ordinary way a handler gets one
+		if !ok {
+			done <- errors.New("stateDB 打不开")
+			return
+		}
+		<-secondSave
+		var one int
+		done <- db.QueryRow("SELECT 1").Scan(&one)
+	}))
+	go h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", "/api/health", nil))
+
+	<-started
+	if err := s.reload(); err != nil {
+		t.Fatal(err)
+	}
+	close(firstSave)
+	// Give the handler time to take its handle before the second save.
+	time.Sleep(100 * time.Millisecond)
+	if err := s.reload(); err != nil {
+		t.Fatal(err)
+	}
+	close(secondSave)
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("请求还在跑，它的状态库就被关了: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("请求没结束")
 	}
 }

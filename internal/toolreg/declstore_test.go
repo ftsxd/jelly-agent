@@ -479,38 +479,99 @@ func TestTwoSavesForOneToolDoNotEraseEachOther(t *testing.T) {
 	}
 }
 
-// Two first-saves for a tool nobody has declared have no row to lock, and the
-// primary key is what keeps them from losing each other.
+// The same interleaving on a tool nobody has declared yet.
+//
+// This is the case a row lock cannot cover, and the reason lockDecl locks a
+// key instead: there is no row for SELECT … FOR UPDATE to hold, so both saves
+// read nothing, both build a row out of nothing, and the second insert's
+// DO UPDATE assigns its own columns over the first one's. Nothing fails and
+// nothing is logged — the field is just gone.
+//
+// Forced rather than raced, for the same reason as the test above: two
+// goroutines started together almost never land inside each other's
+// read-write window, so a racing version of this passes with the bug in.
 func TestTwoFirstSavesForOneToolMerge(t *testing.T) {
 	dsn := os.Getenv("JELLY_PG_DSN")
 	if dsn == "" {
-		t.Skip("需要 JELLY_PG_DSN")
+		t.Skip("需要 JELLY_PG_DSN：SQLite 一次只有一个写者，这个交错在那里不可能发生")
 	}
 	exclusive(t, dsn)
 	ctx := context.Background()
-	db := declDB(t)
 
-	done := make(chan error, 2)
-	start := make(chan struct{})
-	for _, d := range []Decl{
-		{Server: "n9e", Name: "brand_new", Suites: list("promql")},
-		{Server: "n9e", Name: "brand_new", Produces: str("metric_series")},
-	} {
-		go func(d Decl) { <-start; done <- SaveDecl(ctx, db, d, "concurrent") }(d)
+	first, second := twoHandles(t, dsn)
+
+	inWindow := make(chan struct{})
+	letGo := make(chan struct{})
+	restore := holdAfterRead(t, inWindow, letGo)
+	defer restore()
+
+	aDone := make(chan error, 1)
+	go func() {
+		aDone <- SaveDecl(ctx, first, Decl{
+			Server: "n9e", Name: "brand_new", Suites: list("promql"),
+		}, "A")
+	}()
+	<-inWindow // A has read nothing, and has not written
+
+	bDone := make(chan error, 1)
+	go func() {
+		bDone <- SaveDecl(ctx, second, Decl{
+			Server: "n9e", Name: "brand_new", Produces: str("metric_series"),
+		}, "B")
+	}()
+	// B is either waiting on A's key lock, or (without it) already past its
+	// own read. Either way, let A finish.
+	time.Sleep(150 * time.Millisecond)
+	close(letGo)
+
+	if err := <-aDone; err != nil {
+		t.Fatalf("A: %v", err)
 	}
-	close(start)
-	for range 2 {
-		if err := <-done; err != nil {
-			t.Fatalf("save: %v", err)
+	if err := <-bDone; err != nil {
+		t.Fatalf("B: %v", err)
+	}
+
+	// Both fields, not "at least one".
+	//
+	// An earlier version of this test accepted losing one, on the reasoning
+	// that neither save had a row to patch — which is a description of the
+	// bug, written down as the expectation. A patch that reports success and
+	// silently does not apply is what this table exists to prevent, and it is
+	// no more acceptable the first time a tool is declared than the hundredth.
+	got := loadOne(t, first, "n9e", "brand_new")
+	if !slices.Equal(got.Suites, []string{"promql"}) {
+		t.Errorf("suites 被另一条首次保存冲掉了: %+v", got)
+	}
+	if got.Produces != "metric_series" {
+		t.Errorf("produces 被另一条首次保存冲掉了: %+v", got)
+	}
+}
+
+// twoHandles gives two independent connections to one empty declaration
+// table. Two, because the interleaving these tests force needs two
+// transactions open at once and this package's handle allows one connection.
+func twoHandles(t *testing.T, dsn string) (*storage.DB, *storage.DB) {
+	t.Helper()
+	open := func() *storage.DB {
+		db, err := storage.Open(dsn)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { db.Close() })
+		return db
+	}
+	first, second := open(), open()
+	if err := EnsureSchema(first); err != nil {
+		t.Fatal(err)
+	}
+	clear := func() {
+		for _, tbl := range []string{"tool_decl_log", "tool_decls"} {
+			first.Exec(`DELETE FROM ` + tbl)
 		}
 	}
-	// One of them may lose its field to the other's insert — the row did not
-	// exist for either to patch. What must not happen is a failed save or a
-	// row with neither field.
-	got := loadOne(t, db, "n9e", "brand_new")
-	if len(got.Suites) == 0 && got.Produces == "" {
-		t.Error("两个字段都没有留下")
-	}
+	clear()
+	t.Cleanup(clear)
+	return first, second
 }
 
 // holdAfterRead makes the first save through SaveDecl pause between reading

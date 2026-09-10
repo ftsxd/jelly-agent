@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -143,6 +144,10 @@ func (sqliteDialect) columnTypes(db *DB, table string) (map[string]string, error
 func (sqliteDialect) primaryKey(db *DB, table string) ([]string, error) {
 	return scanStrings(db, `SELECT name FROM pragma_table_info(?) WHERE pk > 0 ORDER BY pk`, table)
 }
+
+// lockKey does nothing: SQLite admits one writer at a time, so a transaction
+// that has begun writing already owns every key there is.
+func (sqliteDialect) lockKey(context.Context, *Tx, int64) error { return nil }
 
 // rowLocks is false: SQLite serialises writers, so there is nothing for a row
 // lock to prevent — and FOR UPDATE is not syntax it accepts.

@@ -25,6 +25,15 @@ type Conflict struct {
 	Target string
 }
 
+// keyText renders a key for a person, which is a different job from keyOf's.
+func keyText(row []any, keyIdx []int) string {
+	parts := make([]string, len(keyIdx))
+	for i, k := range keyIdx {
+		parts[i] = canon(row[k])
+	}
+	return strings.Join(parts, ",")
+}
+
 func (c Conflict) String() string {
 	if c.Column == "" {
 		return fmt.Sprintf("%s[%s]: 目标库里根本没有这一行，插入却被某个唯一约束挡住了", c.Table, c.Key)
@@ -60,13 +69,26 @@ func (e *ConflictError) Error() string {
 	return strings.TrimRight(b.String(), "\n")
 }
 
-// keyOf renders one row's primary-key values.
+// keyOf renders one row's primary-key values as a string that stands for the
+// row's identity.
+//
+// Length-prefixed rather than joined by a separator, because the result is
+// used as a map key to match target rows against source rows and a separator
+// is not injective: tool_results is keyed by five text columns, so ("a,b","c")
+// and ("a","b,c") join to the same string. Two different rows colliding there
+// means the copier compares one against the other's content and reports a
+// conflict that is not one — or, the other way round, matches a row it should
+// have flagged. No text can produce another key's encoding when each part
+// carries its own length.
 func keyOf(row []any, keyIdx []int) string {
-	parts := make([]string, len(keyIdx))
-	for i, k := range keyIdx {
-		parts[i] = canon(row[k])
+	var b strings.Builder
+	for _, k := range keyIdx {
+		v := canon(row[k])
+		b.WriteString(strconv.Itoa(len(v)))
+		b.WriteByte(':')
+		b.WriteString(v)
 	}
-	return strings.Join(parts, ",")
+	return b.String()
 }
 
 // compareExisting reads back the rows the insert did not add and reports the
@@ -115,7 +137,7 @@ func compareExisting(ctx context.Context, dst *storage.DB, table string, cols []
 			// not there and the copy did not say so.
 			total++
 			if len(out) < maxConflictExamples {
-				out = append(out, Conflict{Table: table, Key: key})
+				out = append(out, Conflict{Table: table, Key: keyText(row, keyIdx)})
 			}
 			continue
 		}
@@ -126,7 +148,7 @@ func compareExisting(ctx context.Context, dst *storage.DB, table string, cols []
 			}
 			total++
 			if len(out) < maxConflictExamples {
-				out = append(out, Conflict{Table: table, Key: key, Column: c, Source: s, Target: d})
+				out = append(out, Conflict{Table: table, Key: keyText(row, keyIdx), Column: c, Source: s, Target: d})
 			}
 			break // one column is enough to know this row differs
 		}

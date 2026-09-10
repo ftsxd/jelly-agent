@@ -59,8 +59,8 @@ const artifactMinBytes = 2048
 // Built once per request from the registry rather than looked up per call:
 // the registry snapshot is a slice, and scanning it for every call would be
 // quadratic in the length of the run.
-func (s *Server) toolInfoResolver() func(string) ToolInfo {
-	reg := s.engine().ToolRegistry()
+func (s *Server) toolInfoResolver(eng *engine.Engine) func(string) ToolInfo {
+	reg := eng.ToolRegistry()
 	cache := map[string]ToolInfo{}
 	return func(tool string) ToolInfo {
 		if info, ok := cache[tool]; ok {
@@ -93,7 +93,7 @@ func (s *Server) tasksOf(r *http.Request, svc adksession.Service, id string, inf
 		return nil, err
 	}
 	var links map[string]string
-	if db, err := s.engine().StateDB(); err == nil {
+	if db, err := s.engineFor(r).StateDB(); err == nil {
 		if got, err := task.OfSession(db, id); err == nil {
 			links = got
 		}
@@ -221,10 +221,10 @@ func (s *Server) foldWithStatus(id string, frames []map[string]any,
 // run whose tools all failed still counts as work, and losing the whole list
 // because that probe could not be made would be a worse outcome than
 // occasionally filing such a run as conversation.
-func (s *Server) recordedRuns(ctx context.Context, sessionIDs []string) map[string]map[string]bool {
+func (s *Server) recordedRuns(ctx context.Context, eng *engine.Engine, sessionIDs []string) map[string]map[string]bool {
 	probe := s.recordsProbe
 	if probe == nil {
-		store, err := s.engine().Records()
+		store, err := eng.Records()
 		if err != nil || store == nil {
 			return nil
 		}
@@ -245,7 +245,7 @@ func (s *Server) recordedRuns(ctx context.Context, sessionIDs []string) map[stri
 // service for one session at a time.
 func (s *Server) handleTasks(w http.ResponseWriter, r *http.Request) {
 
-	infoOf := s.toolInfoResolver()
+	infoOf := s.toolInfoResolver(s.engineFor(r))
 	wantStatus := strings.TrimSpace(r.URL.Query().Get("status"))
 	wantType := strings.TrimSpace(r.URL.Query().Get("type"))
 	limit := queryInt(r, "limit", 50, 1, 200)
@@ -262,7 +262,7 @@ func (s *Server) handleTasks(w http.ResponseWriter, r *http.Request) {
 		sessionsTotal int
 		exhausted     bool
 	)
-	stateDB, ok := s.stateDB(w)
+	stateDB, ok := s.stateDB(w, r)
 	if !ok {
 		return
 	}
@@ -283,12 +283,12 @@ func (s *Server) handleTasks(w http.ResponseWriter, r *http.Request) {
 		for _, m := range metas {
 			ids = append(ids, m.ID)
 		}
-		recorded := s.recordedRuns(r.Context(), ids)
+		recorded := s.recordedRuns(r.Context(), s.engineFor(r), ids)
 		// One query for the whole page rather than one per session. Same
 		// reason as recordedRuns above it: a round trip per row is free
 		// against a local file and 20ms against PostgreSQL.
 		links := map[string]map[string]string{}
-		if db, err := s.engine().StateDB(); err == nil {
+		if db, err := s.engineFor(r).StateDB(); err == nil {
 			if got, err := task.OfSessions(db, ids); err == nil {
 				links = got
 			}
@@ -404,12 +404,12 @@ func summarizeSteps(steps []Step) []Step {
 // handleTask returns one task with its steps, durations, artifacts and reply.
 func (s *Server) handleTask(w http.ResponseWriter, r *http.Request) {
 	sessionID, round := r.PathValue("session"), r.PathValue("round")
-	svc, err := s.engine().NewSessionService()
+	svc, err := s.engineFor(r).NewSessionService()
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	tasks, err := s.tasksOf(r, svc, sessionID, s.toolInfoResolver())
+	tasks, err := s.tasksOf(r, svc, sessionID, s.toolInfoResolver(s.engineFor(r)))
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -435,7 +435,7 @@ func (s *Server) handleTask(w http.ResponseWriter, r *http.Request) {
 	// Keyed by run and call together. A merged task holds more than one run,
 	// and a call id is only unique inside its own — keying by the call alone
 	// gave every run's first call whichever duration was written last.
-	if tr := s.engine().Metrics(); tr != nil {
+	if tr := s.engineFor(r).Metrics(); tr != nil {
 		byCall := map[string]int{}
 		for _, run := range t.Runs {
 			rows, err := tr.ByInvocation(sessionID, run)
@@ -528,7 +528,7 @@ func (s *Server) artifactsOf(r *http.Request, sessionID string, t *Task) ([]Arti
 	}
 
 	out, index := []Artifact{}, map[string]ResultRef{}
-	store, err := s.engine().Records()
+	store, err := s.engineFor(r).Records()
 	if err != nil {
 		return out, index
 	}

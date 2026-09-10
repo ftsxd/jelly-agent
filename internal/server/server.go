@@ -121,8 +121,8 @@ func (s *Server) engine() *engine.Engine {
 // the process — the stores that live in this database used to open one per
 // call, which costs nothing against a local file and a full connection
 // handshake against PostgreSQL.
-func (s *Server) stateDB(w http.ResponseWriter) (*storage.DB, bool) {
-	db, err := s.engine().StateDB()
+func (s *Server) stateDB(w http.ResponseWriter, r *http.Request) (*storage.DB, bool) {
+	db, err := s.engineFor(r).StateDB()
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "打不开状态数据库: "+err.Error())
 		return nil, false

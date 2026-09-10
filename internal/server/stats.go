@@ -88,7 +88,7 @@ type memoryStat struct {
 // reads each session in full (via Get) so UsageMetadata and tool calls are
 // available; the local store is single-user and small, so the cost is modest.
 func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
-	eng := s.engine()
+	eng := s.engineFor(r)
 	svc, err := eng.NewSessionService()
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())

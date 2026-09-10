@@ -14,8 +14,8 @@ var agentNameRe = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
 
 // handleListAgents returns the defined agents and the default agent name so the
 // web "Agents" page can render the coordinator/sub-agent tree.
-func (s *Server) handleListAgents(w http.ResponseWriter, _ *http.Request) {
-	cfg := s.engine().Config()
+func (s *Server) handleListAgents(w http.ResponseWriter, r *http.Request) {
+	cfg := s.engineFor(r).Config()
 	agents := cfg.Agents
 	if agents == nil {
 		agents = []config.AgentDef{}

@@ -1,6 +1,7 @@
 package server
 
 import (
+	"github.com/jelly-agent/jelly-agent/internal/engine"
 	"net/http"
 	"os"
 	"sort"
@@ -33,7 +34,7 @@ type mcpInput struct {
 // handleListMCP lists configured MCP servers. Secret values (env/headers) are
 // never sent to the browser — only their keys, so the UI can show what's set
 // without leaking tokens.
-func (s *Server) handleListMCP(w http.ResponseWriter, _ *http.Request) {
+func (s *Server) handleListMCP(w http.ResponseWriter, r *http.Request) {
 	type mcpDTO struct {
 		Name       string   `json:"name"`
 		Transport  string   `json:"transport"`
@@ -54,8 +55,8 @@ func (s *Server) handleListMCP(w http.ResponseWriter, _ *http.Request) {
 		RetryAt   string `json:"retry_at,omitempty"`
 		CheckedAt string `json:"checked_at,omitempty"`
 	}
-	servers := s.engine().Config().MCP
-	health := s.engine().MCPHealth()
+	servers := s.engineFor(r).Config().MCP
+	health := s.engineFor(r).MCPHealth()
 	out := make([]mcpDTO, 0, len(servers))
 	for _, m := range servers {
 		d := mcpDTO{
@@ -182,7 +183,7 @@ func (s *Server) handleTestMCP(w http.ResponseWriter, r *http.Request) {
 	// Inline spec lacks endpoint details → fall back to the configured server,
 	// whose env/header secrets are already expanded in the running engine.
 	if srv.Command == "" && srv.URL == "" {
-		if existing, ok := findMCP(s.engine().Config().MCP, srv.Name); ok {
+		if existing, ok := findMCP(s.engineFor(r).Config().MCP, srv.Name); ok {
 			srv = existing
 		}
 	}
@@ -204,7 +205,7 @@ func (s *Server) handleTestMCP(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":        true,
 		"tools":     tools,
-		"conflicts": s.toolConflicts(srv.Name, tools),
+		"conflicts": s.toolConflicts(s.engineFor(r), srv.Name, tools),
 	})
 }
 
@@ -220,8 +221,8 @@ type conflictReport struct {
 // Tools already registered for this same server are excluded from the check:
 // re-testing a configured server would otherwise report every one of its tools
 // as conflicting with itself.
-func (s *Server) toolConflicts(server string, tools []jellymcp.ToolInfo) []conflictReport {
-	reg := s.engine().ToolRegistry()
+func (s *Server) toolConflicts(eng *engine.Engine, server string, tools []jellymcp.ToolInfo) []conflictReport {
+	reg := eng.ToolRegistry()
 	if reg == nil || len(tools) == 0 {
 		return nil
 	}

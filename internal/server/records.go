@@ -46,10 +46,10 @@ func (s *Server) handleToolResult(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if !s.sessionStillThere(w, sessionID) {
+	if !s.sessionStillThere(w, r, sessionID) {
 		return
 	}
-	store, err := s.engine().Records()
+	store, err := s.engineFor(r).Records()
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -114,10 +114,10 @@ func (s *Server) handleToolResultSearch(w http.ResponseWriter, r *http.Request) 
 		writeErr(w, http.StatusBadRequest, "q 不能为空")
 		return
 	}
-	if !s.sessionStillThere(w, sessionID) {
+	if !s.sessionStillThere(w, r, sessionID) {
 		return
 	}
-	store, err := s.engine().Records()
+	store, err := s.engineFor(r).Records()
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -157,8 +157,8 @@ func (s *Server) handleToolResultSearch(w http.ResponseWriter, r *http.Request) 
 // someone may still be holding from before. A deleted session and a session
 // that never existed answer the same 404: telling them apart would tell a
 // caller which conversations used to be here.
-func (s *Server) sessionStillThere(w http.ResponseWriter, id string) bool {
-	db, got := s.stateDB(w)
+func (s *Server) sessionStillThere(w http.ResponseWriter, r *http.Request, id string) bool {
+	db, got := s.stateDB(w, r)
 	if !got {
 		return false
 	}

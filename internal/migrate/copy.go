@@ -230,11 +230,13 @@ func insertBatch(ctx context.Context, dst *storage.DB, table string, cols []stri
 			rows.Close()
 			return 0, nil, err
 		}
-		key := make([]string, len(vals))
-		for i, v := range vals {
-			key[i] = canon(v)
+		// Encoded by the same function the batch's rows are, or the two
+		// sides of the comparison below would not be comparable.
+		idx := make([]int, len(vals))
+		for i := range vals {
+			idx[i] = i
 		}
-		added[strings.Join(key, ",")] = true
+		added[keyOf(vals, idx)] = true
 	}
 	if err := rows.Err(); err != nil {
 		rows.Close()

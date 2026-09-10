@@ -179,8 +179,8 @@ type historyInput struct {
 
 // handleHistory reports the current compaction settings plus the defaults that
 // apply when a field is unset, so the form can show what is actually in force.
-func (s *Server) handleHistory(w http.ResponseWriter, _ *http.Request) {
-	cfg := s.engine().Config()
+func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request) {
+	cfg := s.engineFor(r).Config()
 	h := cfg.History
 	writeJSON(w, http.StatusOK, map[string]any{
 		"max_tokens":         h.MaxTokens, // null ⇒ default applies
@@ -189,7 +189,7 @@ func (s *Server) handleHistory(w http.ResponseWriter, _ *http.Request) {
 		"max_result_bytes":   cfg.Tools.MaxResultBytes, // 0 ⇒ no ceiling
 		// Reported so the form can say so rather than leaving the operator to
 		// discover it from a provider error that names nothing about tools.
-		"context_unguarded": s.engine().ContextUnguarded(),
+		"context_unguarded": s.engineFor(r).ContextUnguarded(),
 		"defaults": map[string]int{
 			"max_tokens":         history.DefaultMaxTokens,
 			"keep_recent":        history.DefaultKeepRecent,
@@ -273,8 +273,8 @@ func (s *Server) handleSetMemorySearch(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":       true,
-		"enabled":  s.engine().SearchEnabled(),
-		"top_k":    s.engine().Config().Memory.Search.TopK,
+		"enabled":  s.engineAfterReload().SearchEnabled(),
+		"top_k":    s.engineAfterReload().Config().Memory.Search.TopK,
 		"saved_to": path,
 	})
 }

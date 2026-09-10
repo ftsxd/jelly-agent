@@ -254,7 +254,7 @@ type platformInput struct {
 
 // handleListPlatforms lists configured platform bots with their live connection
 // state. The client secret is never sent — only whether one is set.
-func (s *Server) handleListPlatforms(w http.ResponseWriter, _ *http.Request) {
+func (s *Server) handleListPlatforms(w http.ResponseWriter, r *http.Request) {
 	type platformDTO struct {
 		Name       string            `json:"name"`
 		Type       string            `json:"type"`
@@ -269,7 +269,7 @@ func (s *Server) handleListPlatforms(w http.ResponseWriter, _ *http.Request) {
 		Detail     string            `json:"detail,omitempty"`      // error message when state == error
 		QR         string            `json:"qr,omitempty"`          // login QR (data URI) while awaiting scan
 	}
-	bots := s.engine().Config().Platforms
+	bots := s.engineFor(r).Config().Platforms
 	statuses := s.botStatuses()
 	out := make([]platformDTO, 0, len(bots))
 	for _, b := range bots {

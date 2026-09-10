@@ -795,3 +795,64 @@ func TestConflictDetectionOnPostgres(t *testing.T) {
 		})
 	}
 }
+
+// Two rows whose primary keys are different but join to the same string.
+//
+// tool_results is keyed by five text columns, and the copier matches target
+// rows to source rows through a rendering of that key. Joined by a comma,
+// ("s,1", "i") and ("s", "1,i") render identically — so a re-run compares one
+// row against the other's content and reports a conflict in a database where
+// nothing is wrong, which turns "run it again" into a dead end. Pure string
+// handling, so SQLite proves it; the dialect has nothing to do with it.
+func TestTwoRowsWhoseKeysJoinToTheSameStringAreNotConfused(t *testing.T) {
+	ctx := context.Background()
+	srcPath := filepath.Join(t.TempDir(), "src.db")
+	seedSQLite(t, srcPath)
+
+	store, err := record.Open(srcPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	for _, r := range []record.Record{
+		{Scope: record.Scope{AppName: app, UserID: user, SessionID: "s,1"},
+			InvocationID: "i", CallID: "c", Tool: "query_range",
+			At: time.Now(), Payload: []byte("第一行的内容")},
+		{Scope: record.Scope{AppName: app, UserID: user, SessionID: "s"},
+			InvocationID: "1,i", CallID: "c", Tool: "query_range",
+			At: time.Now(), Payload: []byte("第二行的内容，和上面完全不同")},
+	} {
+		if _, err := store.Put(ctx, r); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	src, err := storage.Open(srcPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer src.Close()
+	dst := emptiedSQLite(t, filepath.Join(t.TempDir(), "dst.db"))
+
+	if _, err := migrate.Run(ctx, src, dst, migrate.Options{}); err != nil {
+		t.Fatal(err)
+	}
+	// Nothing changed, so nothing may be reported.
+	if _, err := migrate.Run(ctx, src, dst, migrate.Options{}); err != nil {
+		t.Fatalf("两行的主键拼成了同一个字符串，被当成互相冲突: %v", err)
+	}
+
+	// …and a row that really did change is still caught, so the encoding did
+	// not simply stop matching anything.
+	if _, err := dst.Exec(`UPDATE tool_results SET payload = ? WHERE session_id = ?`,
+		[]byte("别人的产物"), "s,1"); err != nil {
+		t.Fatal(err)
+	}
+	var ce *migrate.ConflictError
+	if _, err := migrate.Run(ctx, src, dst, migrate.Options{}); !errors.As(err, &ce) {
+		t.Fatalf("改过的那一行没有被认出来: %v", err)
+	}
+	if c := ce.Conflicts[0]; !strings.Contains(c.Key, "s,1") {
+		t.Errorf("报错指的不是被改的那一行: %+v", c)
+	}
+}

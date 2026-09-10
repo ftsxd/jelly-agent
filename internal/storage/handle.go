@@ -120,3 +120,20 @@ func (d *DB) inTx(ctx context.Context, opts *sql.TxOptions, fn func(*Tx) error) 
 // connection per handle, so the sequence cannot interleave and the clause is
 // not valid syntax to send.
 func (t *Tx) SupportsRowLocks() bool { return t.dialect.rowLocks() }
+
+// LockKey blocks until this transaction owns key, and holds it until the
+// transaction ends.
+//
+// For serialising a read-modify-write on a row that may not exist yet, which
+// is the case no row lock covers: two transactions creating the same row both
+// find nothing to lock, both read nothing, and the second one's write erases
+// the first one's. The key stands in for the identity being created.
+//
+// Keys are a shared namespace. Derive one with storage.KeyOf so two callers
+// picking the same name contend and two picking different names do not.
+func (t *Tx) LockKey(ctx context.Context, key int64) error {
+	if err := t.dialect.lockKey(ctx, t, key); err != nil {
+		return fmt.Errorf("storage: lock key %d: %w", key, err)
+	}
+	return nil
+}

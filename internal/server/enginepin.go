@@ -112,13 +112,34 @@ func (s *Server) pinEngine(next http.Handler) http.Handler {
 
 // engineFor returns the engine pinned for this request.
 //
-// s.engine() returns whatever is current *now*, which after a config save is a
-// different engine from the one the request started on — fine for a handler
-// that reads one field, wrong for one that runs a turn against it. Handlers
-// invoked directly by a test have no pinned engine and fall back to current.
+// This is how a handler must reach anything the engine owns — the state
+// database handle, the delivery store, the search index, the tool registry,
+// the metrics recorder. s.engine() returns whatever is current *now*, and
+// after a config save that is a different engine from the one this request
+// was pinned to; the one it started on is guaranteed open until it returns,
+// and the current one is not. Two config saves during one request is all it
+// takes for the difference to be a closed handle.
+//
+// s.engine().Config() is the exception and the only one. A *config.Config is
+// plain data, handed out by value-semantics and outliving the engine that
+// read it, so reading the newest one mid-request is both safe and usually
+// what is wanted. TestHandlersReachTheEngineThroughTheRequest enforces the
+// line.
+//
+// Handlers invoked directly by a test have no pinned engine and fall back to
+// current.
 func (s *Server) engineFor(r *http.Request) *engine.Engine {
 	if eng, ok := r.Context().Value(engineCtxKey{}).(*engine.Engine); ok {
 		return eng
 	}
 	return s.engine()
 }
+
+// engineAfterReload returns the engine this handler's own save just installed.
+//
+// The one place a handler must not use its pinned engine. A save that calls
+// persist replaces the engine on purpose, and the pinned one is then stale by
+// construction — reporting its state back would answer "已关闭" to the request
+// that just turned the feature on. What comes back here is read immediately
+// and only for what it says about itself, never held.
+func (s *Server) engineAfterReload() *engine.Engine { return s.engine() }

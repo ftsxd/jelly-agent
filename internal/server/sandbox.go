@@ -33,8 +33,8 @@ type sandboxView struct {
 
 // handleSandbox returns the current sandbox policy (the execution envelope for
 // skill scripts) so the web UI can edit it without touching config.yaml.
-func (s *Server) handleSandbox(w http.ResponseWriter, _ *http.Request) {
-	sb := s.engine().Config().Sandbox
+func (s *Server) handleSandbox(w http.ResponseWriter, r *http.Request) {
+	sb := s.engineFor(r).Config().Sandbox
 	var v sandboxView
 	v.Backend = sb.Backend
 	v.AllowDocker = sb.AllowDocker

@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"time"
@@ -136,6 +137,17 @@ func (postgresDialect) primaryKey(db *DB, table string) ([]string, error) {
 		JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey)
 		WHERE i.indrelid = to_regclass(?) AND i.indisprimary
 		ORDER BY array_position(i.indkey, a.attnum)`, table)
+}
+
+// lockKey takes a transaction-scoped advisory lock.
+//
+// Advisory rather than a row lock because the caller needs to serialise work
+// on a row that may not exist yet — SELECT … FOR UPDATE locks what is there,
+// and two transactions creating the same row both find nothing to lock.
+// Released by the commit or rollback, so there is no unlock to forget.
+func (postgresDialect) lockKey(ctx context.Context, tx *Tx, key int64) error {
+	_, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(?)`, key)
+	return err
 }
 
 // rowLocks is true: a pool means two transactions can be inside the same

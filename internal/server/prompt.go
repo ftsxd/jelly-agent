@@ -48,7 +48,7 @@ type promptToolDTO struct {
 
 // handlePrompt reports the per-call prompt overhead and its estimated cost.
 func (s *Server) handlePrompt(w http.ResponseWriter, r *http.Request) {
-	eng := s.engine()
+	eng := s.engineFor(r)
 	// Which agent's prompt. Empty falls back to the configured default, so the
 	// page opens on what a turn would actually use rather than on the built-in
 	// base that a deployment with a coordinator never sends.
@@ -226,6 +226,6 @@ func (s *Server) handleSaveInstruction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"ok": true, "saved_to": path, "instruction": s.engine().BaseInstruction(),
+		"ok": true, "saved_to": path, "instruction": s.engineAfterReload().BaseInstruction(),
 	})
 }

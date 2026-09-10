@@ -1,6 +1,9 @@
 package storage
 
-import "strings"
+import (
+	"context"
+	"strings"
+)
 
 // dialect is everything one database does differently from another. There is
 // exactly one implementation today; a second goes in a file beside sqlite.go
@@ -35,6 +38,9 @@ type dialect interface {
 	primaryKey(db *DB, table string) ([]string, error)
 	// rowLocks says whether SELECT … FOR UPDATE is available and meaningful.
 	rowLocks() bool
+	// lockKey blocks until this transaction owns the named key, and holds it
+	// until the transaction ends. Nil where writers are serialised anyway.
+	lockKey(ctx context.Context, tx *Tx, key int64) error
 	// isMissingTable classifies "that table does not exist".
 	isMissingTable(err error) bool
 	// epochSeconds renders a timestamp column as whole seconds since the

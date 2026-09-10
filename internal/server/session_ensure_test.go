@@ -104,7 +104,7 @@ func TestAScheduledRunPreparesItsOwnNamedSession(t *testing.T) {
 	}
 	ctx := context.Background()
 
-	_, _, _ = s.runScheduledAgent(ctx, scheduleTaskFixture(), "巡检一下")
+	_, _, _ = s.runScheduledAgent(ctx, s.engine(), scheduleTaskFixture(), "巡检一下")
 
 	// The session exists under the name the scheduler chose.
 	resp, err := svc.Get(ctx, &adksession.GetRequest{

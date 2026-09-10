@@ -25,6 +25,7 @@ package storage
 import (
 	"database/sql"
 	"fmt"
+	"hash/fnv"
 	"strings"
 )
 
@@ -334,6 +335,26 @@ func ColumnTypes(db *DB, table string) (map[string]string, error) {
 // source row to a target row at all.
 func PrimaryKey(db *DB, table string) ([]string, error) {
 	return db.dialect.primaryKey(db, table)
+}
+
+// KeyOf derives a lock key from the parts that name a thing.
+//
+// FNV-1a over the parts with a separator between them, rather than a database
+// function: the value has to mean the same thing on every dialect and every
+// server version, and hashing it here is the only way to be sure of that.
+//
+// Two different names can collide, and that is harmless — a collision makes
+// two unrelated updates take turns, which is slower and still correct. What
+// must not happen is the same name hashing differently, and it cannot.
+func KeyOf(parts ...string) int64 {
+	h := fnv.New64a()
+	for i, p := range parts {
+		if i > 0 {
+			h.Write([]byte{0})
+		}
+		h.Write([]byte(p))
+	}
+	return int64(h.Sum64())
 }
 
 // scanPairs collects a two-column result into a map.

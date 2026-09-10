@@ -176,6 +176,18 @@ func (s *Server) runSchedule(ctx context.Context, t config.ScheduleTask) {
 	defer func() { s.schedule.mu.Lock(); delete(s.schedule.running, t.Name); s.schedule.mu.Unlock() }()
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
 	defer cancel()
+
+	// One engine for the whole trigger, run *and* record.
+	//
+	// The run used to pin its own and let go on the way out, which left the
+	// row that says what happened to be written on whatever engine was
+	// current by then — and a config save during a ten-minute run makes that
+	// a different, possibly closed one. The run would finish and its record
+	// would not be written, which is exactly the state an operator reads as
+	// "the schedule never fired".
+	eng, unpin := s.pin()
+	defer unpin()
+
 	started := time.Now()
 	prompt := t.Prompt
 	if t.Skill != "" {
@@ -187,7 +199,7 @@ func (s *Server) runSchedule(ctx context.Context, t config.ScheduleTask) {
 		err error
 	)
 	for attempt := 0; attempt <= t.RetryCount; attempt++ {
-		out, ref, err = s.runScheduledAgent(ctx, t, prompt)
+		out, ref, err = s.runScheduledAgent(ctx, eng, t, prompt)
 		if err == nil || ctx.Err() != nil {
 			break
 		}
@@ -205,7 +217,7 @@ func (s *Server) runSchedule(ctx context.Context, t config.ScheduleTask) {
 	}
 	// A run that finished has to be recorded somewhere even if the database is
 	// unreachable, or an operator sees a schedule that never reports.
-	db, dbErr := s.engine().StateDB()
+	db, dbErr := eng.StateDB()
 	if dbErr != nil {
 		slog.Error("周期任务的运行记录写不进状态库", "task", t.Name, logging.Err(dbErr))
 	}
@@ -228,9 +240,10 @@ type runRef struct {
 	invocation string
 }
 
-func (s *Server) runScheduledAgent(ctx context.Context, t config.ScheduleTask, prompt string) (string, runRef, error) {
-	eng, unpin := s.pin() // a config save must not close this engine mid-run
-	defer unpin()
+// runScheduledAgent runs one turn on the engine its caller pinned. The engine
+// is a parameter rather than looked up here because the caller also has to
+// write the run record on it — see runSchedule.
+func (s *Server) runScheduledAgent(ctx context.Context, eng *engine.Engine, t config.ScheduleTask, prompt string) (string, runRef, error) {
 	name := t.Agent
 	if name == "" && eng.HasAgents() {
 		name = eng.DefaultAgentName()
@@ -337,8 +350,8 @@ func (s *Server) upsertSchedule(t config.ScheduleTask) error {
 	return s.reload()
 }
 
-func (s *Server) handleSchedules(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"schedules": s.engine().Config().Schedules})
+func (s *Server) handleSchedules(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{"schedules": s.engineFor(r).Config().Schedules})
 }
 func (s *Server) handleSaveSchedule(w http.ResponseWriter, r *http.Request) {
 	var t config.ScheduleTask
@@ -368,7 +381,7 @@ func (s *Server) handleDeleteSchedule(w http.ResponseWriter, r *http.Request) {
 }
 func (s *Server) handleRunSchedule(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
-	for _, t := range s.engine().Config().Schedules {
+	for _, t := range s.engineFor(r).Config().Schedules {
 		if t.Name == name {
 			if !t.Enabled {
 				writeErr(w, http.StatusBadRequest, "任务已停用")
@@ -395,7 +408,7 @@ func (s *Server) handleScheduleRuns(w http.ResponseWriter, r *http.Request) {
 	if n, err := strconv.Atoi(r.URL.Query().Get("offset")); err == nil && n >= 0 {
 		offset = n
 	}
-	db, ok := s.stateDB(w)
+	db, ok := s.stateDB(w, r)
 	if !ok {
 		return
 	}

@@ -49,9 +49,15 @@ func TestTheBaseInstructionIsEditable(t *testing.T) {
 	s = s.WithConfigPath(path)
 
 	const mine = "你是运维诊断 agent。先定位时间窗，再取证据，最后给结论。"
-	if w := do(t, s, "PUT", "/api/prompt/instruction",
-		`{"instruction":"`+mine+`"}`); w.Code != http.StatusOK {
+	w := do(t, s, "PUT", "/api/prompt/instruction", `{"instruction":"`+mine+`"}`)
+	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d: %s", w.Code, w.Body.String())
+	}
+	// The response has to describe the save that just happened, not the state
+	// before it. The save replaces the engine, so a handler reading its own
+	// pinned one would answer with the text it just overwrote.
+	if got := decode(t, w)["instruction"]; got != mine {
+		t.Errorf("保存的响应里回的还是旧提示词: %v", got)
 	}
 	if got := s.engine().BaseInstruction(); got != mine {
 		t.Errorf("引擎读到的是 %q", got)

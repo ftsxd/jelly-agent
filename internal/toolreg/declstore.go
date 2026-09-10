@@ -148,24 +148,25 @@ type storedDecl struct {
 	UseCases, Examples, AntiExamples, Suites *[]string
 }
 
-// lockDecl takes the row lock the patch needs, creating nothing.
+// lockDecl serialises everything that touches one tool's declaration.
 //
-// SELECT … FOR UPDATE locks a row that exists. A tool nobody has declared yet
-// has none, so two first-saves for the same tool could still race — and the
-// primary key is what catches that: one insert wins, the other conflicts and
-// its DO UPDATE then runs against the winner's row, which is the merge the
-// lock would have produced. The lock is what makes the common case (a tool
-// already declared, being edited) correct without a retry.
+// A transaction-scoped key lock rather than SELECT … FOR UPDATE, and the
+// difference is the whole bug. FOR UPDATE locks a row that exists; a tool
+// nobody has declared yet has none, so two first-saves both lock nothing,
+// both read nothing, and both write a row built from nothing. The second
+// insert conflicts on the primary key and its DO UPDATE assigns *its own*
+// columns — excluded.*, not a merge — so whatever the first one declared is
+// erased. Demonstrated on PostgreSQL: A saves suites, B saves produces, and
+// the row ends up with only produces.
 //
-// SQLite has no row locks and needs none: one writer at a time, and this
-// package's handle allows one connection. The clause is simply not sent.
+// The key stands in for the identity being created, so it exists before the
+// row does. Held to the end of the transaction, so there is nothing to
+// release and no window between taking it and committing.
+//
+// SQLite has no such lock and needs none: one writer at a time, and this
+// package's handle allows one connection.
 func lockDecl(ctx context.Context, tx *storage.Tx, server, name string) error {
-	if !tx.SupportsRowLocks() {
-		return nil
-	}
-	_, err := tx.ExecContext(ctx,
-		`SELECT 1 FROM tool_decls WHERE server=? AND name=? FOR UPDATE`, server, name)
-	if err != nil {
+	if err := tx.LockKey(ctx, storage.KeyOf("tool_decls", server, name)); err != nil {
 		return fmt.Errorf("toolreg: lock decl %s/%s: %w", server, name, err)
 	}
 	return nil

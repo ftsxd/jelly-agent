@@ -26,8 +26,8 @@ import (
 
 // handleProviders lists configured providers with masked API keys, flagging the
 // default. Powers the Chat view's provider picker.
-func (s *Server) handleProviders(w http.ResponseWriter, _ *http.Request) {
-	cfg := s.engine().Config()
+func (s *Server) handleProviders(w http.ResponseWriter, r *http.Request) {
+	cfg := s.engineFor(r).Config()
 	type providerDTO struct {
 		Name      string `json:"name"`
 		BaseURL   string `json:"base_url"`
@@ -65,13 +65,13 @@ func (s *Server) handleProviders(w http.ResponseWriter, _ *http.Request) {
 
 // handleTools lists the built-in tools the agent would expose, mirroring the
 // CLI's `jelly tool list` / `/tools`.
-func (s *Server) handleTools(w http.ResponseWriter, _ *http.Request) {
-	core, err := s.engine().Core()
+func (s *Server) handleTools(w http.ResponseWriter, r *http.Request) {
+	core, err := s.engineFor(r).Core()
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	tools, err := s.engine().Tools(core, s.engine().SearchEnabled())
+	tools, err := s.engineFor(r).Tools(core, s.engineFor(r).SearchEnabled())
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -145,7 +145,7 @@ type sessionDTO struct {
 func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 	limit := queryInt(r, "limit", 50, 1, 200)
 	offset := queryInt(r, "offset", 0, 0, 1<<30)
-	db, ok := s.stateDB(w)
+	db, ok := s.stateDB(w, r)
 	if !ok {
 		return
 	}
@@ -154,7 +154,7 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	svc, err := s.engine().NewSessionService()
+	svc, err := s.engineFor(r).NewSessionService()
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -174,8 +174,8 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 
 // handleSessionIDs returns every session id (newest first) for the "select all
 // across pages" action, so batch delete can target the full set without paging.
-func (s *Server) handleSessionIDs(w http.ResponseWriter, _ *http.Request) {
-	db, ok := s.stateDB(w)
+func (s *Server) handleSessionIDs(w http.ResponseWriter, r *http.Request) {
+	db, ok := s.stateDB(w, r)
 	if !ok {
 		return
 	}
@@ -247,7 +247,7 @@ type toolResult struct {
 // one has no callers left and can go.
 func (s *Server) handleSessionTimeline(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	svc, err := s.engine().NewSessionService()
+	svc, err := s.engineFor(r).NewSessionService()
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -279,7 +279,7 @@ func (s *Server) handleSessionTimeline(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleSessionDetail(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	svc, err := s.engine().NewSessionService()
+	svc, err := s.engineFor(r).NewSessionService()
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -328,7 +328,7 @@ const purgeTimeout = 30 * time.Second
 // the same id, that one went instead.
 func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	db, ok := s.stateDB(w)
+	db, ok := s.stateDB(w, r)
 	if !ok {
 		return
 	}
@@ -336,7 +336,7 @@ func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	if err := s.purgeSessionTraces(r.Context(), []string{id}); err != nil {
+	if err := s.purgeSessionTraces(r.Context(), s.engineFor(r), []string{id}); err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -366,7 +366,7 @@ func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 // stores emptied out of four is better than one, and because the message
 // should name everything that is still holding data rather than the first
 // thing that went wrong.
-func (s *Server) purgeSessionTraces(ctx context.Context, ids []string) error {
+func (s *Server) purgeSessionTraces(ctx context.Context, eng *engine.Engine, ids []string) error {
 	// The preview cache answers for sessions that no longer exist otherwise,
 	// and this is where both delete paths meet — putting it in either handler
 	// would mean the other one kept a deleted conversation's first line.
@@ -393,7 +393,7 @@ func (s *Server) purgeSessionTraces(ctx context.Context, ids []string) error {
 		errs = append(errs, fmt.Errorf("%s未能清理: %w", what, err))
 	}
 
-	db, dbErr := s.engine().StateDB()
+	db, dbErr := eng.StateDB()
 	if dbErr != nil {
 		// Two stores live in this database. Reported once rather than twice,
 		// and the rest of the purge still runs — the tool results and the
@@ -406,7 +406,7 @@ func (s *Server) purgeSessionTraces(ctx context.Context, ids []string) error {
 			fail("记忆索引", err, "sessions", len(ids))
 		}
 	}
-	store, err := s.engine().Records()
+	store, err := eng.Records()
 	if err != nil {
 		fail("工具结果（存储打不开，原始返回内容仍可通过句柄读到）", err)
 	} else if store != nil {
@@ -418,7 +418,7 @@ func (s *Server) purgeSessionTraces(ctx context.Context, ids []string) error {
 			}
 		}
 	}
-	if tr := s.engine().Metrics(); tr != nil {
+	if tr := eng.Metrics(); tr != nil {
 		if _, err := tr.DeleteSessions(ids); err != nil {
 			fail("调用记录", err, "sessions", len(ids))
 		}
@@ -446,7 +446,7 @@ func (s *Server) handleDeleteSessions(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "ids 不能为空")
 		return
 	}
-	db, ok := s.stateDB(w)
+	db, ok := s.stateDB(w, r)
 	if !ok {
 		return
 	}
@@ -455,7 +455,7 @@ func (s *Server) handleDeleteSessions(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, fmt.Sprintf("批量删除失败（已删除 %d 个）: %v", deleted, err))
 		return
 	}
-	if err := s.purgeSessionTraces(r.Context(), in.IDs); err != nil {
+	if err := s.purgeSessionTraces(r.Context(), s.engineFor(r), in.IDs); err != nil {
 		// The sessions themselves are gone, so the count still means
 		// something and goes back with the failure rather than instead of it.
 		writeJSON(w, http.StatusInternalServerError, map[string]any{
@@ -503,8 +503,8 @@ func roleForAuthor(author string) string {
 }
 
 // handleMemoryCore returns the L1 core-memory snapshot (USER.md / MEMORY.md).
-func (s *Server) handleMemoryCore(w http.ResponseWriter, _ *http.Request) {
-	core, err := s.engine().Core()
+func (s *Server) handleMemoryCore(w http.ResponseWriter, r *http.Request) {
+	core, err := s.engineFor(r).Core()
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -517,8 +517,8 @@ func (s *Server) handleMemoryCore(w http.ResponseWriter, _ *http.Request) {
 		"environment":    core.Environment(),
 		"user":           usr,
 		"memory":         mem,
-		"search_enabled": s.engine().SearchEnabled(),
-		"search_top_k":   s.engine().Config().Memory.Search.TopK,
+		"search_enabled": s.engineFor(r).SearchEnabled(),
+		"search_top_k":   s.engineFor(r).Config().Memory.Search.TopK,
 	})
 }
 
@@ -537,7 +537,7 @@ func (s *Server) handleSetMemoryCore(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	core, err := s.engine().Core()
+	core, err := s.engineFor(r).Core()
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -575,7 +575,7 @@ func (s *Server) handleSetMemoryCore(w http.ResponseWriter, r *http.Request) {
 // handleMemorySearch runs an L2 FTS5 query over indexed sessions. Returns an
 // explicit disabled flag when L2 is off so the UI can guide the user.
 func (s *Server) handleMemorySearch(w http.ResponseWriter, r *http.Request) {
-	if !s.engine().SearchEnabled() {
+	if !s.engineFor(r).SearchEnabled() {
 		writeJSON(w, http.StatusOK, map[string]any{"enabled": false, "results": []any{}})
 		return
 	}
@@ -584,7 +584,7 @@ func (s *Server) handleMemorySearch(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "missing query parameter q")
 		return
 	}
-	search, err := s.engine().Search()
+	search, err := s.engineFor(r).Search()
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return

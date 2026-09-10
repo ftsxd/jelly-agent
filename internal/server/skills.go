@@ -23,8 +23,8 @@ type skillInput struct {
 
 // handleListSkills lists the configured skills (metadata only — no body — to
 // keep the list light; fetch one with handleSkillDetail for the full text).
-func (s *Server) handleListSkills(w http.ResponseWriter, _ *http.Request) {
-	store, err := s.engine().Skills()
+func (s *Server) handleListSkills(w http.ResponseWriter, r *http.Request) {
+	store, err := s.engineFor(r).Skills()
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -46,13 +46,13 @@ func (s *Server) handleListSkills(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"skills":        out,
 		"dir":           store.Dir(),
-		"allow_scripts": s.engine().Config().Skills.AllowScripts,
+		"allow_scripts": s.engineFor(r).Config().Skills.AllowScripts,
 	})
 }
 
 // handleSkillDetail returns one skill including its instruction body.
 func (s *Server) handleSkillDetail(w http.ResponseWriter, r *http.Request) {
-	store, err := s.engine().Skills()
+	store, err := s.engineFor(r).Skills()
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -68,7 +68,7 @@ func (s *Server) handleSkillDetail(w http.ResponseWriter, r *http.Request) {
 	}
 	// var_keys lists configured variable names only (values masked); scripts
 	// lists runnable bundled files for directory-form skills.
-	cfg := s.engine().Config()
+	cfg := s.engineFor(r).Config()
 	writeJSON(w, http.StatusOK, map[string]any{
 		"name":        sk.Name,
 		"description": sk.Description,
@@ -96,7 +96,7 @@ func (s *Server) handleSaveSkill(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "description 不能为空（它进入技能清单供 Agent 判断）")
 		return
 	}
-	store, err := s.engine().Skills()
+	store, err := s.engineFor(r).Skills()
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -134,7 +134,7 @@ func (s *Server) handleUploadSkill(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	store, err := s.engine().Skills()
+	store, err := s.engineFor(r).Skills()
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -240,12 +240,12 @@ func (s *Server) handleSetAllowScripts(w http.ResponseWriter, r *http.Request) {
 	if err := s.persist(w, raw, path); err != nil {
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "allow_scripts": s.engine().Config().Skills.AllowScripts})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "allow_scripts": s.engineFor(r).Config().Skills.AllowScripts})
 }
 
 // handleDeleteSkill removes a skill file (idempotent).
 func (s *Server) handleDeleteSkill(w http.ResponseWriter, r *http.Request) {
-	store, err := s.engine().Skills()
+	store, err := s.engineFor(r).Skills()
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return

@@ -121,7 +121,7 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 }
 
 func (s *Server) handleAuthStatus(w http.ResponseWriter, r *http.Request) {
-	admin := s.engine().Config().Web.Admin
+	admin := s.engineFor(r).Config().Web.Admin
 	if !admin.Configured() {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"configured": false})
 		return
@@ -135,7 +135,7 @@ func (s *Server) handleAuthStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
-	admin := s.engine().Config().Web.Admin
+	admin := s.engineFor(r).Config().Web.Admin
 	if !admin.Configured() {
 		writeErr(w, http.StatusServiceUnavailable, "控制台管理员尚未配置；请运行 jelly admin set-password")
 		return
@@ -167,7 +167,7 @@ type changePasswordInput struct {
 }
 
 func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
-	admin := s.engine().Config().Web.Admin
+	admin := s.engineFor(r).Config().Web.Admin
 	if !s.auth.authenticated(r, admin.Username, admin.PasswordHash) {
 		writeErr(w, http.StatusUnauthorized, "请先以管理员身份登录")
 		return

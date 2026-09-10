@@ -14,6 +14,7 @@ package server
 
 import (
 	"context"
+	"github.com/jelly-agent/jelly-agent/internal/engine"
 	"github.com/jelly-agent/jelly-agent/internal/storage"
 	"net/http"
 	"slices"
@@ -76,7 +77,7 @@ type toolDeclFields struct {
 
 // handleToolMetadata lists what has been declared, and where each came from.
 func (s *Server) handleToolMetadata(w http.ResponseWriter, r *http.Request) {
-	db, ok := s.stateDB(w)
+	db, ok := s.stateDB(w, r)
 	if !ok {
 		return
 	}
@@ -91,7 +92,7 @@ func (s *Server) handleToolMetadata(w http.ResponseWriter, r *http.Request) {
 	}
 
 	out := []toolDeclDTO{}
-	if reg := s.engine().ToolRegistry(); reg != nil {
+	if reg := s.engineFor(r).ToolRegistry(); reg != nil {
 		for _, name := range reg.Names() {
 			m, ok := reg.Lookup(name)
 			if !ok || m.Name != name {
@@ -168,7 +169,7 @@ func (s *Server) handleSaveToolMetadata(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	db, ok := s.stateDB(w)
+	db, ok := s.stateDB(w, r)
 	if !ok {
 		return
 	}
@@ -194,7 +195,7 @@ func (s *Server) handleSaveToolMetadata(w http.ResponseWriter, r *http.Request) 
 		Suites:       cleaned(in.Suites),
 		Produces:     in.Produces,
 		SideEffect:   in.Effect,
-	}, s.engine().Config().Web.Admin.Username); err != nil {
+	}, s.engineFor(r).Config().Web.Admin.Username); err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -202,7 +203,7 @@ func (s *Server) handleSaveToolMetadata(w http.ResponseWriter, r *http.Request) 
 	// Only the registry is rebuilt. A config reload would cancel the MCP
 	// context and kill every stdio subprocess — an absurd price for saying
 	// that a tool returns metrics.
-	s.engine().ReloadToolMetadata()
+	s.engineFor(r).ReloadToolMetadata()
 	// What the registry resolved goes back, not what was just written.
 	//
 	// They are not the same thing, because the declaration is a patch: a save
@@ -213,7 +214,7 @@ func (s *Server) handleSaveToolMetadata(w http.ResponseWriter, r *http.Request) 
 	// save — so the response has to be the same answer the list would give.
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok": true, "saved_to": "tool_decls",
-		"tool": s.effectiveDecl(r.Context(), db, in.Name, in.Server),
+		"tool": s.effectiveDecl(r.Context(), s.engineFor(r), db, in.Name, in.Server),
 	})
 }
 
@@ -265,12 +266,12 @@ func declRow(m, decl ops.ToolMetadata, declared bool, src string) toolDeclDTO {
 // does not know — nothing else declares it and it is not connected — is
 // answered with the declaration itself, which is exactly what will apply the
 // moment it appears.
-func (s *Server) effectiveDecl(ctx context.Context, db *storage.DB, name, server string) toolDeclDTO {
+func (s *Server) effectiveDecl(ctx context.Context, eng *engine.Engine, db *storage.DB, name, server string) toolDeclDTO {
 	// Read back rather than echo what was sent. A save carries a patch; what
 	// the row now says is the patch applied to what was already there, and
 	// the page shows the row.
 	decl, declared := consoleDecl(ctx, db, server, name)
-	if reg := s.engine().ToolRegistry(); reg != nil {
+	if reg := eng.ToolRegistry(); reg != nil {
 		if m, ok := reg.Lookup(name); ok && m.Server == server && m.Name == name {
 			return declRow(m, decl, declared, sourceOf(m, declared))
 		}
