@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 
 	"github.com/jelly-agent/jelly-agent/internal/config"
 	"github.com/jelly-agent/jelly-agent/internal/history"
@@ -77,12 +78,8 @@ func (s *Server) handleSaveProvider(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	path, err := s.writeTargetPath()
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	raw, err := loadRawOrEmpty(path)
+	path, raw, done, err := s.editConfig()
+	defer done()
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -124,12 +121,8 @@ func (s *Server) handleSaveProvider(w http.ResponseWriter, r *http.Request) {
 // handleDeleteProvider removes a provider and hot-reloads.
 func (s *Server) handleDeleteProvider(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
-	path, err := s.writeTargetPath()
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	raw, err := config.LoadRaw(path)
+	path, raw, done, err := s.editExistingConfig()
+	defer done()
 	if err != nil {
 		if os.IsNotExist(err) {
 			writeErr(w, http.StatusNotFound, "尚无配置文件可删除")
@@ -207,12 +200,8 @@ func (s *Server) handleSetHistory(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	path, err := s.writeTargetPath()
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	raw, err := loadRawOrEmpty(path)
+	path, raw, done, err := s.editConfig()
+	defer done()
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -250,12 +239,8 @@ func (s *Server) handleSetMemorySearch(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	path, err := s.writeTargetPath()
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	raw, err := loadRawOrEmpty(path)
+	path, raw, done, err := s.editConfig()
+	defer done()
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -279,8 +264,60 @@ func (s *Server) handleSetMemorySearch(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// editConfig begins one read-modify-write of the config file: it takes the
+// edit lock, resolves the file to write, and reads it. The caller must defer
+// the returned release, and must not read the file any other way.
+//
+// The lock is what makes a save a save. Every one of these handlers reads
+// the whole file, changes one thing in it, and writes the whole file back —
+// so two of them running at once both read version A, and the second to
+// write lays a whole file built from A over the first one's change. Both
+// answer 200. The provider somebody added is simply not there, and the file
+// on disk is internally consistent, so nothing downstream notices: this is
+// not a reload ordering problem, and reading inside the reload lock does not
+// touch it. The whole read-change-write has to be one at a time.
+//
+// A missing file reads as an empty config, which is what a first save into a
+// fresh deployment needs. editExistingConfig is the variant for a delete,
+// where "there is no file" is an answer rather than a starting point.
+func (s *Server) editConfig() (string, *config.Config, func(), error) {
+	path, raw, done, err := s.editExistingConfig()
+	if err != nil && os.IsNotExist(err) {
+		return path, &config.Config{}, done, nil
+	}
+	return path, raw, done, err
+}
+
+// editExistingConfig is editConfig for an edit that needs the file to exist:
+// the error wraps os.ErrNotExist when it does not.
+//
+// The release is returned even alongside an error, and is always safe to
+// call, so a caller can defer it before deciding what the error means.
+func (s *Server) editExistingConfig() (string, *config.Config, func(), error) {
+	s.editMu.Lock()
+	var once sync.Once
+	done := func() { once.Do(s.editMu.Unlock) }
+
+	path, err := s.writeTargetPath()
+	if err != nil {
+		return "", nil, done, err
+	}
+	raw, err := config.LoadRaw(path)
+	if err != nil {
+		return path, nil, done, err
+	}
+	afterConfigRead() // a seam, so a test can hold one edit between read and write
+	return path, raw, done, nil
+}
+
+// afterConfigRead is the instant an edit has the file in hand and has changed
+// nothing — the window two of them used to interleave in. A test holds one
+// edit here and runs another; nothing in production replaces it.
+var afterConfigRead = func() {}
+
 // persist saves the config and reloads the engine, writing an error response and
-// returning a non-nil error if either step fails.
+// returning a non-nil error if either step fails. Called with the edit lock
+// held — see editConfig.
 func (s *Server) persist(w http.ResponseWriter, c *config.Config, path string) error {
 	if err := config.Save(c, path); err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
@@ -300,19 +337,6 @@ func (s *Server) writeTargetPath() (string, error) {
 		return p, nil
 	}
 	return config.DefaultUserConfigPath()
-}
-
-// loadRawOrEmpty loads a config without ${ENV} expansion, returning an empty
-// config when the file does not exist yet.
-func loadRawOrEmpty(path string) (*config.Config, error) {
-	c, err := config.LoadRaw(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return &config.Config{}, nil
-		}
-		return nil, err
-	}
-	return c, nil
 }
 
 func indexOfProvider(ps []config.Provider, name string) int {

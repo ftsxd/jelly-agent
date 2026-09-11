@@ -428,11 +428,16 @@ func (e *Engine) toolRegistry() (*toolreg.Store, *gateway.Gateway) {
 		// and a layer reachable only by setting a path nobody knows about is
 		// a layer nobody uses. A missing directory is not an error — it means
 		// nothing has been declared yet. See metadataSources for the layering.
-		// The baseline comes before the load, not after — a change that
-		// lands in between would otherwise be in the baseline and not in the
-		// registry, and nothing would ever report it. See WatchFrom.
-		src, since := e.declWatchBaseline()
-		e.toolStore.Swap(buildRegistry(e.metadataSources()))
+		// The overlay is loaded here, by hand, rather than left to
+		// metadataSources — and the version that goes with it is read
+		// first. Both for the same reason: the version is a claim that the
+		// registry has this change in it, and only a load whose result was
+		// actually installed can support that claim. A version taken after
+		// the load would already cover a change the load missed; a version
+		// confirmed against a *different* load than the one installed
+		// covers whatever that other load happened to see.
+		src, since, overlay := e.loadDeclOverlay()
+		e.toolStore.Swap(buildRegistry(e.registrySources(overlay)))
 		afterFirstRegistry() // a seam; the window this ordering closes
 		e.watchDeclarations(src, since)
 
@@ -1558,6 +1563,11 @@ func buildRegistry(sources []toolreg.Source) *toolreg.Registry {
 // changed a declaration. A variable so a test does not have to wait it out.
 var declPoll = 0 * time.Second
 
+// declUnread is a baseline meaning "this process has confirmed no version",
+// distinct from version zero, which means "the log is empty and I have seen
+// that". Any real version differs from it, so the watcher's first tick loads.
+const declUnread = int64(-1)
+
 // watchDeclarations rebuilds the registry when a declaration changes in the
 // database, including one this process did not make.
 //
@@ -1581,34 +1591,69 @@ func (e *Engine) watchDeclarations(src *toolreg.DBSource, since int64) {
 	}
 	ch := src.WatchFrom(e.mcpCtx, since)
 	go func() {
-		for range ch {
-			// The whole stack, not the set the watch handed over: that set is
-			// the overlay alone, and the registry is every layer with the
-			// overlay applied last.
-			e.toolStore.Swap(buildRegistry(e.metadataSources()))
+		for overlay := range ch {
+			// The set the watch handed over, not another read of the same
+			// table. Discarding it and loading again meant the version was
+			// confirmed by one load and the registry built from a second
+			// one: if that second load failed, buildRegistry quietly
+			// installed a registry with no overlay in it while the watcher
+			// recorded the change as handled, and nothing retried it —
+			// silently wrong until somebody made an unrelated edit.
+			//
+			// The other layers are files and built-ins; the overlay is
+			// what this version tracks, and it is already in hand.
+			beforeWatchSwap() // a seam; a test breaks the table here
+			e.toolStore.Swap(buildRegistry(e.registrySources(overlay)))
 			slog.Info("工具声明有变化，已重建注册表")
 		}
 	}()
 }
 
-// declWatchBaseline opens the declaration source and reads which change it is
-// already at, before anything loads from it. Nil when the database will not
-// open, which is not an error here — see watchDeclarations.
-func (e *Engine) declWatchBaseline() (*toolreg.DBSource, int64) {
+// loadDeclOverlay opens the declaration source, reads which change it is at,
+// and loads it — in that order.
+//
+// Returns a baseline of declUnread when there is nothing it can vouch for:
+// the database will not open, the version will not read, or the load failed.
+// The watcher then treats the first tick as a change and loads again, which
+// is the retry the old code did not have — a failed load at startup left the
+// registry without its overlay and the watcher starting from a version that
+// already covered it.
+func (e *Engine) loadDeclOverlay() (*toolreg.DBSource, int64, []ops.ToolMetadata) {
 	db, err := e.StateDB()
 	if err != nil {
-		return nil, 0
+		return nil, declUnread, nil
 	}
 	src := toolreg.NewDBSource(db).WithPoll(declPoll)
-	since, err := src.Version(e.mcpCtx)
+	v, err := src.Version(e.mcpCtx)
 	if err != nil {
-		// Unreadable now, so start from zero: the first tick reports a change
-		// that may not be one, which costs a rebuild and is the safe way to
-		// be wrong.
-		return src, 0
+		slog.Warn("读不到工具声明的版本号，注册表先按文件层建，稍后补载", logging.Err(err))
+		return src, declUnread, nil
 	}
-	return src, since
+	overlay, err := src.Load(e.mcpCtx)
+	if err != nil {
+		slog.Warn("读不到工具声明，注册表先按文件层建，稍后补载", logging.Err(err))
+		return src, declUnread, nil
+	}
+	return src, v, overlay
 }
+
+// registrySources is every layer, with declarations already in hand as the
+// overlay. A nil overlay means there is none to apply — not an empty one,
+// which would be a claim that nothing is declared.
+func (e *Engine) registrySources(overlay []ops.ToolMetadata) []toolreg.Source {
+	sources := e.fileMetadataSources()
+	if overlay != nil {
+		sources = append(sources, toolreg.StaticOverlay{
+			StaticSource: toolreg.StaticSource{Label: "db:tool_decls", Metas: overlay},
+		})
+	}
+	return sources
+}
+
+// beforeWatchSwap is the moment a delivered change is about to be installed.
+// A test makes the database unreadable here, to show that installing it does
+// not depend on reading anything. Nothing in production replaces it.
+var beforeWatchSwap = func() {}
 
 // afterFirstRegistry is the moment between the registry's first load and the
 // watcher starting — the window a change had to land in to be lost. A test
@@ -1660,16 +1705,25 @@ func (e *Engine) importableMetadataDir() string {
 // deployment that still answers with what its files say is more useful than
 // one that answers with nothing.
 func (e *Engine) metadataSources() []toolreg.Source {
-	sources := []toolreg.Source{jellytool.BuiltinMetadata(), toolreg.BundledMetadata()}
-	if dir := e.ToolMetadataDir(); dir != "" {
-		sources = append(sources, toolreg.NewFileSource(dir))
-	}
+	sources := e.fileMetadataSources()
 	db, err := e.StateDB()
 	if err != nil {
 		slog.Warn("状态库打不开，控制台声明这一层没有生效", logging.Err(err))
 		return sources
 	}
 	return append(sources, toolreg.NewDBSource(db))
+}
+
+// fileMetadataSources is every layer except the database's: the built-ins,
+// the bundled declarations and the metadata directory. Separated because the
+// watcher already holds the database layer and must not read it again — see
+// watchDeclarations.
+func (e *Engine) fileMetadataSources() []toolreg.Source {
+	sources := []toolreg.Source{jellytool.BuiltinMetadata(), toolreg.BundledMetadata()}
+	if dir := e.ToolMetadataDir(); dir != "" {
+		sources = append(sources, toolreg.NewFileSource(dir))
+	}
+	return sources
 }
 
 // ToolMetadataDir is where this deployment's tool declarations live.

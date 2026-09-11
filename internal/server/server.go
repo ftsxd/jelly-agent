@@ -31,7 +31,10 @@ type Server struct {
 	ref *engineRef // the current engine, plus the work still using it
 	// restartMu serialises everything that replaces a long-lived piece of the
 	// server — the engine, the bots, the cron. See reload.
-	restartMu  sync.Mutex
+	restartMu sync.Mutex
+	// editMu serialises one whole read-modify-write of the config file. See
+	// editConfig; restartMu is always taken after it, never before.
+	editMu     sync.Mutex
 	static     fs.FS  // embedded SPA build (dist); nil disables static serving
 	configPath string // explicit --config path for reloads ("" = auto-resolve)
 
@@ -156,7 +159,6 @@ func (s *Server) stateDB(w http.ResponseWriter, r *http.Request) (*storage.DB, b
 // the older ones, and nothing looks wrong until somebody wonders why the new
 // API key is not being used.
 func (s *Server) reload() error {
-	reloadStep("start")
 	s.restartMu.Lock()
 	defer s.restartMu.Unlock()
 
@@ -164,6 +166,7 @@ func (s *Server) reload() error {
 	if err != nil {
 		return err
 	}
+	reloadStep("read")
 
 	s.mu.Lock()
 	old := s.ref
@@ -272,9 +275,18 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 // Version is the server version, overridable at build time via -ldflags.
 var Version = "0.2.0-dev"
 
-// reloadStep marks the two points a test needs to hold a reload at: "start",
-// before it takes the lock or reads anything, and "swapped", between
-// installing the engine and replacing the bots and the cron. Both are
-// windows two concurrent reloads used to interleave in. Nothing in
-// production replaces it.
+// reloadStep marks the two points a test needs to hold a reload at.
+//
+// "read" is the instant the config has been read and nothing has been
+// applied. Where that instant falls relative to the lock is the whole
+// question: inside it here, and outside it in the version that read the file
+// first — which is why the seam has to sit after the read rather than at the
+// top of the function. Put at the top, a test holding a reload there and
+// then changing the file sees the paused reload pick up the *new* file when
+// it resumes, and the bug it is looking for cannot happen.
+//
+// "swapped" is between installing the engine and replacing the bots and the
+// cron, the window two concurrent reloads used to interleave in.
+//
+// Nothing in production replaces either.
 var reloadStep = func(string) {}

@@ -167,12 +167,8 @@ func (s *Server) handleSetSkillVars(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	path, err := s.writeTargetPath()
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	raw, err := loadRawOrEmpty(path)
+	path, raw, done, err := s.editConfig()
+	defer done()
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -193,12 +189,8 @@ func (s *Server) handleSetSkillVars(w http.ResponseWriter, r *http.Request) {
 // handleDeleteSkillVar removes one variable from a skill.
 func (s *Server) handleDeleteSkillVar(w http.ResponseWriter, r *http.Request) {
 	name, key := r.PathValue("name"), r.PathValue("key")
-	path, err := s.writeTargetPath()
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	raw, err := loadRawOrEmpty(path)
+	path, raw, done, err := s.editConfig()
+	defer done()
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -226,12 +218,8 @@ func (s *Server) handleSetAllowScripts(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	path, err := s.writeTargetPath()
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	raw, err := loadRawOrEmpty(path)
+	path, raw, done, err := s.editConfig()
+	defer done()
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return

@@ -190,12 +190,8 @@ func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "无法保存新密码")
 		return
 	}
-	path, err := s.writeTargetPath()
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	raw, err := loadRawOrEmpty(path)
+	path, raw, done, err := s.editConfig()
+	defer done()
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return

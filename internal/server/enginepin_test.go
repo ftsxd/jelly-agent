@@ -230,3 +230,43 @@ func TestHandlersThatSaveConfigAnswerFromTheNewEngine(t *testing.T) {
 		}
 	}
 }
+
+// The config file is read for editing in exactly one place.
+//
+// Every one of these handlers reads the whole file, changes one thing, and
+// writes the whole file back, so two of them at once both read version A and
+// the second to write lays a whole file built from A over the first one's
+// change — both answering 200. Reading only through editConfig is what makes
+// that impossible, so a read anywhere else is the bug coming back.
+func TestTheConfigIsOnlyReadForEditingThroughEditConfig(t *testing.T) {
+	files, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range files {
+		if strings.HasSuffix(f, "_test.go") {
+			continue
+		}
+		src, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		fn := ""
+		for i, line := range strings.Split(string(src), "\n") {
+			if strings.HasPrefix(line, "func ") {
+				fn = line
+			}
+			if !strings.Contains(line, "config.LoadRaw(") {
+				continue
+			}
+			// editExistingConfig is the one place, and BootstrapAdmin runs
+			// before the server serves anything — there is no second writer
+			// for it to race, and no Server to hold the lock with.
+			if strings.Contains(fn, "editExistingConfig") || strings.Contains(fn, "BootstrapAdmin") {
+				continue
+			}
+			t.Errorf("%s:%d 绕开 editConfig 直接读配置文件 —— 两个保存会互相覆盖：\n\t%s",
+				f, i+1, strings.TrimSpace(line))
+		}
+	}
+}

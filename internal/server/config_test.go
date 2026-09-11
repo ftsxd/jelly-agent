@@ -5,9 +5,11 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -154,4 +156,61 @@ func quietLogs(t *testing.T) {
 	prev := slog.Default()
 	slog.SetDefault(slog.New(slog.NewJSONHandler(io.Discard, nil)))
 	t.Cleanup(func() { slog.SetDefault(prev) })
+}
+
+// Two saves of different things must both survive.
+//
+// Each handler reads the whole config, changes one field, and writes the
+// whole config back. Two of them running at once both read version A; the
+// second to write lays down a file built from A, and the first one's change
+// is simply not in it. Both requests answer 200, the file on disk is
+// internally consistent, and nothing downstream can tell — the person who
+// added a provider just finds it missing later. Reading inside the reload
+// lock does not help: the loss happens before either reload starts.
+func TestTwoDifferentSavesAtOnceBothSurvive(t *testing.T) {
+	s, path := newProviderServer(t)
+
+	held := make(chan struct{})
+	release := make(chan struct{})
+	prev := afterConfigRead
+	var first atomic.Bool
+	afterConfigRead = func() {
+		if first.CompareAndSwap(false, true) {
+			close(held)
+			<-release
+		}
+	}
+	t.Cleanup(func() { afterConfigRead = prev })
+
+	slow := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		slow <- do(t, s, "POST", "/api/providers",
+			`{"name":"b","base_url":"http://b","api_key":"k","model":"m"}`)
+	}()
+	<-held // one edit has the file in hand and has changed nothing yet
+
+	fast := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		fast <- do(t, s, "POST", "/api/platforms",
+			`{"name":"dt","type":"dingtalk","client_id":"id","client_secret":"sec","enabled":true}`)
+	}()
+	time.Sleep(100 * time.Millisecond)
+	close(release)
+
+	for _, w := range []*httptest.ResponseRecorder{<-slow, <-fast} {
+		if w.Code != http.StatusOK {
+			t.Fatalf("status = %d: %s", w.Code, w.Body.String())
+		}
+	}
+
+	raw, err := config.LoadRaw(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if indexOfProvider(raw.Providers, "b") < 0 {
+		t.Error("两个保存都回了 200，新加的 provider 却不在磁盘上")
+	}
+	if len(raw.Platforms) != 1 {
+		t.Error("两个保存都回了 200，新加的 platform 却不在磁盘上")
+	}
 }

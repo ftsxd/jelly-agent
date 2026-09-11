@@ -114,7 +114,7 @@ func TestTheConfigOnDiskIsTheOneThatEndsUpRunning(t *testing.T) {
 		// Only the first reload waits, and a plain flag rather than sync.Once
 		// because Do blocks every later caller until the first returns —
 		// which is the second reload, the one this test needs to get past.
-		if step == "start" && first.CompareAndSwap(false, true) {
+		if step == "read" && first.CompareAndSwap(false, true) {
 			close(held)
 			<-release
 		}
@@ -123,9 +123,9 @@ func TestTheConfigOnDiskIsTheOneThatEndsUpRunning(t *testing.T) {
 
 	slow := make(chan error, 1)
 	go func() { slow <- s.reload() }()
-	<-held // one reload is about to run, and has read nothing yet
+	<-held // one reload has read the config and applied nothing
 
-	// Meanwhile the config changes and another reload applies it.
+	// Meanwhile the config changes and another reload picks it up.
 	raw, err := config.LoadRaw(path)
 	if err != nil {
 		t.Fatal(err)
@@ -134,13 +134,18 @@ func TestTheConfigOnDiskIsTheOneThatEndsUpRunning(t *testing.T) {
 	if err := config.Save(raw, path); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.reload(); err != nil {
-		t.Fatal(err)
-	}
+	// In a goroutine: with the read inside the lock the paused reload is
+	// holding it, so this one waits — and a test that called it inline would
+	// deadlock against its own release below.
+	fast := make(chan error, 1)
+	go func() { fast <- s.reload() }()
+	time.Sleep(100 * time.Millisecond)
 
 	close(release)
-	if err := <-slow; err != nil {
-		t.Fatal(err)
+	for _, err := range []error{<-slow, <-fast} {
+		if err != nil {
+			t.Fatal(err)
+		}
 	}
 	if got := s.engine().Config().Providers[0].Model; got != "写在后面的那个模型" {
 		t.Errorf("后保存的配置被一次更早开始的 reload 覆盖回去了: model = %q", got)

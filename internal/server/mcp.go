@@ -103,12 +103,8 @@ func (s *Server) handleSaveMCP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	path, err := s.writeTargetPath()
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	raw, err := loadRawOrEmpty(path)
+	path, raw, done, err := s.editConfig()
+	defer done()
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -140,12 +136,8 @@ func (s *Server) handleSaveMCP(w http.ResponseWriter, r *http.Request) {
 // handleDeleteMCP removes an MCP server and hot-reloads.
 func (s *Server) handleDeleteMCP(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
-	path, err := s.writeTargetPath()
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	raw, err := config.LoadRaw(path)
+	path, raw, done, err := s.editExistingConfig()
+	defer done()
 	if err != nil {
 		if os.IsNotExist(err) {
 			writeErr(w, http.StatusNotFound, "尚无配置文件可删除")

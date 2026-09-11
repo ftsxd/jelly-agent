@@ -211,12 +211,8 @@ func (s *Server) handleSaveInstruction(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	path, err := s.writeTargetPath()
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	raw, err := loadRawOrEmpty(path)
+	path, raw, done, err := s.editConfig()
+	defer done()
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return

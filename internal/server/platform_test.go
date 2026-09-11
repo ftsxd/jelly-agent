@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jelly-agent/jelly-agent/internal/config"
 	"github.com/jelly-agent/jelly-agent/internal/platform"
 )
 
@@ -234,5 +235,44 @@ func TestABotStoppedBeforeItStartsNeverConnects(t *testing.T) {
 
 	if connected, _, starts := b.state(); connected || starts != 0 {
 		t.Errorf("已经停掉的机器人还是连上去了: connected=%v starts=%d", connected, starts)
+	}
+}
+
+// A shutdown landing while a bot is being built must not leave it running.
+//
+// The bots were started as they were built and only published to the manager
+// afterwards, so there was a window where the manager's list was empty and a
+// connection was already on its way up. A shutdown in that window stopped
+// nothing, and the bot came up with nobody holding it. The WeChat bot makes
+// that permanent: its Start ignores the context it is handed and runs on a
+// background one, so cancelling the server's context does not reach it
+// either — the only thing that can stop it is a Stop call, and there was
+// nothing in the list to call it on.
+func TestABotBuiltDuringShutdownNeverStarts(t *testing.T) {
+	s := newEmptyServer(t)
+	s.engine().Config().Platforms = []config.PlatformBot{
+		{Name: "dt", Type: "dingtalk", Enabled: true},
+	}
+
+	b := &fakeBot{}
+	s.bots.newBot = func(config.PlatformBot) (platform.Bot, error) {
+		s.stopBots() // the server shuts down while this one is being built
+		return b, nil
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s.StartBots(ctx)
+
+	time.Sleep(100 * time.Millisecond)
+	if connected, _, starts := b.state(); connected || starts != 0 {
+		t.Errorf("服务都停了，机器人还是连上去了，而且没在管理器里、没人能停它: connected=%v starts=%d",
+			connected, starts)
+	}
+	s.bots.mu.Lock()
+	n := len(s.bots.bots)
+	s.bots.mu.Unlock()
+	if n != 0 {
+		t.Errorf("停机之后还往管理器里塞了 %d 个机器人", n)
 	}
 }

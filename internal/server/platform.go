@@ -30,9 +30,17 @@ const botReplyTimeout = 3 * time.Minute
 // are restarted whenever config reloads — mirroring how Watch and the MCP
 // toolset cache are managed.
 type botManager struct {
-	mu   sync.Mutex
-	ctx  context.Context // server lifecycle ctx, set by StartBots
-	bots []platform.Bot
+	mu sync.Mutex
+	// ctx is the server lifecycle context, set by StartBots and cleared by
+	// stopBots. Cleared, so a restart that arrives after shutdown builds
+	// nothing rather than starting a set nobody will ever stop.
+	ctx     context.Context
+	stopped bool
+	bots    []platform.Bot
+	// newBot builds one bot, or nil for the real one. A field so a test can
+	// hand back a double and, in doing so, control the moment a bot is
+	// built — which is the window this file's ordering exists to close.
+	newBot func(config.PlatformBot) (platform.Bot, error)
 }
 
 // StartBots launches the configured platform bots and keeps them running until
@@ -74,31 +82,63 @@ func (s *Server) restartBots(cfg *config.Config) {
 		return // StartBots not called yet (e.g. API-only tests)
 	}
 
+	// Built, then published, then started — in that order.
+	//
+	// Starting before publishing leaves a window where the manager's list is
+	// empty and a bot is already on its way up: a shutdown landing there
+	// stops nothing, and the connection comes up afterwards with no one
+	// holding it. The WeChat bot makes that permanent — its Start ignores
+	// the context it is given and runs on a background one, so cancelling
+	// the server's context does not reach it either. Publishing first means
+	// a Stop can always find it, and managedBot turns "found before it
+	// started" into "does not start".
+	type pending struct {
+		bot  *managedBot
+		name string
+	}
+	var built []pending
 	var started []platform.Bot
 	for _, pb := range cfg.Platforms {
 		if !pb.Enabled {
 			continue
 		}
-		bot, err := s.buildBot(pb)
+		build := s.buildBot
+		if s.bots.newBot != nil {
+			build = s.bots.newBot
+		}
+		bot, err := build(pb)
 		if err != nil {
 			slog.Warn("平台已跳过", "platform", pb.Name, logging.Err(err))
 			continue
 		}
 		m := &managedBot{Bot: bot}
+		built = append(built, pending{m, pb.Name})
 		started = append(started, m)
-		go m.run(ctx, pb.Name)
 	}
 
 	s.bots.mu.Lock()
+	if s.bots.stopped {
+		// The server shut down while these were being built. Publishing them
+		// now would put a set nobody is going to stop into the manager.
+		s.bots.mu.Unlock()
+		return
+	}
 	s.bots.bots = started
 	s.bots.mu.Unlock()
+
+	for _, p := range built {
+		go p.bot.run(ctx, p.name)
+	}
 }
 
-// stopBots disconnects all running bots.
+// stopBots disconnects all running bots and marks the manager shut down, so
+// a restart already in flight does not publish a set after it.
 func (s *Server) stopBots() {
 	s.bots.mu.Lock()
 	old := s.bots.bots
 	s.bots.bots = nil
+	s.bots.stopped = true
+	s.bots.ctx = nil
 	s.bots.mu.Unlock()
 	for _, b := range old {
 		b.Stop()
@@ -316,12 +356,8 @@ func (s *Server) handleSavePlatform(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	path, err := s.writeTargetPath()
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	raw, err := loadRawOrEmpty(path)
+	path, raw, done, err := s.editConfig()
+	defer done()
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -372,12 +408,8 @@ func (s *Server) handleSavePlatform(w http.ResponseWriter, r *http.Request) {
 // handleDeletePlatform removes a platform bot and hot-reloads.
 func (s *Server) handleDeletePlatform(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
-	path, err := s.writeTargetPath()
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	raw, err := config.LoadRaw(path)
+	path, raw, done, err := s.editExistingConfig()
+	defer done()
 	if err != nil {
 		if os.IsNotExist(err) {
 			writeErr(w, http.StatusNotFound, "尚无配置文件可删除")

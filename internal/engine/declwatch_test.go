@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/jelly-agent/jelly-agent/internal/config"
+	"github.com/jelly-agent/jelly-agent/internal/storage"
 	"github.com/jelly-agent/jelly-agent/internal/toolreg"
 )
 
@@ -123,6 +124,127 @@ func TestAChangeLandingWhileTheWatcherStartsIsNotLost(t *testing.T) {
 		if time.Now().After(deadline) {
 			t.Fatal("注册表刚建好、watcher 刚起来的那一瞬间改的声明，永远没被认出来 —— " +
 				"基线读晚了，把这次变更算成了已见过")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// The version is only spent on a change that actually got installed.
+//
+// The watcher advanced its version as soon as *its* load succeeded, then
+// handed the set over and the engine threw it away and loaded the table
+// again. Two loads, and only the first one decided whether the change was
+// handled: if the second failed, buildRegistry quietly installed a registry
+// with no overlay in it — every declaration gone, back to built-in defaults —
+// while the watcher had already recorded the version as done. Nothing
+// retried, because the only trigger is the version moving, and it had moved.
+// The process then disagreed with the database until somebody made an
+// unrelated edit.
+func TestAChangeIsInstalledFromWhatTheWatchAlreadyRead(t *testing.T) {
+	prev, prevSeam := declPoll, beforeWatchSwap
+	declPoll = 20 * time.Millisecond
+	t.Cleanup(func() { declPoll, beforeWatchSwap = prev, prevSeam })
+
+	e, db := engineOnFreshDB(t)
+
+	// The database becomes unreadable in the instant between the change
+	// being read and being installed. Installing it must not need it.
+	var once sync.Once
+	beforeWatchSwap = func() {
+		once.Do(func() {
+			if _, err := db.Exec(`UPDATE tool_decls SET use_cases = ?`, `{}`); err != nil {
+				t.Error(err)
+			}
+		})
+	}
+
+	if err := toolreg.SaveDecl(context.Background(), db, toolreg.Decl{
+		Server: "n9e-mcp", Name: "query_range", Suites: &[]string{"promql"},
+	}, "另一个进程"); err != nil {
+		t.Fatal(err)
+	}
+
+	waitForSuites(t, e, "n9e-mcp", "query_range", "promql",
+		"变更是读到了，安装的时候却又去读了一遍库 —— 那一遍失败，注册表退回内置默认值，"+
+			"而版本号已经算作处理过了，没有下一次变更就永远不会重来")
+}
+
+// A load that fails at startup is made up for, without a new change.
+//
+// The watcher used to start from whatever version it read at that moment, so
+// an initial load that failed — a database briefly unreachable, a row being
+// migrated — left the registry without its overlay and the watcher already
+// past the change that would have filled it in. Every declaration silently
+// stopped applying until somebody made another edit.
+func TestAFailedFirstLoadIsMadeUpFor(t *testing.T) {
+	prev := declPoll
+	declPoll = 20 * time.Millisecond
+	t.Cleanup(func() { declPoll = prev })
+
+	dir := t.TempDir()
+	ref := filepath.Join(dir, "state.db")
+	seed := newEngineAt(t, dir, ref)
+	db, err := seed.StateDB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := toolreg.SaveDecl(context.Background(), db, toolreg.Decl{
+		Server: "n9e-mcp", Name: "query_range", Suites: &[]string{"promql"},
+	}, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	// Unreadable before this process ever looks at it.
+	if _, err := db.Exec(`UPDATE tool_decls SET use_cases = ?`, `{}`); err != nil {
+		t.Fatal(err)
+	}
+
+	e := newEngineAt(t, t.TempDir(), ref) // its first load fails
+	if got := suitesOf(t, e, "n9e-mcp", "query_range"); got != nil {
+		t.Fatalf("这一次加载本来就该失败: %v", got)
+	}
+
+	// Repaired, and no new change: the log has not moved, so the only thing
+	// that can fill the registry in is a watcher that never claimed to have
+	// this version.
+	if _, err := db.Exec(`UPDATE tool_decls SET use_cases = NULL`); err != nil {
+		t.Fatal(err)
+	}
+	waitForSuites(t, e, "n9e-mcp", "query_range", "promql",
+		"启动时那次加载失败了，watcher 却从当前版本开始 —— 声明再也补不回来")
+}
+
+func newEngineAt(t *testing.T, metaDir, ref string) *Engine {
+	t.Helper()
+	cfg := &config.Config{Storage: config.Storage{DSN: ref}}
+	cfg.Tools.MetadataDir = filepath.Join(metaDir, "tools")
+	e := New(cfg)
+	t.Cleanup(e.Close)
+	return e
+}
+
+func engineOnFreshDB(t *testing.T) (*Engine, *storage.DB) {
+	t.Helper()
+	dir := t.TempDir()
+	e := newEngineAt(t, dir, filepath.Join(dir, "state.db"))
+	if got := suitesOf(t, e, "n9e-mcp", "query_range"); got != nil {
+		t.Fatal("这个工具本来不该有声明")
+	}
+	db, err := e.StateDB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return e, db
+}
+
+func waitForSuites(t *testing.T, e *Engine, server, name, want, msg string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if got := suitesOf(t, e, server, name); len(got) == 1 && got[0] == want {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal(msg)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}

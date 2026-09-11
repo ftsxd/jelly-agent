@@ -274,6 +274,20 @@ func (s StaticSource) Watch(ctx context.Context) <-chan []ops.ToolMetadata {
 	return ch
 }
 
+// StaticOverlay is a fixed set applied as a patch over the others, which is
+// what a set already read out of the database is.
+//
+// The overlay marker is what decides layering (see Overlay), so a caller
+// holding declarations it has already loaded can install them without
+// loading them again — and "already loaded" is exactly what makes the
+// install reliable enough to confirm a version against.
+type StaticOverlay struct {
+	StaticSource
+}
+
+// IsOverlay marks this as a patch over the file sources.
+func (StaticOverlay) IsOverlay() {}
+
 // Merge loads every source in order and concatenates the results.
 //
 // Order is significance: a later source's entry conflicts with an earlier

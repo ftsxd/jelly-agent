@@ -93,11 +93,8 @@ func (s *Server) attachScheduleTools(eng *engine.Engine) {
 
 func (s *Server) deleteSchedule(name string) error {
 	name = strings.TrimSpace(name)
-	p, err := s.writeTargetPath()
-	if err != nil {
-		return err
-	}
-	c, err := loadRawOrEmpty(p)
+	p, c, done, err := s.editConfig()
+	defer done()
 	if err != nil {
 		return err
 	}
@@ -350,11 +347,8 @@ func validSchedule(t config.ScheduleTask) error {
 // the Agent tool. A matching name updates the existing definition, preventing
 // duplicate cron entries and their shared schedule-<name> session collision.
 func (s *Server) upsertSchedule(t config.ScheduleTask) error {
-	p, err := s.writeTargetPath()
-	if err != nil {
-		return err
-	}
-	c, err := loadRawOrEmpty(p)
+	p, c, done, err := s.editConfig()
+	defer done()
 	if err != nil {
 		return err
 	}
