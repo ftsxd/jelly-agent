@@ -2,7 +2,22 @@
 #
 #   docker compose up -d                    只跑 agent（连你已有的 collector）
 #   docker compose --profile obs up -d      顺带起一套本地的 traces/metrics/logs
-#   docker compose --profile db  up -d      起 PostgreSQL（存储迁移开发用）
+#   docker compose --profile db  up -d      连 PostgreSQL 一起起
+#
+# 默认不带 db profile 时，状态落在 ./data/.jelly-agent/state.db —— 单进程够用。
+# 要换成 PostgreSQL（多进程共享、能备份能接从库），三步：
+#
+#   1. docker compose --profile db up -d postgres     # 首次启动会跑建表脚本
+#   2. 在 ./data/.jelly-agent/config.yaml 里写
+#          storage:
+#            dsn: ${JELLY_PG_DSN}
+#      变量由下面的 environment 传进去，所以同一份配置在宿主机和容器里都能用。
+#   3. 已经有数据要搬的话，停掉 agent 再搬，然后重启：
+#          docker compose run --rm jelly-agent migrate --from /data/.jelly-agent/state.db
+#
+# 没有给 jelly-agent 加 depends_on：那会把 db profile 连带拉起来，而默认就该是
+# 单机 SQLite。库晚一点起来也没关系 —— 打开失败不会被记住，下一次调用重试，
+# 工具声明那一层也会自己补载。
 services:
   jelly-agent:
     image: jelly-agent:local
@@ -16,6 +31,13 @@ services:
       # 在宿主机上指向你的 collector、在 compose 里指向下面那个容器，不用改文件。
       # 详见 tracing.endpoint 的写法（docs/observability.md）。
       OTEL_ENDPOINT: ${OTEL_ENDPOINT:-lgtm:4317}
+      # 同样的办法给状态库：配置里写 storage.dsn: ${JELLY_PG_DSN}，值在这里给。
+      # 容器里的默认值指向下面那个 postgres 服务；宿主机上跑时 shell 里导出自己
+      # 那个。留空（不配 storage.dsn）就还是 ./data/.jelly-agent/state.db。
+      #
+      # 口令写在环境里而不是配置文件里，是因为配置文件要进备份、可能被贴进工单；
+      # 线上请走你们自己的密钥管理，别用这里的开发口令。
+      JELLY_PG_DSN: ${JELLY_PG_DSN:-postgres://jelly:jelly-dev@postgres:5432/jelly?sslmode=disable}
     restart: unless-stopped
 
   # traces + metrics + logs 一个容器搞定：Tempo / Prometheus / Loki + Grafana。
@@ -35,7 +57,7 @@ services:
       - ./data/lgtm:/data
     restart: unless-stopped
 
-  # PostgreSQL —— 存储迁移的开发依赖（migrations/README.md）。
+  # PostgreSQL —— 换掉 SQLite 的那一个（migrations/README.md）。
   #
   # 版本钉死不用 latest：数据库大版本升级要 pg_upgrade，一个 latest 标签
   # 在某天悄悄把本地数据变成打不开的状态，不值得省这点事。

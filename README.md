@@ -10,12 +10,12 @@
 - Agent + `web_search` / `fetch_url` 工具，端到端跑通 DeepSeek。
 - 配置层（YAML + `${ENV}` + 环境变量回落）、模型 Registry、cobra 命令树。
 - **交互式多轮对话** + 内联命令（`/help` `/tools` `/memory` `/clear` `/stats` `/exit`）。
-- **会话持久化**：默认纯 Go SQLite（无 CGO），落配置文件旁边的 `state.db`（默认 `~/.jelly-agent/state.db`）；配 `storage.dsn` 可换 PostgreSQL，见 [migrations/README.md](migrations/README.md)。
+- **状态持久化**：会话、工具产物、调用记录、任务归属、排程日志、工具声明与检索索引都在同一个库里（join 都是 `(session_id, invocation_id)`，分开存就不成立）。默认纯 Go SQLite（无 CGO），落**配置文件旁边**的 `state.db`（默认 `~/.jelly-agent/state.db`）；配 `storage.dsn` 换 PostgreSQL——多进程共享同一份状态、能备份能接从库，迁移命令与 schema 见 [migrations/README.md](migrations/README.md)。
 - **L1 核心记忆**（Hermes 式）：`MEMORY.md` / `USER.md` 每轮注入 system prompt（带 token 预算裁剪），Agent 通过 `remember` / `forget` 工具跨会话增删长期事实。
-- **L2 会话检索**（可选）：历史会话文本索引进 SQLite FTS5（与 `state.db` 同库、纯 Go trigram 分词，中英文皆可子串检索），开启后 Agent 获得 `load_memory` 工具按需检索过往对话。
+- **L2 会话检索**（可选）：历史会话文本索引进状态库，开启后 Agent 获得 `load_memory` 工具按需检索过往对话。SQLite 上走 FTS5 的 trigram 分词（纯 Go，无 CGO），PostgreSQL 上走 pg_trgm 的 GIN 索引——同一套三元分词，行为一致，包括「查询需 ≥3 字符」这条限制。
 - **多 Agent（协调者 + 子 Agent 转交）**：在 config / Web 定义多个具名 Agent（各自 provider、指令、MCP），给协调者挂上「子 Agent」即开启 ADK 的 `transfer_to_agent` 转交——协调者按每个子 Agent 的描述判断把任务交给谁。未定义任何 Agent 时对话仍走默认单 Agent（向后兼容）。
 - **Web 控制台**：`jelly serve` 启动深色主题 Dashboard（Vue 3 + Vite，`go:embed` 进二进制），含对话、工具测试台、会话浏览（可删除）、用量监控、记忆、技能、Agent、MCP、消息绑定、Provider 配置等页面。CLI 与 Web 共用 `internal/engine` 同一运行时。
-- **配置热重载**：Web 端增删改 Provider/MCP/消息绑定保存即生效；直接编辑磁盘上的 `config.yaml` 也会被监听到并自动热重载，对话不中断、无需重启。「不中断」是被保证的而不是碰运气：换掉的旧引擎不立刻关闭，它持有数据库连接、检索索引和 MCP 子进程，正跑在它上面的请求（包括还没结束的 SSE 对话轮）用完之后才关。处理器一律通过请求取引擎（`engineFor(r)`），后台任务显式 pin，有测试守着这条线不被绕开。保存配置也不打断正在跑的定时任务——重载只是让 cron 不再触发新的，已经在跑的那次跑完并写下自己的记录。配置文件的「读—改—写」整体串行：两个人同时改不同的东西，不会有一个人的改动被另一个人整份写回的旧内容盖掉。
+- **配置热重载**：Web 端增删改 Provider/MCP/消息绑定保存即生效；直接编辑磁盘上的 `config.yaml` 也会被监听到并自动热重载，对话不中断、无需重启。「不中断」是被测试守着的，不是碰运气：换下来的旧引擎等在途请求（包括没结束的 SSE 对话轮）用完才关；正在跑的定时任务不会被掐断；配置文件的「读—改—写」整体串行，两个人同时改不同的东西不会互相覆盖。
 - **技能（Skills）**：Claude/Agent Skills 风格的 Markdown 能力包，清单注入 + `use_skill` 按需加载（渐进式披露）；Web 页增删改 + 上传 ZIP 包导入。技能可附带脚本，经 `run_script` 在**沙箱**中执行。
 - **沙箱执行**：脚本运行走 `internal/sandbox`，两套后端——`native`（纯 Go 零依赖、尽力而为加固：清洗环境不泄漏宿主密钥、限工作目录、超时杀整进程组、CPU 时长 + 输出截断）与可选 `docker`（强隔离：无网络、只读 rootfs、内存/PID 限额、仅挂载工作目录）；每次执行写审计日志。后端、资源上限等可在 Web **技能**页的「脚本沙箱设置」直接配置（保存即热重载），也可手动编辑 `configs/config.example.yaml` 的 `sandbox` 段。
 - **消息绑定（多平台）**：把同一套 Agent 接入聊天平台，纯本地无需公网。
@@ -139,7 +139,7 @@ enabled: true
 
 ## 会话检索（L2，可选）
 
-设 `memory.search.enabled: true` 后开启——既可改 `config.yaml`，也可在 Web **记忆**页右上角的开关一键启停（保存即写入配置并热重载，即时生效、无需重启）。开启后每轮结束把会话文本写入 `state.db` 内的 FTS5 全文索引，Agent 据此获得 `load_memory` 工具，可在后续会话里检索过往对话（返回 top-K，永不回灌整段历史）。采用 trigram 分词，中英文均按子串匹配（查询需 ≥3 字符，更短自动回落 LIKE）。配置项见 `memory.search`（`top_k` 等）。向量语义检索（L3）属后续。
+设 `memory.search.enabled: true` 后开启——既可改 `config.yaml`，也可在 Web **记忆**页右上角的开关一键启停（保存即写入配置并热重载，即时生效、无需重启）。开启后每轮结束把会话文本写入状态库的全文索引，Agent 据此获得 `load_memory` 工具，可在后续会话里检索过往对话（返回 top-K，永不回灌整段历史）。采用 trigram 分词，中英文均按子串匹配（查询需 ≥3 字符，更短自动回落 LIKE）——SQLite 上是 FTS5 的 trigram，PostgreSQL 上是 pg_trgm 的 GIN 索引，同一个东西、同一条限制。配置项见 `memory.search`（`top_k` 等）。向量语义检索（L3）属后续。
 
 ## Web 控制台
 
@@ -158,7 +158,7 @@ cp configs/config.example.yaml configs/config.yaml
 - **工具** —— 列出内置工具，并内置 `web_search` 测试台（绕过模型直接调用）。
 - **会话** —— 列出持久化历史会话，查看完整 transcript。
 - **监控** —— 跨全部持久化会话聚合用量：会话/消息/工具调用/Token 总量 KPI、Token 构成、工具调用排行、每日 Token 趋势柱状图。
-- **记忆** —— L1 核心记忆（USER.md / MEMORY.md）快照 + L2 FTS5 会话全文检索。
+- **记忆** —— L1 核心记忆（USER.md / MEMORY.md）快照 + L2 会话全文检索。
 - **Agent** —— 定义具名 Agent（provider / 描述 / 系统指令 / MCP / 子 Agent），新建/编辑/启停/删除、设默认；给协调者勾选子 Agent 即组成转交树。详见下方「多 Agent」。
 - **MCP** —— 接入外部 Model Context Protocol 服务器（stdio / http / sse），新建/编辑/启停/删除、一键测试连接并列出其工具；启用后其工具与内置工具一起注入 Agent。
 - **消息绑定** —— 把钉钉接入为消息入口：新建/编辑/启停/删除钉钉机器人，实时显示连接状态（在线/连接中/错误），启用即连接、无需重启。详见下方「消息绑定」。
@@ -283,6 +283,32 @@ go vet ./...
 
 持久化目录是项目下的 `./data/.jelly-agent/`；其中包含配置、会话、记忆与周期任务记录。生产部署应将该目录纳入备份策略；恢复时停止服务后还原目录内容再启动。Compose 为兼容宿主机绑定目录，以 root 运行容器；若要保持非 root 运行，请自行将 `./data` 的属主设为 UID/GID `65532` 并移除 Compose 的 `user` 配置。
 
+### 换成 PostgreSQL
+
+多进程共享一份状态、或者需要备份/从库/能拿 `psql` 连上去的运维能力时，把状态库换成 PostgreSQL。单进程本地跑不需要这一步。
+
+```bash
+docker compose --profile db up -d postgres          # 首次启动自动跑建表脚本
+```
+
+在 `./data/.jelly-agent/config.yaml`（或 `~/.jelly-agent/config.yaml`）里加一段，值由环境变量给，口令就不会进备份也不会被贴进工单：
+
+```yaml
+storage:
+  dsn: ${JELLY_PG_DSN}
+```
+
+已经有数据要带过去（先停服务，这条命令不加锁）：
+
+```bash
+jelly migrate --from ~/.jelly-agent/state.db --dry-run   # 先看会搬多少，一行不写
+jelly migrate --from ~/.jelly-agent/state.db             # 再搬，搬完逐表核对
+```
+
+**换过去之后备份的对象也变了**：`./data/.jelly-agent/` 只剩配置、核心记忆与技能，会话、产物、调用记录都在数据库里，要走 `pg_dump`。回退是把 `storage.dsn` 删掉再重启，源库自始至终没被改动——但注意时间窗，换过去之后写下的东西不会回到 SQLite。
+
+命令可以重跑：中途断了直接再来一次。目标库里已经存在的行会被跳过，但会先逐列核对内容，主键相同而内容不同的会报出列名并中止——那说明搬错库了，或者服务已经在目标库上跑过。完整的 schema、迁移取舍与实测数据见 [migrations/README.md](migrations/README.md)。
+
 ## 目录
 
 ```text
@@ -294,8 +320,10 @@ internal/mcp/         # MCP 接入（stdio/http/sse transport + toolset + 直连
 internal/model/       # OpenAI 兼容 model.LLM 适配器 + Registry
 internal/tool/        # 内置工具（web_search、fetch_url、remember/forget、load_memory）
 internal/config/      # YAML + ${ENV} 配置加载
-internal/memory/      # L1 核心记忆（MEMORY/USER.md）+ L2 FTS5 会话检索
-internal/session/     # SQLite 会话持久化（纯 Go，无 CGO）
+internal/memory/      # L1 核心记忆（MEMORY/USER.md）+ L2 会话检索（FTS5 / pg_trgm）
+internal/session/     # 会话持久化（ADK GORM 存储 + 分页、批量读取、索引）
+internal/storage/     # 方言层：驱动、占位符改写、连接池、错误码分类、事务边界
+internal/migrate/     # SQLite → PostgreSQL 的搬运与核对（jelly migrate）
 web/                  # Vue 3 + Vite 前端源码（go:embed dist）
 configs/              # 配置示例
 ```
