@@ -140,8 +140,11 @@ sandbox:
 # 工具声明——都在这一个库里。它们按 (session_id, invocation_id) 互相 join，
 # 所以不能拆开放。
 storage:
-  # 留空 = 配置文件旁边的 state.db（这个文件在 ~/.jelly-agent/ 就是
-  # ~/.jelly-agent/state.db）。
+  # 留空 = 先看环境变量 JELLY_STORAGE_DSN，它也没有才是配置文件旁边的 state.db
+  # （这个文件在 ~/.jelly-agent/ 就是 ~/.jelly-agent/state.db）。容器里用环境
+  # 变量那条路：镜像不带配置，挂载卷里手写一段 YAML 才能启动不合理。
+  #
+  # 这里写了值就以这里为准，环境变量不会盖过它。
   #
   # postgres:// 或 postgresql:// 开头选 PostgreSQL。什么时候需要：多个进程
   # 共享一个库（每进程一个 SQLite 句柄互相看不见对方的写入），以及随之而来的

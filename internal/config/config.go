@@ -539,12 +539,44 @@ func LoadOrEnv(explicit string) (*Config, error) {
 				c.Providers = []Provider{p}
 			}
 		}
+		storageFromEnv(c)
 		return c, nil
 	}
 	if p, ok := providerFromEnv(); ok {
-		return &Config{DefaultProvider: p.Name, Providers: []Provider{p}, SourcePath: "(env)"}, nil
+		c := &Config{DefaultProvider: p.Name, Providers: []Provider{p}, SourcePath: "(env)"}
+		storageFromEnv(c)
+		return c, nil
 	}
-	return &Config{}, nil
+	c := &Config{}
+	storageFromEnv(c)
+	return c, nil
+}
+
+// StorageDSNEnv names the environment variable that supplies the state
+// database when the config file does not.
+const StorageDSNEnv = "JELLY_STORAGE_DSN"
+
+// storageFromEnv fills in storage.dsn from the environment when the file says
+// nothing about it.
+//
+// For the container case, which is the one that cannot reasonably edit its own
+// config: the image ships no config, the operator mounts a volume, and telling
+// them to hand-write a storage block into a mounted file before the first
+// start is a worse answer than an environment variable. Compose passes it the
+// same way it passes the OTel endpoint.
+//
+// The file wins when it has a value, including when that value came from
+// ${JELLY_STORAGE_DSN} — explicit beats ambient, and a deployment that wrote
+// the DSN down should not have it changed by a stray variable in a shell.
+//
+// Not applied in LoadRaw: that one backs the config editor, and folding an
+// environment value into it would write the environment into the file the next
+// time somebody saved a provider.
+func storageFromEnv(c *Config) {
+	if c.Storage.DSN != "" {
+		return
+	}
+	c.Storage.DSN = strings.TrimSpace(os.Getenv(StorageDSNEnv))
 }
 
 // Select returns the named provider, or the default provider when name is "".

@@ -291,12 +291,23 @@ go vet ./...
 docker compose --profile db up -d postgres          # 首次启动自动跑建表脚本
 ```
 
-在 `./data/.jelly-agent/config.yaml`（或 `~/.jelly-agent/config.yaml`）里加一段，值由环境变量给，口令就不会进备份也不会被贴进工单：
+然后告诉它连哪个库。两种写法，按场景挑：
+
+```bash
+# 容器里：配置文件没有 storage 段时，这个环境变量就是状态库。
+# 不用先去挂载卷里手写一段 YAML —— 容器恰恰是最不方便改自己配置的那个场景。
+JELLY_STORAGE_DSN=postgres://jelly:…@db:5432/jelly?sslmode=disable
+```
 
 ```yaml
+# 宿主机上直接跑：写进 ~/.jelly-agent/config.yaml。
+# 值仍可以引用环境变量，这样口令不会进备份、也不会被贴进工单。
 storage:
   dsn: ${JELLY_STORAGE_DSN}
 ```
+
+写了文件就以文件为准，环境变量只在文件没说的时候顶上——显式的压过环境里的，
+免得 shell 里一个遗留变量把一套写死的部署指到别的库上。
 
 已经有数据要带过去（先停服务，这条命令不加锁）：
 

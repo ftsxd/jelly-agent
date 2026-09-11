@@ -193,3 +193,72 @@ func TestSaveKeepsTheStorageDSN(t *testing.T) {
 		t.Errorf("storage.dsn = %q after a save/load round trip, want %q", out.Storage.DSN, dsn)
 	}
 }
+
+// A container cannot reasonably hand-write a storage block into a mounted
+// config before its first start, so the DSN can come from the environment.
+//
+// This is the shape somebody actually hit: compose passed JELLY_STORAGE_DSN,
+// the mounted config had no storage section at all, and the container quietly
+// used its own SQLite file — a second deployment that could not see the first
+// one's declarations, with nothing in the logs to say why.
+func TestTheStorageDSNCanComeFromTheEnvironment(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	write := func(body string) {
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	const envDSN = "postgres://env@h:5432/d?sslmode=disable"
+
+	t.Run("文件没说，就用环境里的", func(t *testing.T) {
+		write("default_provider: p\nproviders:\n  - name: p\n    base_url: http://x\n    api_key: k\n    model: m\n")
+		t.Setenv(StorageDSNEnv, envDSN)
+		c, err := LoadOrEnv(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c.Storage.DSN != envDSN {
+			t.Errorf("dsn = %q，环境变量没起作用", c.Storage.DSN)
+		}
+	})
+
+	t.Run("文件写了，文件说了算", func(t *testing.T) {
+		write("default_provider: p\nproviders:\n  - name: p\n    base_url: http://x\n    api_key: k\n    model: m\nstorage:\n  dsn: postgres://file@h:5432/d\n")
+		t.Setenv(StorageDSNEnv, envDSN)
+		c, err := LoadOrEnv(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c.Storage.DSN != "postgres://file@h:5432/d" {
+			t.Errorf("dsn = %q —— 写下来的配置被环境里的变量盖掉了", c.Storage.DSN)
+		}
+	})
+
+	t.Run("两边都没有，还是配置文件旁边的 SQLite", func(t *testing.T) {
+		write("default_provider: p\nproviders:\n  - name: p\n    base_url: http://x\n    api_key: k\n    model: m\n")
+		t.Setenv(StorageDSNEnv, "")
+		c, err := LoadOrEnv(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c.Storage.DSN != "" {
+			t.Errorf("dsn = %q，want 空（空才表示用默认的 state.db）", c.Storage.DSN)
+		}
+	})
+
+	// LoadRaw backs the config editor: folding the environment into it would
+	// write the environment into the file the next time somebody saved a
+	// provider through the console.
+	t.Run("编辑器读的那份不掺环境变量", func(t *testing.T) {
+		write("default_provider: p\nproviders:\n  - name: p\n    base_url: http://x\n    api_key: k\n    model: m\n")
+		t.Setenv(StorageDSNEnv, envDSN)
+		raw, err := LoadRaw(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if raw.Storage.DSN != "" {
+			t.Errorf("LoadRaw 里混进了环境变量的值 %q —— 下次保存就会被写进文件", raw.Storage.DSN)
+		}
+	})
+}

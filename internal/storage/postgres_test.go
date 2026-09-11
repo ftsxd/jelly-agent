@@ -5,7 +5,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
 )
@@ -189,4 +192,77 @@ func lockPG(t *testing.T, dsn string) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { release(); db.Close() })
+}
+
+// The pool has a ceiling, and it is the ceiling this package sets.
+//
+// Asserted with work slow enough to make connections pile up. An earlier
+// version of this claim lived on the session service and used queries that
+// returned immediately: the pool reused one connection, the count stayed low,
+// and the test passed with SetMaxOpenConns(0) — it was measuring nothing.
+//
+// The ceiling matters because the handle is per process and shared by every
+// store in it. Without one, a burst of concurrent requests opens a connection
+// each, and a few processes doing that reach PostgreSQL's max_connections —
+// at which point nothing can connect, including the operator trying to find
+// out why.
+func TestThePostgresPoolHasACeiling(t *testing.T) {
+	dsn := os.Getenv("JELLY_PG_DSN")
+	if dsn == "" {
+		t.Skip("set JELLY_PG_DSN")
+	}
+	exclusive(t, dsn)
+
+	const tag = "jelly-ceiling-test"
+	sep := "&"
+	if !strings.Contains(dsn, "?") {
+		sep = "?"
+	}
+	db, err := Open(dsn + sep + "application_name=" + tag)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	// Each query holds its connection for a moment, so a pool without a limit
+	// would open one per goroutine.
+	var wg sync.WaitGroup
+	for range postgresConnLimit * 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			var ignored string
+			db.QueryRow(`SELECT pg_sleep(0.3)`).Scan(&ignored)
+		}()
+	}
+
+	// Sampled while they are running, not after.
+	time.Sleep(150 * time.Millisecond)
+	peak := backendsTagged(t, dsn, tag)
+	wg.Wait()
+
+	if peak == 0 {
+		t.Fatal("一条连接都没数到 —— 这个测试没在测它以为在测的东西")
+	}
+	if peak > postgresConnLimit {
+		t.Errorf("%d 个并发查询开了 %d 条连接，上限是 %d —— 池子没有上限",
+			postgresConnLimit*8, peak, postgresConnLimit)
+	}
+}
+
+// backendsTagged counts the connections carrying this application_name. Its
+// own connection does not carry it, so it never counts itself.
+func backendsTagged(t *testing.T, dsn, tag string) int {
+	t.Helper()
+	db, err := Open(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var n int
+	if err := db.QueryRow(`SELECT count(*) FROM pg_stat_activity
+		WHERE datname = current_database() AND application_name = ?`, tag).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	return n
 }

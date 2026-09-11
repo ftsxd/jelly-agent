@@ -5,13 +5,11 @@
 #   docker compose --profile db  up -d      连 PostgreSQL 一起起
 #
 # 默认不带 db profile 时，状态落在 ./data/.jelly-agent/state.db —— 单进程够用。
-# 要换成 PostgreSQL（多进程共享、能备份能接从库），三步：
+# 要换成 PostgreSQL（多进程共享、能备份能接从库）：
 #
 #   1. docker compose --profile db up -d postgres     # 首次启动会跑建表脚本
-#   2. 在 ./data/.jelly-agent/config.yaml 里写
-#          storage:
-#            dsn: ${JELLY_STORAGE_DSN}
-#      变量由下面的 environment 传进去，所以同一份配置在宿主机和容器里都能用。
+#   2. 下面的 JELLY_STORAGE_DSN 就够了 —— 配置文件里没有 storage 段时，它会被
+#      当成状态库。挂进去的配置写了 storage.dsn 的话，以文件为准。
 #   3. 已经有数据要搬的话，停掉 agent 再搬，然后重启：
 #          docker compose run --rm jelly-agent migrate --from /data/.jelly-agent/state.db
 #
@@ -31,9 +29,13 @@ services:
       # 在宿主机上指向你的 collector、在 compose 里指向下面那个容器，不用改文件。
       # 详见 tracing.endpoint 的写法（docs/observability.md）。
       OTEL_ENDPOINT: ${OTEL_ENDPOINT:-lgtm:4317}
-      # 同样的办法给状态库：配置里写 storage.dsn: ${JELLY_STORAGE_DSN}，值在这里给。
-      # 容器里的默认值指向下面那个 postgres 服务；宿主机上跑时 shell 里导出自己
-      # 那个。留空（不配 storage.dsn）就还是 ./data/.jelly-agent/state.db。
+      # 状态库。配置文件里没有 storage 段时就用这个值，不用先去挂载卷里手写一段
+      # YAML —— 容器恰恰是最不方便改自己配置的那个场景。文件里写了就以文件为准。
+      # 两边都没有，才是 ./data/.jelly-agent/state.db。
+      #
+      # 下面这个默认值指向本文件里的 postgres 服务。**只抄 jelly-agent 这一段
+      # 到别处时它解析不了**（那台机器上没有叫 postgres 的主机），要在 shell 里
+      # 导出真正的 DSN，或者直接把这一行的值换掉。
       #
       # 名字不叫 JELLY_PG_DSN：那个是测试用的，而 PG 上的测试会把每张表清空。
       # 两者共用一个变量名，迟早有人把测试跑在生产库上 —— 这不是假设，是已经
