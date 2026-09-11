@@ -11,11 +11,19 @@
   from MCP servers and fetch_url, i.e. from whatever the agent happened to
   read, so putting them through v-html would reopen from a second door the hole
   markdown.js was written to close.
+
+  The model's own prose is the exception, and goes through the same sanitising
+  renderer the chat bubble uses. It is the same string the bubble renders —
+  finalAnswer picks it out of these very steps — so leaving it raw here meant
+  one reply looked like a formatted answer in 对话 and like markdown source in
+  会话. Thoughts stay plain: they are clamped to two lines, and block elements
+  fight the clamp for prose nobody reads in full anyway.
 -->
 <script setup>
 import { computed, ref } from 'vue'
 import Icon from './Icon.vue'
 import { summarize, timelineSteps } from '../timeline'
+import { renderMarkdown } from '../markdown'
 import {
   cacheShare, evidenceId, fmtArgs, fmtBytes, fmtTokens, isRetrievable, isTruncated,
   isWithheld, overviewOf, prettyJSON, resultSummary, stepLabel,
@@ -156,7 +164,11 @@ function statusIcon(step) {
               </span>
             </div>
             <div v-else-if="s.kind === 'error'" class="tl-res failed">{{ s.text }}</div>
-            <div v-else-if="s.kind === 'text'" class="tl-res">{{ s.text }}</div>
+            <div
+              v-else-if="s.kind === 'text'"
+              class="tl-res md"
+              v-html="renderMarkdown(s.text)"
+            ></div>
             <div
               v-else-if="s.kind === 'thought'"
               class="tl-res muted"

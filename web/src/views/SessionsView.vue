@@ -5,6 +5,7 @@ import Icon from '../components/Icon.vue'
 import { api } from '../api'
 import { absTime, relTime } from '../time'
 import AgentTimeline from '../components/AgentTimeline.vue'
+import { renderMarkdown } from '../markdown'
 import { emptyTimeline, reduceFrames } from '../timeline'
 import { latestOnly } from '../latest'
 
@@ -309,7 +310,20 @@ function continueChat(id) { router.push({ path: '/chat', query: { session: id } 
                 <Icon :name="ev.role === 'user' ? 'user' : 'bot'" :size="14" />
                 <span class="mono author">{{ ev.author }}</span>
               </div>
-              <div v-if="ev.text" class="ev-text">{{ ev.text }}</div>
+              <!-- An agent's prose is markdown, a user's own message is not —
+                   the same split the chat bubble makes, for the same two
+                   reasons: the model writes tables and lists that are
+                   unreadable as source, and running what the operator typed
+                   through a renderer would let them paste markup into their
+                   own transcript for nothing. Tool calls and results below
+                   stay plain text: they come from MCP servers and fetch_url,
+                   which is the hole markdown.js exists to keep shut. -->
+              <div
+                v-if="ev.text && ev.role === 'agent'"
+                class="ev-text md"
+                v-html="renderMarkdown(ev.text)"
+              ></div>
+              <div v-else-if="ev.text" class="ev-text">{{ ev.text }}</div>
               <div v-for="(tc, ti) in ev.tool_calls" :key="'c' + ti" class="ev-tool">
                 <Icon name="tool" :size="13" />
                 <span class="mono">{{ tc.name }}({{ fmtArgs(tc.args) }})</span>
@@ -620,6 +634,12 @@ function continueChat(id) { router.push({ path: '/chat', query: { session: id } 
 .ev-text {
   white-space: pre-wrap;
   word-break: break-word;
+}
+/* pre-wrap would turn the newlines *between* markdown's block tags into real
+   blank lines — see the note above .md in style.css. The container has to
+   switch it off, because a scoped rule outranks the global one. */
+.ev-text.md {
+  white-space: normal;
 }
 .ev-tool {
   display: flex;
