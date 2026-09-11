@@ -30,7 +30,7 @@ type DBSource struct {
 
 // NewDBSource reads the console's declarations from db.
 func NewDBSource(db *storage.DB) *DBSource {
-	return &DBSource{db: db, poll: declPollInterval}
+	return &DBSource{db: db, poll: DefaultPollInterval}
 }
 
 // WithPoll sets how often Watch asks. Returns s, so it reads as one
@@ -46,13 +46,13 @@ func (s *DBSource) WithPoll(d time.Duration) *DBSource {
 	return s
 }
 
-// declPollInterval is how often Watch asks whether anything changed.
+// DefaultPollInterval is how often a watch asks whether anything changed.
 //
 // It asks for one integer — the highest id in the change log — so the cost of
 // asking is a single indexed read, and the interval can be short enough that
 // a second process notices an edit while the person who made it is still
 // looking at the page.
-const declPollInterval = 3 * time.Second
+const DefaultPollInterval = 3 * time.Second
 
 func (s *DBSource) Name() string { return "db:tool_decls" }
 
@@ -125,55 +125,27 @@ func (s *DBSource) Load(ctx context.Context) ([]ops.ToolMetadata, error) {
 // highest id is a version number that every process reads the same way, so an
 // edit made in one console tab reaches the other one's registry.
 //
-// A caller that has already loaded should use WatchFrom with the version it
-// read *before* that load — see the window described there.
+// Present for the Source interface. A caller that installs what it receives
+// should use Poll instead: a channel hands the set over and then has no way
+// to know whether it was installed, and the version has to be spent on the
+// install, not on the delivery. See Poll.
 func (s *DBSource) Watch(ctx context.Context) <-chan []ops.ToolMetadata {
-	since, _ := s.Version(ctx)
-	return s.WatchFrom(ctx, since)
-}
-
-// WatchFrom is Watch with the baseline supplied.
-//
-// The baseline is which change the caller has already seen, and it has to be
-// read before the load it goes with, not after. Read after, a change that
-// lands between the load and the baseline read is in the baseline but not in
-// what was loaded — so it is never reported and never will be, because the
-// only thing that triggers a report is the version moving past the baseline
-// it is already past. The registry then stays wrong until the next unrelated
-// edit. Taking the baseline first can only cause a redundant reload, which
-// costs one query and changes nothing.
-func (s *DBSource) WatchFrom(ctx context.Context, since int64) <-chan []ops.ToolMetadata {
 	ch := make(chan []ops.ToolMetadata, 1)
 	go func() {
 		defer close(ch)
 		t := time.NewTicker(s.poll)
 		defer t.Stop()
-		seen := since
+		seen := NoVersion
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case <-t.C:
 			}
-			v, err := s.Version(ctx)
-			if err != nil || v == seen {
-				// A failed poll leaves the baseline where it was. Treating an
-				// unreadable log as version zero would report a change that
-				// did not happen, and then miss the next one that did.
+			metas, v, changed, err := s.Poll(ctx, seen)
+			if err != nil || !changed {
 				continue
 			}
-			metas, err := s.Load(ctx)
-			if err != nil {
-				// The baseline stays behind, so the next tick tries this same
-				// change again. Advancing it here — which is what this did —
-				// spent the notification on a load that produced nothing: one
-				// transient error and the edit is lost until somebody makes
-				// another one.
-				continue
-			}
-			// v, read before the load: a change that landed in between is
-			// already in metas and will be reported once more. Redundant is
-			// the safe direction.
 			seen = v
 			select {
 			case ch <- metas:
@@ -185,9 +157,46 @@ func (s *DBSource) WatchFrom(ctx context.Context, since int64) <-chan []ops.Tool
 	return ch
 }
 
+// NoVersion is a baseline meaning "nothing confirmed yet". It matches no real
+// version, so the first poll against it always reports a change. Versions are
+// log ids and start at one; zero is the real version of an empty log, which
+// is why "nothing yet" cannot be spelled zero.
+const NoVersion = int64(-1)
+
+// Poll reports the declarations when the change log has moved past since.
+//
+// The caller keeps the baseline and advances it itself, after it has
+// installed what came back — and that is the whole reason this is a function
+// rather than a channel. A watcher that owns the baseline spends it when it
+// hands the set over, which is not the same moment as the set taking effect:
+// if the install then fails, or never happens, the change is marked handled
+// and nothing retries it, because the only trigger is the version moving past
+// a baseline it has already passed.
+//
+// The version comes back read *before* the load, so a change landing between
+// the two is already in metas and gets reported once more. Redundant is the
+// safe direction.
+//
+// changed is false when nothing has moved; err leaves the baseline alone, so
+// a failed poll costs a tick and not the notification.
+func (s *DBSource) Poll(ctx context.Context, since int64) (metas []ops.ToolMetadata, version int64, changed bool, err error) {
+	v, err := s.Version(ctx)
+	if err != nil {
+		return nil, 0, false, err
+	}
+	if v == since {
+		return nil, v, false, nil
+	}
+	metas, err = s.Load(ctx)
+	if err != nil {
+		return nil, 0, false, err
+	}
+	return metas, v, true, nil
+}
+
 // Version is the highest id in the change log, or zero when it is empty.
 //
-// Exported so a caller can take the baseline before loading; see WatchFrom.
+// Exported so a caller can take the baseline before loading; see Poll.
 // An unreadable log is an error rather than zero, because zero is a real
 // version and a caller cannot tell the two apart.
 func (s *DBSource) Version(ctx context.Context) (int64, error) {

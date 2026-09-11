@@ -7,6 +7,7 @@ package engine
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -147,16 +148,22 @@ type Engine struct {
 	recordStore *record.Store
 	recordsErr  error
 
-	// stateOnce guards the one handle on the shared state database.
+	// stateMu guards the one handle on the shared state database.
 	//
 	// Four stores used to open their own on every call and close it again —
 	// free against a local SQLite file, a TCP and authentication handshake
 	// against PostgreSQL. Measured at 9.3ms per call versus 579µs on a handle
 	// that is kept, so a sessions page paid the 9.3ms before doing any work
 	// and a bulk delete paid it three times.
-	stateOnce sync.Once
-	stateDB   *storage.DB
-	stateErr  error
+	//
+	// A mutex rather than a sync.Once, because a Once remembers the failure
+	// too: a database that was unreachable the first time anything asked was
+	// unreachable for the rest of the process's life, however long it had
+	// been back. Success is what is remembered here; a failure is just this
+	// call's answer, and the next caller tries again.
+	stateMu     sync.Mutex
+	stateDB     *storage.DB
+	stateClosed bool
 
 	// sessionOnce guards the ADK session service, which six request paths
 	// used to build afresh on every call. Building it opens a connection and
@@ -318,8 +325,12 @@ func (e *Engine) Close() {
 			slog.Warn("关闭会话存储失败", logging.Err(err))
 		}
 	}
-	if e.stateDB != nil {
-		if err := e.stateDB.Close(); err != nil {
+	e.stateMu.Lock()
+	db := e.stateDB
+	e.stateDB, e.stateClosed = nil, true
+	e.stateMu.Unlock()
+	if db != nil {
+		if err := db.Close(); err != nil {
 			slog.Warn("关闭状态数据库失败", logging.Err(err))
 		}
 	}
@@ -437,7 +448,7 @@ func (e *Engine) toolRegistry() (*toolreg.Store, *gateway.Gateway) {
 		// confirmed against a *different* load than the one installed
 		// covers whatever that other load happened to see.
 		src, since, overlay := e.loadDeclOverlay()
-		e.toolStore.Swap(buildRegistry(e.registrySources(overlay)))
+		e.toolStore.Swap(buildRegistryOrBuiltins(e.registrySources(overlay)))
 		afterFirstRegistry() // a seam; the window this ordering closes
 		e.watchDeclarations(src, since)
 
@@ -792,14 +803,30 @@ func upstreamCut(delivered map[string]any) record.Upstream {
 //
 // The handle is not closed per use. It lives as long as the process, which is
 // what a pool is for.
+//
+// A failure is not remembered. Opening is retried on the next call, because
+// the interesting failure is transient — a database still starting, a network
+// that came back — and remembering it meant one unlucky moment at boot left
+// the process with no state for as long as it ran: no sessions, no task
+// links, and a tool registry permanently missing its console layer, with
+// nothing that would ever try again.
 func (e *Engine) StateDB() (*storage.DB, error) {
-	e.stateOnce.Do(func() {
-		var path string
-		if path, e.stateErr = e.stateReference(); e.stateErr != nil {
-			return
+	e.stateMu.Lock()
+	defer e.stateMu.Unlock()
+	if e.stateDB != nil {
+		return e.stateDB, nil
+	}
+	if e.stateClosed {
+		return nil, errEngineClosed
+	}
+	open := func() (*storage.DB, error) {
+		path, err := e.stateReference()
+		if err != nil {
+			return nil, err
 		}
-		if e.stateDB, e.stateErr = storage.Open(path); e.stateErr != nil {
-			return
+		db, err := storage.Open(path)
+		if err != nil {
+			return nil, err
 		}
 		for _, ensure := range []func(*storage.DB) error{
 			jellysession.EnsureSchema,
@@ -808,12 +835,19 @@ func (e *Engine) StateDB() (*storage.DB, error) {
 			schedule.EnsureSchema,
 			memory.EnsureSchema,
 		} {
-			if err := ensure(e.stateDB); err != nil {
-				e.stateDB.Close()
-				e.stateDB, e.stateErr = nil, err
-				return
+			if err := ensure(db); err != nil {
+				db.Close()
+				return nil, err
 			}
 		}
+		return db, nil
+	}
+	db, err := open()
+	if err != nil {
+		return nil, err
+	}
+	e.stateDB = db
+	{
 		// A deployment upgrading across the move from console.yaml to the
 		// table has one, holding decisions somebody made. Once, and only into
 		// an empty table — see ImportConsoleFile.
@@ -836,9 +870,13 @@ func (e *Engine) StateDB() (*storage.DB, error) {
 					"renamed_to", path+".imported")
 			}
 		}
-	})
-	return e.stateDB, e.stateErr
+	}
+	return e.stateDB, nil
 }
+
+// errEngineClosed is what a closed engine answers, so a retry loop stops
+// rather than reopening the database a Close just released.
+var errEngineClosed = errors.New("engine: 已关闭")
 
 // records opens the delivery store on first use.
 func (e *Engine) records() (*record.Store, error) {
@@ -1544,11 +1582,18 @@ func (e *Engine) SetStateRef(ref string) { e.stateRef = ref }
 // A metadata problem is logged and tolerated: an unparsable overlay leaves the
 // built-in defaults in place, because refusing to start over a malformed
 // description would be a worse outcome than running with fewer wrapped tools.
-func buildRegistry(sources []toolreg.Source) *toolreg.Registry {
+// buildRegistry merges the layers into a registry, or reports why it could
+// not.
+//
+// The error is returned rather than swallowed because the callers want
+// different things from it: a startup with an unreadable metadata file is
+// better off with built-in defaults than with nothing, while a rebuild
+// triggered by a change must not install a registry that is missing layers —
+// it would replace a correct one with a worse one and call it done.
+func buildRegistry(sources []toolreg.Source) (*toolreg.Registry, error) {
 	metas, err := toolreg.Merge(context.Background(), sources...)
 	if err != nil {
-		slog.Error("工具元数据加载失败，仅使用内置默认值", logging.Err(err))
-		metas, _ = jellytool.BuiltinMetadata().Load(context.Background())
+		return nil, err
 	}
 	reg, conflicts := toolreg.Build(metas)
 	for _, c := range conflicts {
@@ -1556,17 +1601,34 @@ func buildRegistry(sources []toolreg.Source) *toolreg.Registry {
 		// of catching this here is that someone can act on it.
 		slog.Error("工具注册冲突，该条目未生效", "detail", c.Error())
 	}
-	return reg
+	return reg, nil
+}
+
+// buildRegistryOrBuiltins is buildRegistry for the first build, where there
+// is no previous registry to keep: a deployment with one unreadable metadata
+// file still has to start, and built-in defaults are what it starts with.
+func buildRegistryOrBuiltins(sources []toolreg.Source) *toolreg.Registry {
+	reg, err := buildRegistry(sources)
+	if err == nil {
+		return reg
+	}
+	slog.Error("工具元数据加载失败，仅使用内置默认值", logging.Err(err))
+	metas, _ := jellytool.BuiltinMetadata().Load(context.Background())
+	builtins, _ := toolreg.Build(metas)
+	return builtins
 }
 
 // declPoll is how often watchDeclarations asks whether another process
-// changed a declaration. A variable so a test does not have to wait it out.
+// changed a declaration. A variable so a test does not have to wait it out;
+// zero means the source's own default.
 var declPoll = 0 * time.Second
 
-// declUnread is a baseline meaning "this process has confirmed no version",
-// distinct from version zero, which means "the log is empty and I have seen
-// that". Any real version differs from it, so the watcher's first tick loads.
-const declUnread = int64(-1)
+func declPollInterval() time.Duration {
+	if declPoll > 0 {
+		return declPoll
+	}
+	return toolreg.DefaultPollInterval
+}
 
 // watchDeclarations rebuilds the registry when a declaration changes in the
 // database, including one this process did not make.
@@ -1579,60 +1641,101 @@ const declUnread = int64(-1)
 // two-process deployment quietly disagreed about tool metadata until someone
 // restarted it. This is the consumer.
 //
-// Silent when the database will not open, like every other user of the
-// overlay: the file layers still apply and the console cannot save anyway.
+// Started even when the database would not open, and that is the point of it
+// being a loop rather than a subscription: StateDB retries per call, but only
+// if something calls it, so without this a database that was down for the
+// first second of the process left the registry permanently without its
+// console layer and nothing that would ever fill it in.
 //
 // Stops with the engine — the context is the one Close cancels — so a
 // replaced engine's watcher goes away with it rather than swapping into a
 // registry nobody reads.
 func (e *Engine) watchDeclarations(src *toolreg.DBSource, since int64) {
-	if src == nil {
-		return
-	}
-	ch := src.WatchFrom(e.mcpCtx, since)
 	go func() {
-		for overlay := range ch {
-			// The set the watch handed over, not another read of the same
-			// table. Discarding it and loading again meant the version was
-			// confirmed by one load and the registry built from a second
-			// one: if that second load failed, buildRegistry quietly
-			// installed a registry with no overlay in it while the watcher
-			// recorded the change as handled, and nothing retried it —
-			// silently wrong until somebody made an unrelated edit.
+		t := time.NewTicker(declPollInterval())
+		defer t.Stop()
+		seen := since
+		for {
+			select {
+			case <-e.mcpCtx.Done():
+				return
+			case <-t.C:
+			}
+			if src == nil {
+				// The database would not open when the registry was first
+				// built. Nothing else is going to try again — StateDB is
+				// retried per call, but only if something calls it — so the
+				// watcher is what makes that a delay instead of a permanent
+				// state. Until it opens there is nothing to poll.
+				if src, seen = e.declSource(), toolreg.NoVersion; src == nil {
+					continue
+				}
+			}
+			overlay, v, changed, err := src.Poll(e.mcpCtx, seen)
+			if err != nil || !changed {
+				continue
+			}
+			// The set the poll handed over, not another read of the same
+			// table. Reading again meant the version was confirmed by one
+			// load and the registry built from a second one: if that second
+			// load failed, a registry with no overlay in it went in — every
+			// declaration gone, back to built-in defaults — while the change
+			// was already recorded as handled.
 			//
-			// The other layers are files and built-ins; the overlay is
-			// what this version tracks, and it is already in hand.
-			beforeWatchSwap() // a seam; a test breaks the table here
-			e.toolStore.Swap(buildRegistry(e.registrySources(overlay)))
+			// The other layers are files and built-ins; the overlay is what
+			// this version tracks, and it is already in hand.
+			beforeWatchSwap() // a seam; a test breaks a layer here
+			reg, err := buildRegistry(e.registrySources(overlay))
+			if err != nil {
+				// Not installed, so not handled. The baseline stays where it
+				// was and the next tick tries the same change again. A
+				// version spent on an install that did not happen is a
+				// registry that stays wrong with nothing left to correct it.
+				slog.Warn("工具声明变了，但注册表没建起来，下一轮再试", logging.Err(err))
+				continue
+			}
+			e.toolStore.Swap(reg)
+			seen = v
 			slog.Info("工具声明有变化，已重建注册表")
 		}
 	}()
 }
 
+// declSource opens the declaration source, or nil when the database will not
+// open. Separate from loadDeclOverlay because the watcher needs to keep
+// trying for one long after startup has given up.
+func (e *Engine) declSource() *toolreg.DBSource {
+	db, err := e.StateDB()
+	if err != nil {
+		return nil
+	}
+	return toolreg.NewDBSource(db).WithPoll(declPollInterval())
+}
+
 // loadDeclOverlay opens the declaration source, reads which change it is at,
 // and loads it — in that order.
 //
-// Returns a baseline of declUnread when there is nothing it can vouch for:
+// Returns a baseline of toolreg.NoVersion when there is nothing it can vouch for:
 // the database will not open, the version will not read, or the load failed.
 // The watcher then treats the first tick as a change and loads again, which
 // is the retry the old code did not have — a failed load at startup left the
 // registry without its overlay and the watcher starting from a version that
 // already covered it.
 func (e *Engine) loadDeclOverlay() (*toolreg.DBSource, int64, []ops.ToolMetadata) {
-	db, err := e.StateDB()
-	if err != nil {
-		return nil, declUnread, nil
+	src := e.declSource()
+	if src == nil {
+		slog.Warn("状态库打不开，工具声明这一层先空着，watcher 会一直重试")
+		return nil, toolreg.NoVersion, nil
 	}
-	src := toolreg.NewDBSource(db).WithPoll(declPoll)
 	v, err := src.Version(e.mcpCtx)
 	if err != nil {
 		slog.Warn("读不到工具声明的版本号，注册表先按文件层建，稍后补载", logging.Err(err))
-		return src, declUnread, nil
+		return src, toolreg.NoVersion, nil
 	}
 	overlay, err := src.Load(e.mcpCtx)
 	if err != nil {
 		slog.Warn("读不到工具声明，注册表先按文件层建，稍后补载", logging.Err(err))
-		return src, declUnread, nil
+		return src, toolreg.NoVersion, nil
 	}
 	return src, v, overlay
 }
@@ -1669,7 +1772,16 @@ var afterFirstRegistry = func() {}
 // store; this is what it was for.
 func (e *Engine) ReloadToolMetadata() {
 	store, _ := e.toolRegistry() // ensure it exists before swapping into it
-	store.Swap(buildRegistry(e.metadataSources()))
+	reg, err := buildRegistry(e.metadataSources())
+	if err != nil {
+		// The registry it has is better than one built from fewer layers.
+		// This runs after a console save, so the alternative is replacing a
+		// correct registry with built-in defaults because some other file is
+		// unreadable — a save of one tool's suites wiping every declaration.
+		slog.Error("重建工具注册表失败，保留原来的", logging.Err(err))
+		return
+	}
+	store.Swap(reg)
 }
 
 // importableMetadataDir is the metadata directory this deployment configured,

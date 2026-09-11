@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -248,4 +249,113 @@ func waitForSuites(t *testing.T, e *Engine, server, name, want, msg string) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
+}
+
+// A database that will not open at startup must be made up for when it does.
+//
+// The registry's first build asks for the state database; if that fails there
+// is no overlay and — because the handle was opened once and its failure
+// remembered — nothing in the process would ever ask again. Every console
+// declaration silently stopped applying for as long as the process ran, over
+// a database that was down for one second at boot.
+func TestADatabaseThatOpensLateIsPickedUp(t *testing.T) {
+	prev := declPoll
+	declPoll = 20 * time.Millisecond
+	t.Cleanup(func() { declPoll = prev })
+
+	dir := t.TempDir()
+	ref := filepath.Join(dir, "state.db")
+	// Not a database, so opening it fails the way an unreachable one does.
+	if err := os.WriteFile(ref, []byte("这不是一个数据库文件"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	e := newEngineAt(t, dir, ref)
+	if _, err := e.StateDB(); err == nil {
+		t.Fatal("这一次打开本来就该失败")
+	}
+	if got := suitesOf(t, e, "n9e-mcp", "query_range"); got != nil {
+		t.Fatalf("库都打不开，声明是哪来的: %v", got)
+	}
+
+	// The database comes back: the file is replaced by a real one holding a
+	// declaration. Nothing in this process has been told.
+	if err := os.Remove(ref); err != nil {
+		t.Fatal(err)
+	}
+	seed := newEngineAt(t, t.TempDir(), ref)
+	db, err := seed.StateDB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := toolreg.SaveDecl(context.Background(), db, toolreg.Decl{
+		Server: "n9e-mcp", Name: "query_range", Suites: &[]string{"promql"},
+	}, "alice"); err != nil {
+		t.Fatal(err)
+	}
+
+	waitForSuites(t, e, "n9e-mcp", "query_range", "promql",
+		"启动时库打不开，之后就再也没有人重试过 —— 控制台声明这一层永久失效")
+}
+
+// A rebuild that did not happen must not count as handled.
+//
+// The version says "the registry has this change in it". Spending it on a
+// build that failed — an unreadable metadata file is enough, and the fallback
+// then installs built-in defaults — leaves the registry wrong with nothing
+// left to correct it: the only trigger is the version moving, and it has
+// already moved.
+func TestAFailedRebuildDoesNotSpendTheVersion(t *testing.T) {
+	prev, prevSeam := declPoll, beforeWatchSwap
+	declPoll = 20 * time.Millisecond
+	t.Cleanup(func() { declPoll, beforeWatchSwap = prev, prevSeam })
+
+	dir := t.TempDir()
+	e := newEngineAt(t, dir, filepath.Join(dir, "state.db"))
+	metaDir := filepath.Join(dir, "tools")
+	if err := os.MkdirAll(metaDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	broken := filepath.Join(metaDir, "broken.yaml")
+
+	// One of the other layers breaks in the instant before the install, so
+	// the rebuild fails. Held that way until the test repairs it.
+	var once sync.Once
+	beforeWatchSwap = func() {
+		once.Do(func() {
+			if err := os.WriteFile(broken, []byte("tools: [oh: dear\n"), 0o644); err != nil {
+				t.Error(err)
+			}
+		})
+	}
+
+	// Force the first build now, so what arrives later can only have come
+	// through the watcher.
+	if got := suitesOf(t, e, "n9e-mcp", "query_range"); got != nil {
+		t.Fatal("这个工具本来不该有声明")
+	}
+
+	db, err := e.StateDB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := toolreg.SaveDecl(context.Background(), db, toolreg.Decl{
+		Server: "n9e-mcp", Name: "query_range", Suites: &[]string{"promql"},
+	}, "alice"); err != nil {
+		t.Fatal(err)
+	}
+
+	// While the file is broken nothing may be installed.
+	time.Sleep(200 * time.Millisecond)
+	if got := suitesOf(t, e, "n9e-mcp", "query_range"); got != nil {
+		t.Fatalf("重建失败了，却装上了一份注册表: %v", got)
+	}
+
+	// Repaired, and no new change: only a version that was never spent can
+	// still deliver this one.
+	if err := os.Remove(broken); err != nil {
+		t.Fatal(err)
+	}
+	waitForSuites(t, e, "n9e-mcp", "query_range", "promql",
+		"重建失败的那一轮把版本号花掉了 —— 文件修好之后再也没有人补上这次变更")
 }
