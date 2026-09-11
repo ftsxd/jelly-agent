@@ -9,11 +9,26 @@ Elasticsearch。**
 
 ## 怎么确认这套东西是对的
 
-跑测试。PostgreSQL 相关的是 opt-in 的，设 `JELLY_PG_DSN` 才跑：
+跑测试。PostgreSQL 相关的是 opt-in 的，设 `JELLY_PG_DSN` 才跑。
+
+**这个库会被清空。** 每个用到它的测试都以「清掉每一张表」开场、再以同样的动作
+收尾，所以它必须是一个专门的、名字里带 `test` 的库——不是你部署在用的那个。
+`storage.LockExclusively` 会在第一条 DELETE 之前检查库名并直接拒绝，因为这件事
+真的发生过：一套部署被搬到测试正在用的那个 PG 上，一次 `go test` 就把它的会话
+删了，只因为源库 SQLite 从没被改动过才救得回来。生产库走配置里的 `storage.dsn`，
+和 `JELLY_PG_DSN` 是两个东西，别指同一个。
+
+第一次准备这个库：
+
+```bash
+createdb jelly_test                                   # 或 CREATE DATABASE jelly_test
+psql "postgres://…/jelly_test" -f migrations/postgres/0001_init.sql
+```
+
 
 ```bash
 go test ./...                                   # SQLite 侧，无需任何外部依赖
-JELLY_PG_DSN=postgres://… go test ./internal/... # 同一批测试，跑在 PG 上
+JELLY_PG_DSN=postgres://…/jelly_test go test ./internal/... # 同一批测试，跑在 PG 上
 go test ./internal/server/ ./internal/task/ -race
 cd web && npx vitest run && npx vite build
 ```

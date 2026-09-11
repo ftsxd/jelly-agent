@@ -295,7 +295,7 @@ docker compose --profile db up -d postgres          # 首次启动自动跑建�
 
 ```yaml
 storage:
-  dsn: ${JELLY_PG_DSN}
+  dsn: ${JELLY_STORAGE_DSN}
 ```
 
 已经有数据要带过去（先停服务，这条命令不加锁）：
