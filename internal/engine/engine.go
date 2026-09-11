@@ -448,7 +448,15 @@ func (e *Engine) toolRegistry() (*toolreg.Store, *gateway.Gateway) {
 		// confirmed against a *different* load than the one installed
 		// covers whatever that other load happened to see.
 		src, since, overlay := e.loadDeclOverlay()
-		e.toolStore.Swap(buildRegistryOrBuiltins(e.registrySources(overlay)))
+		reg, complete := buildRegistryOrBuiltins(e.registrySources(overlay))
+		e.toolStore.Swap(reg)
+		if !complete {
+			// The fallback registry does not contain the overlay, so the
+			// version it came with is not a claim this process can make. The
+			// same rule as the watcher's, at the one build that is not the
+			// watcher's: a version is spent by an install, not by a load.
+			since = toolreg.NoVersion
+		}
 		afterFirstRegistry() // a seam; the window this ordering closes
 		e.watchDeclarations(src, since)
 
@@ -1607,15 +1615,22 @@ func buildRegistry(sources []toolreg.Source) (*toolreg.Registry, error) {
 // buildRegistryOrBuiltins is buildRegistry for the first build, where there
 // is no previous registry to keep: a deployment with one unreadable metadata
 // file still has to start, and built-in defaults are what it starts with.
-func buildRegistryOrBuiltins(sources []toolreg.Source) *toolreg.Registry {
+//
+// The second return says whether the layers it was given are the ones that
+// went in. It matters because the caller is about to tell the watcher which
+// change the registry already has: a fallback registry has none of them, and
+// saying otherwise leaves the declarations out with nothing that would ever
+// put them back — the watcher only reacts to the version moving past a
+// baseline it has already passed.
+func buildRegistryOrBuiltins(sources []toolreg.Source) (*toolreg.Registry, bool) {
 	reg, err := buildRegistry(sources)
 	if err == nil {
-		return reg
+		return reg, true
 	}
-	slog.Error("工具元数据加载失败，仅使用内置默认值", logging.Err(err))
+	slog.Error("工具元数据加载失败，仅使用内置默认值，稍后重试", logging.Err(err))
 	metas, _ := jellytool.BuiltinMetadata().Load(context.Background())
 	builtins, _ := toolreg.Build(metas)
-	return builtins
+	return builtins, false
 }
 
 // declPoll is how often watchDeclarations asks whether another process

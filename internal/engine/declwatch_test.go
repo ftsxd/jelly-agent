@@ -359,3 +359,58 @@ func TestAFailedRebuildDoesNotSpendTheVersion(t *testing.T) {
 	waitForSuites(t, e, "n9e-mcp", "query_range", "promql",
 		"重建失败的那一轮把版本号花掉了 —— 文件修好之后再也没有人补上这次变更")
 }
+
+// A first build that fell back to built-ins must not claim the version it
+// never installed.
+//
+// The first build is the one build that is allowed to fail and still let the
+// process start — a deployment with one unreadable metadata file has to come
+// up — so it installs built-in defaults instead. But it was still telling the
+// watcher which change the registry had, using the version that came with the
+// overlay it just failed to install. The watcher then only reacts to
+// something *newer*, so every declaration stayed missing until somebody
+// happened to make an unrelated edit. Repairing the file changed nothing.
+func TestAFirstBuildThatFellBackDoesNotClaimTheVersion(t *testing.T) {
+	prev := declPoll
+	declPoll = 20 * time.Millisecond
+	t.Cleanup(func() { declPoll = prev })
+
+	dir := t.TempDir()
+	ref := filepath.Join(dir, "state.db")
+
+	// A declaration is already in the database before this process starts.
+	seed := newEngineAt(t, t.TempDir(), ref)
+	db, err := seed.StateDB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := toolreg.SaveDecl(context.Background(), db, toolreg.Decl{
+		Server: "n9e-mcp", Name: "query_range", Suites: &[]string{"promql"},
+	}, "alice"); err != nil {
+		t.Fatal(err)
+	}
+
+	// …and another layer is unreadable, so the first build cannot use it.
+	metaDir := filepath.Join(dir, "tools")
+	if err := os.MkdirAll(metaDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	broken := filepath.Join(metaDir, "broken.yaml")
+	if err := os.WriteFile(broken, []byte("tools: [oh: dear\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	e := newEngineAt(t, dir, ref)
+	if got := suitesOf(t, e, "n9e-mcp", "query_range"); got != nil {
+		t.Fatalf("这一次构建本来就该退回内置默认值: %v", got)
+	}
+
+	// Repaired, and no new change: only a version this process never claimed
+	// can still bring the declaration in.
+	if err := os.Remove(broken); err != nil {
+		t.Fatal(err)
+	}
+	waitForSuites(t, e, "n9e-mcp", "query_range", "promql",
+		"首次构建退回了内置默认值，却把那次没装上的版本号报给了 watcher —— "+
+			"文件修好之后声明再也回不来")
+}
