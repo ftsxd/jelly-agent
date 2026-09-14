@@ -1,6 +1,6 @@
 # jelly-agent
 
-基于 [ADK-Go](https://pkg.go.dev/google.golang.org/adk) (v1.3.0) 的多模型 Agent 平台：纯 Go 单二进制，OpenAI 兼容统一接入（DeepSeek / OpenAI / Claude / Ollama …），支持流式对话与工具调用。提供 Web Dashboard 与 Terminal CLI 双入口，内置记忆、技能（Skills）、MCP，并可接入钉钉 / 个人微信等聊天平台。
+基于 [ADK-Go](https://pkg.go.dev/google.golang.org/adk) (v1.6.0) 的多模型 Agent 平台：纯 Go 单二进制，OpenAI 兼容统一接入（DeepSeek / OpenAI / Claude / Ollama …），支持流式对话与工具调用。提供 Web Dashboard 与 Terminal CLI 双入口，内置记忆、技能（Skills）、MCP，并可接入钉钉 / 个人微信等聊天平台。
 
 ## 项目状态
 
