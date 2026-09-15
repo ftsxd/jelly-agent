@@ -263,6 +263,21 @@ type AgentDef struct {
 	// form of RequiredTools once a deployment has classified its tool catalogue;
 	// both fields are additive rather than alternatives.
 	RequiredSuites []string `mapstructure:"required_suites" yaml:"required_suites,omitempty" json:"required_suites,omitempty"`
+	// Skills names the skills this agent may see and load. The pointer carries
+	// three states, and they are all needed:
+	//
+	//	nil (field absent) ⇒ every enabled skill — what every agent defined
+	//	                     before this field existed already had, so adding
+	//	                     it changes no running deployment.
+	//	["a", "b"]         ⇒ exactly those.
+	//	[]                 ⇒ none. The coordinator's case: an agent whose job
+	//	                     is to route should not also hold the means to do
+	//	                     the work and quietly stop delegating.
+	//
+	// Deliberately unlike MCP (where absent ⇒ none): MCP servers are heavy,
+	// stateful subprocesses worth opting into, while a skill costs one catalog
+	// line until it is used.
+	Skills *[]string `mapstructure:"skills" yaml:"skills,omitempty" json:"skills"`
 	// SubAgents names the child agents this one may transfer to (delegation).
 	SubAgents []string `mapstructure:"sub_agents" yaml:"sub_agents,omitempty" json:"sub_agents,omitempty"`
 	// Enabled gates whether the agent is selectable / built. Disabled agents are

@@ -35,18 +35,18 @@ type useSkillResult struct {
 // Telling the model the envelope up front is not decoration: a model that does
 // not know the network is closed writes a script that curls, watches it fail,
 // and retries. store must be non-nil; varsFor may be nil.
-func SkillTool(store *skill.Store, varsFor func(skill string) map[string]string, scriptsEnabled bool, pol sandbox.Policy) (adktool.Tool, error) {
+func SkillTool(store *skill.Store, varsFor func(skill string) map[string]string, scriptsEnabled bool, pol sandbox.Policy, allow skill.Allowlist) (adktool.Tool, error) {
 	return functiontool.New(
 		functiontool.Config{
 			Name:        "use_skill",
 			Description: "按名称加载一个技能的完整步骤说明。当用户的需求匹配系统提示「可用技能」清单中的某项时调用，然后严格按返回的 instructions 执行。",
 		},
 		func(_ adktool.Context, args useSkillArgs) (useSkillResult, error) {
-			sk, ok, err := store.Get(args.Name)
+			sk, ok, err := store.Visible(args.Name, allow)
 			if err != nil {
 				return useSkillResult{}, err
 			}
-			if !ok || !sk.Enabled {
+			if !ok {
 				return useSkillResult{Found: false, Message: "未找到该技能（或未启用）：" + args.Name}, nil
 			}
 			res := useSkillResult{Found: true, Name: sk.Name, Description: sk.Description, Instructions: sk.Body}
@@ -78,7 +78,11 @@ type runScriptResult struct {
 // inside the sandbox (pol), with that skill's configured variables injected as
 // environment (the secret values never enter the prompt). Register this ONLY
 // when script execution is enabled. store must be non-nil; varsFor may be nil.
-func RunScriptTool(store *skill.Store, varsFor func(skill string) map[string]string, pol sandbox.Policy) (adktool.Tool, error) {
+//
+// allow is enforced here too, not just in use_skill: the catalog is the only
+// thing that stops a model naming a skill it was never shown, and "the model
+// would have to guess the name" is not an access control.
+func RunScriptTool(store *skill.Store, varsFor func(skill string) map[string]string, pol sandbox.Policy, allow skill.Allowlist) (adktool.Tool, error) {
 	return functiontool.New(
 		functiontool.Config{
 			Name:        "run_script",
@@ -89,7 +93,7 @@ func RunScriptTool(store *skill.Store, varsFor func(skill string) map[string]str
 			if varsFor != nil {
 				env = varsFor(args.Skill)
 			}
-			out, err := store.RunScript(tc, args.Skill, args.Script, args.Args, env, pol)
+			out, err := store.RunScript(tc, args.Skill, args.Script, args.Args, env, pol, allow)
 			if err != nil {
 				return runScriptResult{OK: false, Output: out, Error: err.Error()}, nil
 			}

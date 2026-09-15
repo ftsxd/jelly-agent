@@ -262,3 +262,47 @@ func TestTheStorageDSNCanComeFromTheEnvironment(t *testing.T) {
 		}
 	})
 }
+
+// The agent skills field carries three states, and YAML is where they are most
+// likely to collapse: `omitempty` drops a nil pointer (correct — the field was
+// never set) but must NOT drop a pointer to an empty slice, which is the
+// deliberate "this agent gets no skills" of a coordinator. If that one survives
+// a save/load, every state does.
+func TestAgentSkillsTriStateSurvivesSave(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	none := []string{}
+	some := []string{"alpha", "beta"}
+	in := &Config{
+		Providers: []Provider{{Name: "p1", BaseURL: "http://x", APIKey: "k", Model: "m"}},
+		Agents: []AgentDef{
+			{Name: "unset", Enabled: true},               // nil ⇒ every skill
+			{Name: "none", Enabled: true, Skills: &none}, // explicitly nothing
+			{Name: "some", Enabled: true, Skills: &some}, // exactly these
+		},
+	}
+	if err := Save(in, path); err != nil {
+		t.Fatal(err)
+	}
+	out, err := LoadRaw(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byName := map[string]AgentDef{}
+	for _, a := range out.Agents {
+		byName[a.Name] = a
+	}
+
+	if got := byName["unset"].Skills; got != nil {
+		t.Errorf("an unset skills field came back non-nil (%v) — every agent would be silently narrowed", got)
+	}
+	got := byName["none"].Skills
+	if got == nil {
+		t.Fatal("an explicitly empty skills list came back nil — a coordinator would silently regain every skill")
+	}
+	if len(*got) != 0 {
+		t.Errorf("empty skills list came back as %v", *got)
+	}
+	if g := byName["some"].Skills; g == nil || len(*g) != 2 || (*g)[0] != "alpha" || (*g)[1] != "beta" {
+		t.Errorf("named skills lost on save: %v", g)
+	}
+}

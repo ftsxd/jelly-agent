@@ -71,6 +71,24 @@ sandbox: read-only
 
 `use_skill` 会把最终生效的档位告诉模型，省得它写个 curl 再撞墙重试。
 
+## 按 Agent 分配技能
+
+哪些技能对某个 Agent 可见，由它自己的 `skills` 字段决定。三态，**跟 `mcp` 的语义相反**：
+
+```yaml
+agents:
+  - name: OrchestrationAgent
+    skills: []                       # 一个都不给：它的职责是判断转交给谁
+  - name: MetricsQuery
+    skills: [promql-recipes]         # 只给这些
+  - name: LegacyAgent
+    # 不写 skills ⇒ 全部技能。老配置升级后行为不变
+```
+
+之所以跟 MCP 反着来（MCP 是「不选 = 不挂」）：MCP 服务端是重的、有状态的子进程，值得显式选择；而一个技能在被调用前只占目录里的一行。
+
+过滤发生在**目录注入**那一层，不只是 `use_skill`：拿不到的技能根本不会出现在该 Agent 的提示里。`run_script` 也独立校验一次（`Store.RunScript`），因为模型可能从别处见过技能名——「它没被告诉过这个名字」不是访问控制。
+
 ## 怎么验
 
 ```bash

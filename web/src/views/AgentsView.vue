@@ -7,6 +7,7 @@ const agents = ref([])
 const defaultAgent = ref('')
 const providers = ref([])
 const mcpServers = ref([])
+const allSkills = ref([])
 const loading = ref(true)
 const error = ref('')
 const notice = ref('')
@@ -19,6 +20,10 @@ const form = reactive({
   provider: '',
   instruction: '',
   mcp: [],
+  // skills_all is the "field absent" state: on ⇒ send null ⇒ every skill.
+  // Off with nothing checked is a real, different answer: no skills at all.
+  skills_all: true,
+  skills: [],
   required_tools_text: '',
   required_suites_text: '',
   sub_agents: [],
@@ -29,6 +34,7 @@ const form = reactive({
 // other agents (exclude the one being edited) — candidate sub-agents
 const otherAgents = computed(() => agents.value.filter((a) => a.name !== form.name))
 const enabledMcp = computed(() => mcpServers.value.filter((s) => s.enabled))
+const enabledSkills = computed(() => allSkills.value.filter((s) => s.enabled))
 
 onMounted(load)
 
@@ -36,11 +42,12 @@ async function load() {
   loading.value = true
   error.value = ''
   try {
-    const [ag, pv, mc] = await Promise.all([api.agents(), api.providers(), api.mcp()])
+    const [ag, pv, mc, sk] = await Promise.all([api.agents(), api.providers(), api.mcp(), api.skills()])
     agents.value = ag.agents || []
     defaultAgent.value = ag.default_agent || ''
     providers.value = pv.providers || []
     mcpServers.value = mc.servers || []
+    allSkills.value = sk.skills || []
   } catch (e) {
     error.value = e.message
   } finally {
@@ -56,6 +63,8 @@ function startNew() {
     provider: '',
     instruction: '',
     mcp: [],
+    skills_all: true,
+    skills: [],
     required_tools_text: '',
     required_suites_text: '',
     sub_agents: [],
@@ -72,6 +81,9 @@ function startEdit(a) {
     provider: a.provider || '',
     instruction: a.instruction || '',
     mcp: [...(a.mcp || [])],
+    // null/undefined means the field was never set — every skill.
+    skills_all: a.skills == null,
+    skills: [...(a.skills || [])],
     required_tools_text: (a.required_tools || []).join('\n'),
     required_suites_text: (a.required_suites || []).join('\n'),
     sub_agents: [...(a.sub_agents || [])],
@@ -95,6 +107,7 @@ async function submit() {
       provider: form.provider,
       instruction: form.instruction,
       mcp: form.mcp,
+      skills: form.skills_all ? null : form.skills,
       required_tools: parseNames(form.required_tools_text),
       required_suites: parseNames(form.required_suites_text),
       sub_agents: form.sub_agents,
@@ -228,6 +241,24 @@ async function remove(a) {
             </div>
           </div>
 
+          <div class="field span2">
+            <span class="label">技能（不设置 = 该 Agent 可用全部技能）</span>
+            <label class="check skills-all">
+              <input type="checkbox" v-model="form.skills_all" />
+              <span>使用全部技能</span>
+            </label>
+            <div v-if="!form.skills_all" class="chips">
+              <label v-for="s in enabledSkills" :key="s.name" class="chip">
+                <input type="checkbox" :value="s.name" v-model="form.skills" />
+                <span>{{ s.name }}</span>
+              </label>
+              <span v-if="!enabledSkills.length" class="field-help">还没有启用的技能。</span>
+            </div>
+            <span v-if="!form.skills_all && !form.skills.length" class="field-help">
+              一个都不勾 = 这个 Agent 拿不到任何技能。协调者通常就该是这样——它的职责是判断转交给谁，手里握着技能反而会倾向自己做掉。
+            </span>
+          </div>
+
           <div class="capability-grid span2">
             <label class="field">
               <span class="label">必需工具（每行一个）</span>
@@ -283,9 +314,11 @@ async function remove(a) {
                 <span class="badge" :class="a.enabled ? 'badge-accent' : ''">{{ a.enabled ? '已启用' : '已停用' }}</span>
               </div>
               <div class="srv-meta dim">{{ a.description || '（无描述）' }}</div>
-              <div v-if="(a.sub_agents || []).length || (a.mcp || []).length || (a.required_tools || []).length || (a.required_suites || []).length" class="srv-secrets">
+              <div v-if="(a.sub_agents || []).length || (a.mcp || []).length || (a.skills || []).length || a.skills || (a.required_tools || []).length || (a.required_suites || []).length" class="srv-secrets">
                 <span v-for="n in a.sub_agents" :key="'s' + n" class="badge" title="子 Agent（转交目标）">↪ {{ n }}</span>
                 <span v-for="n in a.mcp" :key="'m' + n" class="badge mono" title="MCP">{{ n }}</span>
+                <span v-for="n in a.skills || []" :key="'sk' + n" class="badge mono" title="技能">🎓 {{ n }}</span>
+                <span v-if="a.skills && !a.skills.length" class="badge mono" title="技能">无技能</span>
                 <span v-for="n in a.required_tools" :key="'rt' + n" class="badge mono" title="必需工具">工具 {{ n }}</span>
                 <span v-for="n in a.required_suites" :key="'rs' + n" class="badge mono badge-accent" title="必需能力包">suite {{ n }}</span>
               </div>

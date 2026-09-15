@@ -42,7 +42,7 @@ func TestRunScriptInjectsEnv(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	out, err := st.RunScript(ctx, "greeter", "run.sh", nil, map[string]string{"WHO": "jelly"}, sandbox.Policy{})
+	out, err := st.RunScript(ctx, "greeter", "run.sh", nil, map[string]string{"WHO": "jelly"}, sandbox.Policy{}, Allowlist{})
 	if err != nil {
 		t.Fatalf("run: %v (out=%q)", err, out)
 	}
@@ -60,10 +60,10 @@ func TestRunScriptRejectsTraversal(t *testing.T) {
 	st, _ := NewStore(t.TempDir())
 	writeDirSkill(t, st, "s", nil)
 	ctx := context.Background()
-	if _, err := st.RunScript(ctx, "s", "../../etc/passwd", nil, nil, sandbox.Policy{}); err == nil {
+	if _, err := st.RunScript(ctx, "s", "../../etc/passwd", nil, nil, sandbox.Policy{}, Allowlist{}); err == nil {
 		t.Fatal("expected path-traversal rejection")
 	}
-	if _, err := st.RunScript(ctx, "s", "nope.sh", nil, nil, sandbox.Policy{}); err == nil {
+	if _, err := st.RunScript(ctx, "s", "nope.sh", nil, nil, sandbox.Policy{}, Allowlist{}); err == nil {
 		t.Fatal("expected missing-script error")
 	}
 }
@@ -73,7 +73,7 @@ func TestRunScriptTimeout(t *testing.T) {
 	writeDirSkill(t, st, "slow", map[string]string{"loop.sh": "#!/bin/sh\nsleep 5"})
 	// Exercise the policy-level timeout (not just the ctx deadline).
 	if _, err := st.RunScript(context.Background(), "slow", "loop.sh", nil, nil,
-		sandbox.Policy{Timeout: 200 * time.Millisecond}); err == nil {
+		sandbox.Policy{Timeout: 200 * time.Millisecond}, Allowlist{}); err == nil {
 		t.Fatal("expected timeout error")
 	}
 }
@@ -155,11 +155,63 @@ func TestRunScriptHonorsSkillMode(t *testing.T) {
 
 	// The operator's policy would allow the write; the skill's own does not.
 	out, err := st.RunScript(context.Background(), "reader", "run.sh", nil, nil,
-		sandbox.Policy{Backend: "os", Mode: sandbox.ModeWorkspaceNet})
+		sandbox.Policy{Backend: "os", Mode: sandbox.ModeWorkspaceNet}, Allowlist{})
 	if err != nil {
 		t.Fatalf("run: %v (%s)", err, out)
 	}
 	if strings.Contains(out, "WROTE") {
 		t.Fatalf("skill declared read-only but wrote anyway: %q", out)
+	}
+}
+
+// The allowlist has to bite at the point of execution, not only in the catalog.
+// A model that has seen a skill name once — in an earlier turn, in a handover,
+// in its own transcript — can name it again; "it was never shown the name" is
+// not an access control.
+func TestRunScriptRefusesASkillOutsideTheAllowlist(t *testing.T) {
+	st, _ := NewStore(t.TempDir())
+	writeDirSkill(t, st, "secret", map[string]string{"run.sh": "#!/bin/sh\necho RAN"})
+
+	out, err := st.RunScript(context.Background(), "secret", "run.sh", nil, nil,
+		sandbox.Policy{}, NewAllowlist(&[]string{"something-else"}))
+	if err == nil {
+		t.Fatalf("a skill outside the allowlist executed: %q", out)
+	}
+	if strings.Contains(out, "RAN") {
+		t.Fatalf("the script ran despite the refusal: %q", out)
+	}
+	// An agent given no skills at all must be refused the same way.
+	if _, err := st.RunScript(context.Background(), "secret", "run.sh", nil, nil,
+		sandbox.Policy{}, NewAllowlist(&[]string{})); err == nil {
+		t.Fatal("an agent with no skills ran a script")
+	}
+	// ...and the unrestricted default still works.
+	if _, err := st.RunScript(context.Background(), "secret", "run.sh", nil, nil,
+		sandbox.Policy{}, Allowlist{}); err != nil {
+		t.Fatalf("unrestricted run failed: %v", err)
+	}
+}
+
+// use_skill resolves through Visible, so the same three reasons collapse there.
+func TestVisibleHidesWhatTheAgentMayNotUse(t *testing.T) {
+	st, _ := NewStore(t.TempDir())
+	if err := st.Save(Skill{Name: "shown", Description: "d", Enabled: true, Body: "b"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Save(Skill{Name: "disabled", Description: "d", Enabled: false, Body: "b"}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, ok, _ := st.Visible("shown", Allowlist{}); !ok {
+		t.Error("an enabled skill must be visible when unrestricted")
+	}
+	if _, ok, _ := st.Visible("disabled", Allowlist{}); ok {
+		t.Error("a disabled skill must not be visible")
+	}
+	if _, ok, _ := st.Visible("shown", NewAllowlist(&[]string{"other"})); ok {
+		t.Error("a skill outside the allowlist must not be visible")
+	}
+	if _, ok, _ := st.Visible("missing", Allowlist{}); ok {
+		t.Error("a missing skill must not be visible")
 	}
 }

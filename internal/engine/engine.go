@@ -573,7 +573,11 @@ func (e *Engine) SystemPrompt(provider, agent string) (parts []PromptPart, err e
 		return nil, err
 	}
 	mem, user := core.Snapshot()
-	allow := e.cfg.Skills.AllowScripts
+	allowScripts := e.cfg.Skills.AllowScripts
+	// The catalog this agent receives, not the whole store: this page answers
+	// "what do we inject", and an agent with a narrowed `skills` list is
+	// injected a narrowed catalog.
+	allowSkills := e.SkillsFor(agent)
 
 	// The instruction of the agent being asked about, not the base one.
 	//
@@ -598,11 +602,11 @@ func (e *Engine) SystemPrompt(provider, agent string) (parts []PromptPart, err e
 		parts = append(parts, PromptPart{Name: "USER.md", Text: user})
 	}
 	if skills, err := e.Skills(); err == nil {
-		if cat, cerr := skills.Catalog(); cerr == nil && cat != "" {
+		if cat, cerr := skills.CatalogFor(allowSkills); cerr == nil && cat != "" {
 			parts = append(parts, PromptPart{Name: "技能目录", Text: cat})
 		}
 	}
-	full := e.systemInstruction(core, instruction, allow)
+	full := e.systemInstruction(core, instruction, allowScripts, allowSkills)
 	parts = append(parts, PromptPart{Name: "完整拼装", Text: full, Assembled: true})
 	return parts, nil
 }
@@ -637,6 +641,23 @@ func (e *Engine) InstructionFor(agent string) string {
 	return e.BaseInstruction()
 }
 
+// SkillsFor returns the skill allowlist for a named agent: the agent's own
+// `skills` field when it has one, unrestricted otherwise. An unknown name — the
+// legacy single "root" agent, or a caller that does not track agents — is
+// unrestricted, which is the behavior that predates the field.
+func (e *Engine) SkillsFor(agent string) skill.Allowlist {
+	agent = strings.TrimSpace(agent)
+	if agent == "" || e.cfg == nil {
+		return skill.Allowlist{}
+	}
+	for _, def := range e.cfg.Agents {
+		if def.Name == agent {
+			return skill.NewAllowlist(def.Skills)
+		}
+	}
+	return skill.Allowlist{}
+}
+
 // PromptPart is one contribution to the system instruction.
 type PromptPart struct {
 	Name string `json:"name"`
@@ -651,10 +672,10 @@ type PromptPart struct {
 // One implementation, used by the agent and by the console's prompt view. The
 // alternative — the view rebuilding it — is how a page ends up confidently
 // describing a prompt the model never received.
-func (e *Engine) systemInstruction(core *memory.Core, instruction string, allowScripts bool) string {
+func (e *Engine) systemInstruction(core *memory.Core, instruction string, allowScripts bool, allow skill.Allowlist) string {
 	base := core.Render(instruction)
 	if skills, err := e.Skills(); err == nil {
-		if cat, err := skills.Catalog(); err == nil && cat != "" {
+		if cat, err := skills.CatalogFor(allow); err == nil && cat != "" {
 			base += "\n\n" + cat
 			if allowScripts {
 				base += "目录型技能可能附带脚本；需要时用 run_script 运行（凭据已由系统注入环境变量，按 use_skill 给出的 var_keys 在脚本里引用，切勿向用户索要密钥）。\n"
@@ -1347,8 +1368,10 @@ func (e *Engine) buildAgentTree(name string, core *memory.Core, withSearch bool,
 	// Named agents load only the MCP servers they list (empty ⇒ none), matching
 	// PlatformBot semantics — explicit selection in the UI.
 	toolsets := e.ToolsetsFor(def.MCP)
+	// Skills are the other way round from MCP: absent ⇒ every skill, so an
+	// agent written before the field existed keeps what it had.
 	return e.buildNode(name, desc, def.Provider, instruction, toolsets, subs, core, withSearch,
-		def.RequiredTools, def.RequiredSuites)
+		def.RequiredTools, def.RequiredSuites, skill.NewAllowlist(def.Skills))
 }
 
 // BuildAgentWith is like BuildAgent but controls which MCP servers are loaded:
@@ -1372,7 +1395,7 @@ func (e *Engine) BuildAgentWith(provider string, mcpNames []string) (agent.Agent
 	}
 
 	a, prov, err := e.buildNode("root", "jelly-agent root agent with web search and core memory.",
-		provider, e.BaseInstruction(), toolsets, nil, core, search != nil, nil, nil)
+		provider, e.BaseInstruction(), toolsets, nil, core, search != nil, nil, nil, skill.Allowlist{})
 	if err != nil {
 		if search != nil {
 			search.Close()
@@ -1476,7 +1499,7 @@ func (e *Engine) withCompaction(llm adkmodel.LLM, agentName string, canRecall bo
 // is rendered fresh each turn (core memory + skill catalog prepended) via an
 // InstructionProvider. Shared by the legacy single agent and the multi-agent
 // tree so both behave identically.
-func (e *Engine) buildNode(name, description, provider, instruction string, toolsets []NamedToolset, subAgents []agent.Agent, core *memory.Core, withSearch bool, requiredTools, requiredSuites []string) (agent.Agent, config.Provider, error) {
+func (e *Engine) buildNode(name, description, provider, instruction string, toolsets []NamedToolset, subAgents []agent.Agent, core *memory.Core, withSearch bool, requiredTools, requiredSuites []string, allowSkills skill.Allowlist) (agent.Agent, config.Provider, error) {
 	llm, prov, err := e.reg.Get(provider)
 	if err != nil {
 		return nil, prov, err
@@ -1498,13 +1521,16 @@ func (e *Engine) buildNode(name, description, provider, instruction string, tool
 	// also expose run_script (with per-skill variables as its environment).
 	allowScripts := e.cfg.Skills.AllowScripts
 	varsFor := func(name string) map[string]string { return e.cfg.SkillVars[name] }
-	if skills, err := e.Skills(); err == nil {
-		if cat, err := skills.Catalog(); err == nil && cat != "" {
-			if st, err := jellytool.SkillTool(skills, varsFor, allowScripts, e.sandboxPolicy()); err == nil {
+	// An agent given no skills gets neither tool. Registering use_skill for an
+	// empty catalog would spend a tool slot on something that can only answer
+	// "not found" — and invite the model to go looking.
+	if skills, err := e.Skills(); err == nil && !allowSkills.DeniesAll() {
+		if cat, err := skills.CatalogFor(allowSkills); err == nil && cat != "" {
+			if st, err := jellytool.SkillTool(skills, varsFor, allowScripts, e.sandboxPolicy(), allowSkills); err == nil {
 				tools = append(tools, st)
 			}
 			if allowScripts {
-				if rs, err := jellytool.RunScriptTool(skills, varsFor, e.sandboxPolicy()); err == nil {
+				if rs, err := jellytool.RunScriptTool(skills, varsFor, e.sandboxPolicy(), allowSkills); err == nil {
 					tools = append(tools, rs)
 				}
 			}
@@ -1564,7 +1590,7 @@ func (e *Engine) buildNode(name, description, provider, instruction string, tool
 		// skill catalog) are read fresh each turn. Note: ADK then skips {}
 		// session-state substitution.
 		InstructionProvider: func(agent.ReadonlyContext) (string, error) {
-			return e.systemInstruction(core, instruction, allowScripts), nil
+			return e.systemInstruction(core, instruction, allowScripts, allowSkills), nil
 		},
 		// Tools is left empty on purpose: a static list is expanded once and
 		// never revisited, so anything in it would escape selection.

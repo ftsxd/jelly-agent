@@ -306,17 +306,25 @@ func render(sk Skill) string {
 	return "---\n" + string(fm) + "---\n\n" + strings.TrimRight(sk.Body, "\n") + "\n"
 }
 
-// Catalog renders the enabled skills into an instruction block listing each
-// skill's name and description, with a hint to call use_skill for the full
-// steps. Returns "" when no skill is enabled (so nothing is injected).
-func (s *Store) Catalog() (string, error) {
+// Catalog renders every enabled skill into an instruction block. It is
+// CatalogFor with no restriction.
+func (s *Store) Catalog() (string, error) { return s.CatalogFor(Allowlist{}) }
+
+// CatalogFor renders the skills this agent may use into an instruction block
+// listing each skill's name and description, with a hint to call use_skill for
+// the full steps. Returns "" when nothing qualifies (so nothing is injected).
+//
+// Filtering here rather than at use_skill is the point: a skill the agent may
+// not run should not be in its prompt either, or a coordinator reads a catalog
+// of work it is not allowed to do.
+func (s *Store) CatalogFor(allow Allowlist) (string, error) {
 	all, err := s.List()
 	if err != nil {
 		return "", err
 	}
 	var b strings.Builder
 	for _, sk := range all {
-		if !sk.Enabled {
+		if !sk.Enabled || !allow.Permits(sk.Name) {
 			continue
 		}
 		fmt.Fprintf(&b, "- %s：%s\n", sk.Name, sk.Description)

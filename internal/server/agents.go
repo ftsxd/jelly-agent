@@ -35,9 +35,14 @@ type agentInput struct {
 	MCP            []string `json:"mcp"`
 	RequiredTools  []string `json:"required_tools"`
 	RequiredSuites []string `json:"required_suites"`
-	SubAgents      []string `json:"sub_agents"`
-	Enabled        bool     `json:"enabled"`
-	MakeDefault    bool     `json:"make_default"`
+	// Skills is a pointer because the three states are distinct and the UI has
+	// to be able to say all three: absent/null ⇒ every skill, a list ⇒ those,
+	// an empty list ⇒ none. Decoding it as a plain slice would collapse "none"
+	// into "all" and make a coordinator undeclarable.
+	Skills      *[]string `json:"skills"`
+	SubAgents   []string  `json:"sub_agents"`
+	Enabled     bool      `json:"enabled"`
+	MakeDefault bool      `json:"make_default"`
 }
 
 // handleSaveAgent upserts an agent definition and hot-reloads. Sub-agent names
@@ -77,6 +82,7 @@ func (s *Server) handleSaveAgent(w http.ResponseWriter, r *http.Request) {
 		MCP:            cleanNames(in.MCP),
 		RequiredTools:  cleanNames(in.RequiredTools),
 		RequiredSuites: cleanNames(in.RequiredSuites),
+		Skills:         cleanNamesPtr(in.Skills),
 		SubAgents:      subs,
 		Enabled:        in.Enabled,
 	}
@@ -165,4 +171,18 @@ func removeName(in []string, name string) []string {
 		}
 	}
 	return out
+}
+
+// cleanNamesPtr is cleanNames for the tri-state skills field: it preserves the
+// difference between nil (unset) and an empty list (explicitly none), which
+// cleanNames alone would lose by returning nil for both.
+func cleanNamesPtr(in *[]string) *[]string {
+	if in == nil {
+		return nil
+	}
+	out := cleanNames(*in)
+	if out == nil {
+		out = []string{}
+	}
+	return &out
 }

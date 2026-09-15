@@ -11,6 +11,20 @@ import (
 	"github.com/jelly-agent/jelly-agent/internal/sandbox"
 )
 
+// Visible resolves a skill for an agent: it exists, it is enabled, and this
+// agent is allowed to see it. The three reasons a skill may be unavailable
+// collapse into one answer on purpose — see RunScript.
+//
+// It is a method rather than inline in the use_skill tool so the rule can be
+// tested without fabricating an ADK tool context.
+func (s *Store) Visible(name string, allow Allowlist) (Skill, bool, error) {
+	sk, ok, err := s.Get(name)
+	if err != nil || !ok || !sk.Enabled || !allow.Permits(sk.Name) {
+		return Skill{}, false, err
+	}
+	return sk, true, nil
+}
+
 // SkillMode resolves the sandbox mode one skill's scripts run under: the
 // operator's policy, tightened by the skill's own `sandbox:` frontmatter if it
 // declares one.
@@ -70,9 +84,18 @@ func isExecutable(e os.DirEntry) bool {
 // Path safety is enforced here (the script must resolve inside the skill dir);
 // the resource/isolation envelope is enforced by the sandbox package. A skill
 // declaring its own `sandbox:` mode narrows pol for this run — see SkillMode.
-func (s *Store) RunScript(ctx context.Context, name, script string, args []string, env map[string]string, pol sandbox.Policy) (string, error) {
+//
+// allow is the calling agent's skill allowlist, checked here rather than only at
+// the tool boundary: this is the last point before a script actually executes,
+// and it is reachable by a plain function call, which the tool closure is not.
+func (s *Store) RunScript(ctx context.Context, name, script string, args []string, env map[string]string, pol sandbox.Policy, allow Allowlist) (string, error) {
 	if !ValidName(name) {
 		return "", fmt.Errorf("技能名非法")
+	}
+	if !allow.Permits(name) {
+		// Same wording as a missing skill: the model gains nothing from
+		// "exists but not yours" except a reason to retry.
+		return "", fmt.Errorf("未找到该技能（或未启用）：%s", name)
 	}
 	pol.Mode = s.SkillMode(name, pol)
 	skillDir := filepath.Join(s.dir, name)
