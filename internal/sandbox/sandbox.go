@@ -47,6 +47,8 @@ import (
 	"context"
 	"errors"
 	"os/exec"
+	"sort"
+	"strings"
 	"time"
 )
 
@@ -317,6 +319,11 @@ func Run(ctx context.Context, p Policy, s Spec) (Result, error) {
 	res.Mode = p.Mode
 	res.Degraded = joinNotes(degraded, res.Degraded)
 	res.Duration = time.Since(start)
+	// Whatever we injected must not come back out. The output is a tool result:
+	// it goes into the model's context, the session record and the console, so a
+	// script that echoes a credential — deliberately, via `set -x`, or in an
+	// error message — would put it in the conversation for good.
+	res.Output = redactInjected(res.Output, s.Env, res.Truncated)
 
 	if Audit != nil {
 		ev := AuditEvent{
@@ -337,6 +344,62 @@ func Run(ctx context.Context, p Policy, s Spec) (Result, error) {
 		Audit(ev)
 	}
 	return res, err
+}
+
+// minRedactLen is the shortest injected value worth masking. A value of three
+// characters or fewer cannot be a credential, and masking one would wreck every
+// output that happens to contain it — "1" or "ok" appears in most of them.
+const minRedactLen = 4
+
+// redactInjected replaces each injected value in out with a reference to the
+// variable it came from, so the reader still sees the shape of the output
+// ("token=${API_TOKEN}") while the value itself never leaves the sandbox.
+//
+// Longest values go first: when one injected value contains another, replacing
+// the short one first would leave a mangled fragment of the long one behind.
+//
+// This stops a value escaping by accident — an echo, a set -x, a stack trace. It
+// cannot stop a script that is actively trying to exfiltrate, since anything can
+// be base64-encoded or printed one character at a time. The defence against that
+// one is not running scripts you have not read.
+func redactInjected(out string, env map[string]string, truncated bool) string {
+	if out == "" || len(env) == 0 {
+		return out
+	}
+	names := make([]string, 0, len(env))
+	for k, v := range env {
+		if len(v) >= minRedactLen {
+			names = append(names, k)
+		}
+	}
+	if len(names) == 0 {
+		return out
+	}
+	// Sort by value length (longest first), name as the tie-break so the result
+	// does not depend on map iteration order.
+	sort.Slice(names, func(i, j int) bool {
+		if a, b := len(env[names[i]]), len(env[names[j]]); a != b {
+			return a > b
+		}
+		return names[i] < names[j]
+	})
+	for _, name := range names {
+		out = strings.ReplaceAll(out, env[name], "${"+name+"}")
+	}
+	if truncated {
+		// The cap can fall in the middle of a value, leaving a prefix that no
+		// replacement matches. A prefix of a token is still part of the token.
+		for _, name := range names {
+			v := env[name]
+			for k := len(v) - 1; k >= minRedactLen; k-- {
+				if strings.HasSuffix(out, v[:k]) {
+					out = out[:len(out)-k] + "${" + name + "}"
+					break
+				}
+			}
+		}
+	}
+	return out
 }
 
 // joinNotes concatenates the non-empty degradation notes, in order.

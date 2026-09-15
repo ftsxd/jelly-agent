@@ -36,8 +36,11 @@ func writeDirSkill(t *testing.T, st *Store, name string, files map[string]string
 
 func TestRunScriptInjectsEnv(t *testing.T) {
 	st, _ := NewStore(t.TempDir())
+	// A comparison, not an echo: the sandbox masks injected values out of the
+	// output, so echoing $WHO would test the masking instead of the injection.
+	// That masking has its own tests below.
 	writeDirSkill(t, st, "greeter", map[string]string{
-		"run.sh": "#!/bin/sh\necho \"hi $WHO\"",
+		"run.sh": "#!/bin/sh\n[ \"$WHO\" = \"jelly\" ] && echo got-it || echo missing",
 	})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -46,7 +49,7 @@ func TestRunScriptInjectsEnv(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run: %v (out=%q)", err, out)
 	}
-	if !strings.Contains(out, "hi jelly") {
+	if !strings.Contains(out, "got-it") {
 		t.Fatalf("env not injected, out=%q", out)
 	}
 
@@ -213,5 +216,52 @@ func TestVisibleHidesWhatTheAgentMayNotUse(t *testing.T) {
 	}
 	if _, ok, _ := st.Visible("missing", Allowlist{}); ok {
 		t.Error("a missing skill must not be visible")
+	}
+}
+
+// The output of a script is a tool result: it reaches the model, the session
+// record and the console. A credential must not survive that trip, whether the
+// script prints it on purpose, dumps the whole environment, or leaks it through
+// a trace or an error message.
+func TestRunScriptOutputNeverCarriesTheInjectedValue(t *testing.T) {
+	const secret = "sk-super-secret-value-123"
+	st, _ := NewStore(t.TempDir())
+	writeDirSkill(t, st, "probe", map[string]string{
+		"echo.sh":  "#!/bin/sh\necho \"token=$API_TOKEN\"",
+		"dump.sh":  "#!/bin/sh\nenv",
+		"trace.sh": "#!/bin/sh\nset -x\ncurl_stub \"$API_TOKEN\" 2>/dev/null\ntrue",
+		"fail.sh":  "#!/bin/sh\necho \"cannot authenticate with $API_TOKEN\" >&2\nexit 7",
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	for _, script := range []string{"echo.sh", "dump.sh", "trace.sh", "fail.sh"} {
+		out, _ := st.RunScript(ctx, "probe", script, nil,
+			map[string]string{"API_TOKEN": secret}, sandbox.Policy{}, Allowlist{})
+		if strings.Contains(out, secret) {
+			t.Errorf("%s leaked the value into its output: %q", script, out)
+		}
+		if !strings.Contains(out, "${API_TOKEN}") {
+			t.Errorf("%s: want the masked reference in the output, got %q", script, out)
+		}
+	}
+}
+
+// Masking must not cost the script its own output.
+func TestRunScriptOutputKeepsEverythingElse(t *testing.T) {
+	st, _ := NewStore(t.TempDir())
+	writeDirSkill(t, st, "report", map[string]string{
+		"run.sh": "#!/bin/sh\necho \"3 pods ready in $CLUSTER, token=$API_TOKEN\"",
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	out, err := st.RunScript(ctx, "report", "run.sh", nil,
+		map[string]string{"API_TOKEN": "sk-secret-xyz", "CLUSTER": "prod-east"}, sandbox.Policy{}, Allowlist{})
+	if err != nil {
+		t.Fatalf("run: %v (out=%q)", err, out)
+	}
+	if want := "3 pods ready in ${CLUSTER}, token=${API_TOKEN}"; !strings.Contains(out, want) {
+		t.Fatalf("out = %q, want it to contain %q", out, want)
 	}
 }

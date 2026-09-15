@@ -162,6 +162,12 @@ type Config struct {
 	// values are masked by the API and may use ${ENV}. Kept here (config, 0600)
 	// rather than in the skill files so sharing/exporting a skill omits secrets.
 	SkillVars map[string]map[string]string `mapstructure:"skill_vars" yaml:"skill_vars,omitempty"`
+	// AgentVars holds per-agent variables (agent name → KV), injected into that
+	// agent's run_script sandbox on top of the skill's own vars. Values may use
+	// ${ENV} so a secret can stay in the process environment instead of the
+	// file. The sandbox inherits nothing from the host (see sandbox.scrubEnv),
+	// so this is a per-agent allowlist, not a widening of what leaks in.
+	AgentVars map[string]map[string]string `mapstructure:"agent_vars" yaml:"agent_vars,omitempty"`
 	MCP       []MCPServer                  `mapstructure:"mcp" yaml:"mcp,omitempty"`
 	Platforms []PlatformBot                `mapstructure:"platforms" yaml:"platforms,omitempty"`
 	Schedules []ScheduleTask               `mapstructure:"schedules" yaml:"schedules,omitempty"`
@@ -519,6 +525,7 @@ func Save(c *Config, path string) error {
 		Web             *Web                         `yaml:"web,omitempty"`
 		Storage         *Storage                     `yaml:"storage,omitempty"`
 		SkillVars       map[string]map[string]string `yaml:"skill_vars,omitempty"`
+		AgentVars       map[string]map[string]string `yaml:"agent_vars,omitempty"`
 		MCP             []MCPServer                  `yaml:"mcp,omitempty"`
 		Platforms       []PlatformBot                `yaml:"platforms,omitempty"`
 		Schedules       []ScheduleTask               `yaml:"schedules,omitempty"`
@@ -526,7 +533,7 @@ func Save(c *Config, path string) error {
 		Agents          []AgentDef                   `yaml:"agents,omitempty"`
 		Instruction     string                       `yaml:"instruction,omitempty"`
 	}
-	p := payload{Instruction: c.Instruction, DefaultProvider: c.DefaultProvider, Providers: c.Providers, MCP: c.MCP, Platforms: c.Platforms, Schedules: c.Schedules, SkillVars: c.SkillVars, DefaultAgent: c.DefaultAgent, Agents: c.Agents}
+	p := payload{Instruction: c.Instruction, DefaultProvider: c.DefaultProvider, Providers: c.Providers, MCP: c.MCP, Platforms: c.Platforms, Schedules: c.Schedules, SkillVars: c.SkillVars, AgentVars: c.AgentVars, DefaultAgent: c.DefaultAgent, Agents: c.Agents}
 	if c.Storage != (Storage{}) {
 		// Dropped here once, silently: an operator points the deployment at
 		// PostgreSQL, changes anything in the console, and the next restart

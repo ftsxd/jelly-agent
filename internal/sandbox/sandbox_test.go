@@ -22,7 +22,10 @@ func writeScript(t *testing.T, name, body string) (string, string) {
 func nativePolicy() Policy { return Policy{Backend: "native"} }
 
 func TestNativeRunsAndInjectsEnv(t *testing.T) {
-	dir, name := writeScript(t, "hi.sh", "#!/bin/sh\necho \"hi $WHO\"")
+	// The script reports a comparison instead of echoing $WHO: Run masks every
+	// injected value out of the output, so printing it would prove nothing and
+	// assert on the masking rather than on the injection.
+	dir, name := writeScript(t, "hi.sh", "#!/bin/sh\n[ \"$WHO\" = \"jelly\" ] && echo got-it || echo missing")
 	res, err := Run(context.Background(), nativePolicy(), Spec{
 		Dir: dir, Interp: "sh", RelFile: name, Env: map[string]string{"WHO": "jelly"},
 	})
@@ -35,7 +38,7 @@ func TestNativeRunsAndInjectsEnv(t *testing.T) {
 	if res.ExitCode != 0 || res.TimedOut {
 		t.Fatalf("unexpected result %+v", res)
 	}
-	if !strings.Contains(res.Output, "hi jelly") {
+	if !strings.Contains(res.Output, "got-it") {
 		t.Fatalf("env not injected: %q", res.Output)
 	}
 }

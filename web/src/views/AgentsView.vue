@@ -8,6 +8,8 @@ const defaultAgent = ref('')
 const providers = ref([])
 const mcpServers = ref([])
 const allSkills = ref([])
+// agent name → variable KEY names. Values never leave the server.
+const agentVarKeys = ref({})
 const loading = ref(true)
 const error = ref('')
 const notice = ref('')
@@ -29,6 +31,9 @@ const form = reactive({
   sub_agents: [],
   enabled: true,
   make_default: false,
+  varKeys: [],
+  varsText: '',
+  savingVars: false,
 })
 
 // other agents (exclude the one being edited) — candidate sub-agents
@@ -45,6 +50,7 @@ async function load() {
     const [ag, pv, mc, sk] = await Promise.all([api.agents(), api.providers(), api.mcp(), api.skills()])
     agents.value = ag.agents || []
     defaultAgent.value = ag.default_agent || ''
+    agentVarKeys.value = ag.var_keys || {}
     providers.value = pv.providers || []
     mcpServers.value = mc.servers || []
     allSkills.value = sk.skills || []
@@ -70,6 +76,9 @@ function startNew() {
     sub_agents: [],
     enabled: true,
     make_default: false,
+    varKeys: [],
+    varsText: '',
+    savingVars: false,
   })
 }
 
@@ -89,6 +98,10 @@ function startEdit(a) {
     sub_agents: [...(a.sub_agents || [])],
     enabled: a.enabled,
     make_default: defaultAgent.value === a.name,
+    varKeys: [...(agentVarKeys.value[a.name] || [])],
+    // prefill existing keys with blank values (blank = keep server-side)
+    varsText: (agentVarKeys.value[a.name] || []).map((k) => `${k}=`).join('\n'),
+    savingVars: false,
   })
 }
 
@@ -121,6 +134,49 @@ async function submit() {
     error.value = e.message
   } finally {
     saving.value = false
+  }
+}
+
+function parseVars(text) {
+  const out = {}
+  for (const line of text.split('\n')) {
+    const t = line.trim()
+    if (!t) continue
+    const i = t.indexOf('=')
+    if (i < 0) continue
+    out[t.slice(0, i).trim()] = t.slice(i + 1).trim()
+  }
+  return out
+}
+
+// Variables save through their own endpoint, not with the agent form: saving an
+// agent rewrites the whole record, and the toggle/default buttons re-post a
+// partial one. Keeping them separate is what stops a click erasing a secret.
+async function saveVars() {
+  if (form.savingVars) return
+  form.savingVars = true
+  error.value = ''
+  try {
+    const res = await api.setAgentVars(form.name, parseVars(form.varsText))
+    form.varKeys = res.var_keys || []
+    form.varsText = form.varKeys.map((k) => `${k}=`).join('\n')
+    agentVarKeys.value = { ...agentVarKeys.value, [form.name]: form.varKeys }
+    notice.value = '变量已保存（密钥已脱敏存储）'
+  } catch (e) {
+    error.value = e.message
+  } finally {
+    form.savingVars = false
+  }
+}
+
+async function removeVar(key) {
+  try {
+    const res = await api.deleteAgentVar(form.name, key)
+    form.varKeys = res.var_keys || []
+    form.varsText = form.varKeys.map((k) => `${k}=`).join('\n')
+    agentVarKeys.value = { ...agentVarKeys.value, [form.name]: form.varKeys }
+  } catch (e) {
+    error.value = e.message
   }
 }
 
@@ -284,6 +340,29 @@ async function remove(a) {
           </label>
         </div>
 
+        <!-- variables (existing agents only; saved separately from the form) -->
+        <div v-if="editing !== 'new'" class="vars-box">
+          <div class="vars-head">变量（密钥脱敏，注入该 Agent 运行技能脚本时的环境；值不显示、不进对话）</div>
+          <div class="vars-note">脚本输出里出现的值会被替换成 <code>${变量名}</code> 再返回，所以脚本打印了也不会进对话；4 个字符以内的值不做替换（太短，会误伤正常输出）。</div>
+          <div v-if="form.varKeys.length" class="var-chips">
+            <span v-for="k in form.varKeys" :key="k" class="badge mono var-chip">
+              {{ k }} <button class="chip-x" title="删除变量" @click="removeVar(k)">✕</button>
+            </span>
+          </div>
+          <textarea
+            v-model="form.varsText"
+            class="textarea mono vars-text"
+            rows="3"
+            placeholder="KEY=VALUE，每行一个；已有变量留空值即保留，填新值则更新&#10;例如：K8S_TOKEN=sk-xxxx&#10;写 ${K8S_TOKEN} 则从服务端进程环境取值，配置文件里不留密钥"
+          />
+          <div class="vars-actions">
+            <span class="muted scripts-list">同名时覆盖技能自己的变量；沙箱不继承服务端环境，未在此声明的变量脚本读不到</span>
+            <button class="btn btn-mini" @click="saveVars" :disabled="form.savingVars">
+              <span v-if="form.savingVars" class="spinner" /> 保存变量
+            </button>
+          </div>
+        </div>
+
         <div class="form-actions">
           <button class="btn" @click="cancel" :disabled="saving">取消</button>
           <button class="btn btn-primary" @click="submit" :disabled="saving">
@@ -314,13 +393,14 @@ async function remove(a) {
                 <span class="badge" :class="a.enabled ? 'badge-accent' : ''">{{ a.enabled ? '已启用' : '已停用' }}</span>
               </div>
               <div class="srv-meta dim">{{ a.description || '（无描述）' }}</div>
-              <div v-if="(a.sub_agents || []).length || (a.mcp || []).length || (a.skills || []).length || a.skills || (a.required_tools || []).length || (a.required_suites || []).length" class="srv-secrets">
+              <div v-if="(a.sub_agents || []).length || (a.mcp || []).length || (a.skills || []).length || a.skills || (a.required_tools || []).length || (a.required_suites || []).length || (agentVarKeys[a.name] || []).length" class="srv-secrets">
                 <span v-for="n in a.sub_agents" :key="'s' + n" class="badge" title="子 Agent（转交目标）">↪ {{ n }}</span>
                 <span v-for="n in a.mcp" :key="'m' + n" class="badge mono" title="MCP">{{ n }}</span>
                 <span v-for="n in a.skills || []" :key="'sk' + n" class="badge mono" title="技能">🎓 {{ n }}</span>
                 <span v-if="a.skills && !a.skills.length" class="badge mono" title="技能">无技能</span>
                 <span v-for="n in a.required_tools" :key="'rt' + n" class="badge mono" title="必需工具">工具 {{ n }}</span>
                 <span v-for="n in a.required_suites" :key="'rs' + n" class="badge mono badge-accent" title="必需能力包">suite {{ n }}</span>
+                <span v-for="n in agentVarKeys[a.name] || []" :key="'v' + n" class="badge mono" title="环境变量（值已脱敏）">🔑 {{ n }}</span>
               </div>
             </div>
             <div class="srv-actions">
@@ -430,6 +510,64 @@ async function remove(a) {
   border-color: var(--accent);
   background: var(--accent-tint);
   color: var(--accent);
+}
+/* variables box — same shape as the one on the skills page */
+.vars-box {
+  border-top: 1px solid var(--border);
+  margin-top: var(--sp-4);
+  padding-top: var(--sp-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+.vars-head {
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.vars-note {
+  font-size: 12px;
+  color: var(--text-muted);
+  line-height: 1.5;
+}
+.var-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-1);
+}
+.var-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.chip-x {
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 11px;
+  padding: 0;
+}
+.chip-x:hover {
+  color: var(--danger);
+}
+.vars-text {
+  width: 100%;
+}
+.vars-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+}
+.scripts-list {
+  font-size: 12px;
+}
+.btn-mini {
+  padding: 2px var(--sp-2);
+  font-size: 12px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
 }
 @media (max-width: 680px) {
   .grid, .capability-grid { grid-template-columns: 1fr; }

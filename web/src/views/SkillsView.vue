@@ -414,6 +414,7 @@ async function onZipPicked(e) {
         <!-- variables + scripts (existing skills only) -->
         <div v-if="editing !== 'new'" class="vars-box">
           <div class="vars-head">变量（密钥脱敏，作为脚本环境变量；值不显示、不进对话）</div>
+          <div class="vars-note">脚本输出里出现的值会被替换成 <code>${变量名}</code> 再返回，所以脚本打印了也不会进对话；4 个字符以内的值不做替换（太短，会误伤正常输出）。</div>
           <div v-if="form.varKeys.length" class="var-chips">
             <span v-for="k in form.varKeys" :key="k" class="badge mono var-chip">
               {{ k }} <button class="chip-x" title="删除变量" @click="removeVar(k)">✕</button>
@@ -637,6 +638,11 @@ async function onZipPicked(e) {
 .vars-head {
   font-size: 12px;
   color: var(--text-dim);
+}
+.vars-note {
+  font-size: 12px;
+  color: var(--text-muted);
+  line-height: 1.5;
 }
 .var-chips {
   display: flex;

@@ -239,6 +239,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/agents", s.handleListAgents)
 	mux.HandleFunc("POST /api/agents", s.handleSaveAgent)
 	mux.HandleFunc("DELETE /api/agents/{name}", s.handleDeleteAgent)
+	mux.HandleFunc("POST /api/agents/{name}/vars", s.handleSetAgentVars)
+	mux.HandleFunc("DELETE /api/agents/{name}/vars/{key}", s.handleDeleteAgentVar)
 	mux.HandleFunc("POST /api/skills/{name}/vars", s.handleSetSkillVars)
 	mux.HandleFunc("DELETE /api/skills/{name}/vars/{key}", s.handleDeleteSkillVar)
 	mux.HandleFunc("DELETE /api/skills/{name}", s.handleDeleteSkill)

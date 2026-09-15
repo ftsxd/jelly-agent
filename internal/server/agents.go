@@ -20,9 +20,19 @@ func (s *Server) handleListAgents(w http.ResponseWriter, r *http.Request) {
 	if agents == nil {
 		agents = []config.AgentDef{}
 	}
+	// Variable NAMES only, as a sibling map rather than a field on AgentDef:
+	// the list marshals AgentDef verbatim, so a value stored there would be on
+	// its way to the browser before anyone noticed.
+	varKeys := map[string][]string{}
+	for _, a := range agents {
+		if keys := sortedKeys(cfg.AgentVars[a.Name]); len(keys) > 0 {
+			varKeys[a.Name] = keys
+		}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"agents":        agents,
 		"default_agent": cfg.DefaultAgent,
+		"var_keys":      varKeys,
 	})
 }
 
@@ -136,10 +146,102 @@ func (s *Server) handleDeleteAgent(w http.ResponseWriter, r *http.Request) {
 	if raw.DefaultAgent == name {
 		raw.DefaultAgent = ""
 	}
+	delete(raw.AgentVars, name) // otherwise a later agent reusing the name inherits them
 	if err := s.persist(w, raw, path); err != nil {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "saved_to": path})
+}
+
+// envVarNameRe constrains a variable name to what a shell can actually export.
+var envVarNameRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+// reservedEnvNames are set by the sandbox itself. scrubEnv lays down its base
+// first and appends the injected pairs, so these would silently win — and a
+// replaced PATH costs the script its interpreter. Rejecting beats debugging
+// why a skill that works everywhere else fails under one agent.
+var reservedEnvNames = map[string]bool{"PATH": true, "HOME": true, "TMPDIR": true, "LANG": true}
+
+// agentVarsInput sets an agent's variables (key/value). An empty value keeps
+// the stored one, so editing without re-typing a secret preserves it.
+type agentVarsInput struct {
+	Vars map[string]string `json:"vars"`
+}
+
+// handleSetAgentVars merges variables into an agent's config-stored set
+// (config.yaml, 0600), then persists + hot-reloads. They are injected into that
+// agent's run_script sandbox on top of the skill's own vars, the agent winning
+// a collision. Values may be ${ENV} references, which stay verbatim in the file
+// and resolve from the process environment at load — so a secret need never be
+// written down. Only the key names ever reach the model or the browser.
+//
+// Deliberately a separate endpoint from POST /api/agents: that handler rebuilds
+// the whole record from its input, and the console re-posts partial records when
+// toggling an agent on or off. Variables living here cannot be erased by a click
+// on the power button.
+func (s *Server) handleSetAgentVars(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	if !agentNameRe.MatchString(name) {
+		writeErr(w, http.StatusBadRequest, "agent 名非法")
+		return
+	}
+	var in agentVarsInput
+	if err := decodeJSON(r, &in); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	for k := range in.Vars {
+		if !envVarNameRe.MatchString(k) {
+			writeErr(w, http.StatusBadRequest, "变量名只能含字母、数字和下划线，且不能以数字开头: "+k)
+			return
+		}
+		if reservedEnvNames[k] {
+			writeErr(w, http.StatusBadRequest, "该变量名由沙箱保留，不能覆盖: "+k)
+			return
+		}
+	}
+	path, raw, done, err := s.editConfig()
+	defer done()
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if indexOfAgent(raw.Agents, name) < 0 {
+		writeErr(w, http.StatusNotFound, "agent 不存在")
+		return
+	}
+	if raw.AgentVars == nil {
+		raw.AgentVars = map[string]map[string]string{}
+	}
+	raw.AgentVars[name] = mergeSecrets(raw.AgentVars[name], in.Vars) // empty values keep existing
+	if len(raw.AgentVars[name]) == 0 {
+		delete(raw.AgentVars, name)
+	}
+	if err := s.persist(w, raw, path); err != nil {
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "var_keys": sortedKeys(raw.AgentVars[name])})
+}
+
+// handleDeleteAgentVar removes one variable from an agent.
+func (s *Server) handleDeleteAgentVar(w http.ResponseWriter, r *http.Request) {
+	name, key := r.PathValue("name"), r.PathValue("key")
+	path, raw, done, err := s.editConfig()
+	defer done()
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if raw.AgentVars[name] != nil {
+		delete(raw.AgentVars[name], key)
+		if len(raw.AgentVars[name]) == 0 {
+			delete(raw.AgentVars, name)
+		}
+	}
+	if err := s.persist(w, raw, path); err != nil {
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "var_keys": sortedKeys(raw.AgentVars[name])})
 }
 
 func indexOfAgent(as []config.AgentDef, name string) int {

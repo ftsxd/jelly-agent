@@ -658,6 +658,34 @@ func (e *Engine) SkillsFor(agent string) skill.Allowlist {
 	return skill.Allowlist{}
 }
 
+// VarsFor returns the variables a given agent sees when running a given skill's
+// script: the skill's own vars with the agent's own overlaid on top. The agent
+// wins on a name collision — it is the more specific of the two, and a skill
+// shared between agents is exactly the case where each needs its own credential.
+//
+// The result is always a fresh map. The caller hands it to the sandbox, and a
+// map reachable from there must not be one the config still holds.
+func (e *Engine) VarsFor(agent, skill string) map[string]string {
+	if e.cfg == nil {
+		return nil
+	}
+	skillVars := e.cfg.SkillVars[skill]
+	agentVars := e.cfg.AgentVars[strings.TrimSpace(agent)]
+	if len(skillVars) == 0 && len(agentVars) == 0 {
+		// nil, not an empty map: an empty one would still report "no keys",
+		// but this keeps var_keys absent rather than present-and-empty.
+		return nil
+	}
+	out := make(map[string]string, len(skillVars)+len(agentVars))
+	for k, v := range skillVars {
+		out[k] = v
+	}
+	for k, v := range agentVars {
+		out[k] = v
+	}
+	return out
+}
+
 // PromptPart is one contribution to the system instruction.
 type PromptPart struct {
 	Name string `json:"name"`
@@ -1551,7 +1579,12 @@ func (e *Engine) buildNode(name, description, provider, instruction string, tool
 	// apply immediately without a rebuild). When script execution is enabled,
 	// also expose run_script (with per-skill variables as its environment).
 	allowScripts := e.cfg.Skills.AllowScripts
-	varsFor := func(name string) map[string]string { return e.cfg.SkillVars[name] }
+	// The agent identity is captured here, at build time, and never read from a
+	// model argument — same rule as ProjectTools above. Each node in an agent
+	// tree builds its own closure, so a transfer_to_agent handoff lands on the
+	// receiving agent's variables without any ambient "current agent" lookup.
+	agentName := name
+	varsFor := func(skillName string) map[string]string { return e.VarsFor(agentName, skillName) }
 	// An agent given no skills gets neither tool. Registering use_skill for an
 	// empty catalog would spend a tool slot on something that can only answer
 	// "not found" — and invite the model to go looking.

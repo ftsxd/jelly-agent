@@ -75,9 +75,12 @@ type runScriptResult struct {
 }
 
 // RunScriptTool builds the run_script tool: it runs a skill's bundled script
-// inside the sandbox (pol), with that skill's configured variables injected as
-// environment (the secret values never enter the prompt). Register this ONLY
-// when script execution is enabled. store must be non-nil; varsFor may be nil.
+// inside the sandbox (pol), with the calling agent's and the skill's configured
+// variables injected as environment. The values never enter the prompt, and the
+// sandbox masks them out of the script's output on the way back (see
+// sandbox.redactInjected) — so neither the catalog nor the transcript carries
+// them. Register this ONLY when script execution is enabled. store must be
+// non-nil; varsFor may be nil.
 //
 // allow is enforced here too, not just in use_skill: the catalog is the only
 // thing that stops a model naming a skill it was never shown, and "the model
@@ -86,7 +89,7 @@ func RunScriptTool(store *skill.Store, varsFor func(skill string) map[string]str
 	return functiontool.New(
 		functiontool.Config{
 			Name:        "run_script",
-			Description: "运行某个技能附带的脚本（在沙箱中执行；凭据已由系统注入为环境变量，按 use_skill 给出的 var_keys 在脚本里用环境变量引用即可，切勿向用户索要密钥）。返回脚本的输出。",
+			Description: "运行某个技能附带的脚本（在沙箱中执行；凭据已由系统注入为环境变量，按 use_skill 给出的 var_keys 在脚本里用环境变量引用即可，切勿向用户索要密钥）。返回脚本的输出——其中凭据的值会被替换成 ${变量名}，这是预期行为，不必重试，也不要设法绕开它把值取出来。",
 		},
 		func(tc adktool.Context, args runScriptArgs) (runScriptResult, error) {
 			var env map[string]string

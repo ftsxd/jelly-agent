@@ -78,8 +78,10 @@ func isExecutable(e os.DirEntry) bool {
 // RunScript runs script (a file inside the skill's directory) under the given
 // sandbox policy, with env injected as variables, returning the combined,
 // truncated output. The caller's ctx still bounds the run (the policy's timeout
-// applies on top). Secrets in env reach only the child process — they are never
-// returned except via what the script itself prints.
+// applies on top). Secrets in env reach only the child process: the sandbox
+// masks each injected value out of the output before returning it, so a script
+// that prints one — on purpose, through set -x, or in an error — still cannot
+// put it in the transcript.
 //
 // Path safety is enforced here (the script must resolve inside the skill dir);
 // the resource/isolation envelope is enforced by the sandbox package. A skill

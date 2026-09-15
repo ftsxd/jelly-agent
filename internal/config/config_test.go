@@ -110,6 +110,7 @@ func TestSaveRoundTripsEverySection(t *testing.T) {
 		},
 		DefaultAgent: "root",
 		SkillVars:    map[string]map[string]string{"s": {"K": "V"}},
+		AgentVars:    map[string]map[string]string{"ops": {"K8S_TOKEN": "${K8S_TOKEN}"}},
 	}
 	in.Memory.Search.Enabled = true
 	in.Memory.Search.Backend = "fts5"
@@ -164,6 +165,11 @@ func TestSaveRoundTripsEverySection(t *testing.T) {
 	}
 	if out.DefaultAgent != "root" || out.SkillVars["s"]["K"] != "V" {
 		t.Errorf("default_agent / skill_vars lost: %q %+v", out.DefaultAgent, out.SkillVars)
+	}
+	// LoadRaw, so the reference stays verbatim: an edit made in the console must
+	// never bake the resolved secret into the file.
+	if out.AgentVars["ops"]["K8S_TOKEN"] != "${K8S_TOKEN}" {
+		t.Errorf("agent_vars lost or expanded on save: %+v", out.AgentVars)
 	}
 }
 
