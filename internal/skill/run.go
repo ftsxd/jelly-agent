@@ -11,6 +11,28 @@ import (
 	"github.com/jelly-agent/jelly-agent/internal/sandbox"
 )
 
+// SkillMode resolves the sandbox mode one skill's scripts run under: the
+// operator's policy, tightened by the skill's own `sandbox:` frontmatter if it
+// declares one.
+//
+// The clamp only ever goes one way. A skill is content — imported from a zip,
+// edited in the web form, in the limit written by the model itself — so letting
+// it widen its own envelope would make the global policy advisory. Tightening is
+// safe and worth supporting: a skill that only reads and reports should say so.
+// An unreadable or malformed declaration falls back to the global policy.
+func (s *Store) SkillMode(name string, pol sandbox.Policy) sandbox.Mode {
+	global := pol.EffectiveMode()
+	sk, ok, err := s.Get(name)
+	if err != nil || !ok || sk.Sandbox == "" {
+		return global
+	}
+	declared := sandbox.Mode(sk.Sandbox)
+	if !declared.Valid() {
+		return global
+	}
+	return declared.AtMost(global)
+}
+
 // Scripts lists the runnable script files bundled with a directory-form skill
 // (anything that isn't SKILL.md, top level only). Empty for flat-file skills.
 func (s *Store) Scripts(name string) []string {
@@ -46,11 +68,13 @@ func isExecutable(e os.DirEntry) bool {
 // returned except via what the script itself prints.
 //
 // Path safety is enforced here (the script must resolve inside the skill dir);
-// the resource/isolation envelope is enforced by the sandbox package.
+// the resource/isolation envelope is enforced by the sandbox package. A skill
+// declaring its own `sandbox:` mode narrows pol for this run — see SkillMode.
 func (s *Store) RunScript(ctx context.Context, name, script string, args []string, env map[string]string, pol sandbox.Policy) (string, error) {
 	if !ValidName(name) {
 		return "", fmt.Errorf("技能名非法")
 	}
+	pol.Mode = s.SkillMode(name, pol)
 	skillDir := filepath.Join(s.dir, name)
 
 	// Resolve and confine the script path inside the skill directory.
@@ -82,4 +106,13 @@ func (s *Store) RunScript(ctx context.Context, name, script string, args []strin
 		return res.Output, fmt.Errorf("脚本退出异常: exit status %d", res.ExitCode)
 	}
 	return res.Output, nil
+}
+
+// modeList renders the valid sandbox modes for an error message.
+func modeList() string {
+	names := make([]string, 0, len(sandbox.Modes))
+	for _, m := range sandbox.Modes {
+		names = append(names, string(m))
+	}
+	return strings.Join(names, " / ")
 }

@@ -12,7 +12,7 @@ const notice = ref('')
 
 const editing = ref(false) // false | 'new' | name
 const saving = ref(false)
-const form = reactive({ name: '', description: '', body: '', enabled: true, varKeys: [], scripts: [], varsText: '', savingVars: false })
+const form = reactive({ name: '', description: '', body: '', enabled: true, sandbox: '', varKeys: [], scripts: [], varsText: '', savingVars: false })
 
 const fileInput = ref(null)
 const uploading = ref(false)
@@ -21,11 +21,19 @@ const uploading = ref(false)
 // numeric fields fall back to the backend defaults shown as placeholders.
 const sandboxOpen = ref(false)
 const savingSandbox = ref(false)
-const sandboxMeta = reactive({ dockerAvailable: false, defaults: {} })
+const sandboxMeta = reactive({ dockerAvailable: false, osAvailable: false, osDetail: '', modes: [], defaults: {} })
+const MODE_HINTS = {
+  'read-only': '只读：脚本不能写任何文件，也不能联网',
+  workspace: '工作目录可写：只能写技能自己的目录，不能联网',
+  'workspace-net': '工作目录可写 + 可联网：诊断脚本要查 Prometheus / K8s API 时选这个',
+  full: '不隔离：仅保留超时与输出上限，文件系统和网络完全放开',
+}
 const sandbox = reactive({
+  mode: '',
   backend: '',
   allow_docker: false,
-  network: false,
+  read_paths: '',
+  write_paths: '',
   image: '',
   timeout_sec: 0,
   max_output_kb: 0,
@@ -39,13 +47,19 @@ onMounted(() => {
   loadSandbox()
 })
 
+// MODE_HINTS is referenced from the template, so it has to be in scope there.
 async function loadSandbox() {
   try {
     const res = await api.sandbox()
     Object.assign(sandbox, {
+      // A config written before modes existed only carries the network flag;
+      // show it as the mode it has always meant, so saving does not silently
+      // change the envelope.
+      mode: res.mode || (res.network ? 'workspace-net' : res.defaults?.mode || 'workspace'),
       backend: res.backend || '',
       allow_docker: !!res.allow_docker,
-      network: !!res.network,
+      read_paths: (res.read_paths || []).join('\n'),
+      write_paths: (res.write_paths || []).join('\n'),
       image: res.image || '',
       timeout_sec: res.timeout_sec || 0,
       max_output_kb: res.max_output_kb || 0,
@@ -54,6 +68,9 @@ async function loadSandbox() {
       memory_mb: res.memory_mb || 0,
     })
     sandboxMeta.dockerAvailable = !!res.docker_available
+    sandboxMeta.osAvailable = !!res.os_available
+    sandboxMeta.osDetail = res.os_detail || ''
+    sandboxMeta.modes = res.modes || []
     sandboxMeta.defaults = res.defaults || {}
   } catch (e) {
     error.value = e.message
@@ -66,9 +83,11 @@ async function saveSandbox() {
   error.value = ''
   try {
     await api.setSandbox({
+      mode: sandbox.mode,
       backend: sandbox.backend,
       allow_docker: sandbox.allow_docker,
-      network: sandbox.network,
+      read_paths: sandbox.read_paths.split('\n').map((p) => p.trim()).filter(Boolean),
+      write_paths: sandbox.write_paths.split('\n').map((p) => p.trim()).filter(Boolean),
       image: sandbox.image.trim(),
       timeout_sec: Number(sandbox.timeout_sec) || 0,
       max_output_kb: Number(sandbox.max_output_kb) || 0,
@@ -102,7 +121,7 @@ async function load() {
 
 function startNew() {
   editing.value = 'new'
-  Object.assign(form, { name: '', description: '', body: '', enabled: true, varKeys: [], scripts: [], varsText: '', savingVars: false })
+  Object.assign(form, { name: '', description: '', body: '', enabled: true, sandbox: '', varKeys: [], scripts: [], varsText: '', savingVars: false })
 }
 
 async function startEdit(s) {
@@ -115,6 +134,7 @@ async function startEdit(s) {
       description: full.description || '',
       body: full.body || '',
       enabled: full.enabled,
+      sandbox: full.sandbox || '',
       varKeys: full.var_keys || [],
       scripts: full.scripts || [],
       // prefill existing keys with blank values (blank = keep server-side)
@@ -187,6 +207,7 @@ async function submit() {
       description: form.description.trim(),
       body: form.body,
       enabled: form.enabled,
+      sandbox: form.sandbox,
     })
     notice.value = `已保存到 ${res.saved_to}`
     editing.value = false
@@ -201,7 +222,9 @@ async function submit() {
 async function toggle(s) {
   try {
     const full = await api.skill(s.name)
-    await api.saveSkill({ name: full.name, description: full.description, body: full.body, enabled: !full.enabled })
+    // Send sandbox back too: this path rewrites the whole file, so omitting it
+    // would quietly widen the skill's envelope on every enable/disable click.
+    await api.saveSkill({ name: full.name, description: full.description, body: full.body, enabled: !full.enabled, sandbox: full.sandbox || '' })
     await load()
   } catch (e) {
     error.value = e.message
@@ -281,30 +304,48 @@ async function onZipPicked(e) {
           <span class="caret" :class="{ open: sandboxOpen }">▸</span>
           <Icon name="settings" :size="16" />
           <span class="st-title">脚本沙箱设置</span>
-          <span class="sb-badge">{{ sandbox.backend || '自动' }}</span>
+          <span class="sb-badge">{{ sandbox.mode || '自动' }}</span>
+          <span class="sb-badge">{{ sandbox.backend || '自动后端' }}</span>
         </button>
         <div v-if="sandboxOpen" class="sandbox-body">
           <p class="muted hint">脚本的隔离与资源上限。改动保存即热重载，无需重启。</p>
           <div class="grid">
+            <label class="field span2">
+              <span class="label">模式</span>
+              <select v-model="sandbox.mode" class="input">
+                <option v-for="m in sandboxMeta.modes" :key="m" :value="m">{{ m }}</option>
+              </select>
+              <span class="muted tiny">{{ MODE_HINTS[sandbox.mode] || '' }}</span>
+            </label>
             <label class="field">
               <span class="label">后端</span>
               <select v-model="sandbox.backend" class="input">
-                <option value="">自动（有 docker 且允许时用 docker，否则 native）</option>
-                <option value="native">native（纯 Go，尽力而为加固）</option>
-                <option value="docker">docker（强隔离）</option>
+                <option value="">自动（优先 docker（需勾选），其次 os，最后 native）</option>
+                <option value="os">os（系统级沙箱，轻量，推荐）</option>
+                <option value="native">native（纯 Go，仅加固，不是安全边界）</option>
+                <option value="docker">docker（最强隔离，最重）</option>
               </select>
             </label>
             <label class="field">
               <span class="check-wrap">
                 <input type="checkbox" v-model="sandbox.allow_docker" /> 允许使用 docker 后端
               </span>
-              <span v-if="!sandboxMeta.dockerAvailable" class="muted tiny">⚠️ 本机未检测到 docker 命令，docker 后端将回落到 native</span>
+              <span v-if="!sandboxMeta.dockerAvailable" class="muted tiny">⚠️ 本机未检测到 docker 命令，docker 后端会依次回落到 os / native</span>
             </label>
-            <label class="field span2" v-if="sandbox.backend === 'docker' || (sandbox.backend === '' && sandbox.allow_docker)">
-              <span class="check-wrap">
-                <input type="checkbox" v-model="sandbox.network" /> 放开网络（默认 <code class="mono">--network none</code>，仅 docker 后端有效）
-              </span>
+            <p class="field span2 sb-note" :class="{ warn: !sandboxMeta.osAvailable }">
+              <strong>本机 os 后端：</strong>{{ sandboxMeta.osDetail }}
+            </p>
+            <label class="field span2" v-if="sandbox.backend !== 'docker'">
+              <span class="label">额外可读路径（每行一个绝对路径）</span>
+              <textarea v-model="sandbox.read_paths" class="input mono" rows="2" placeholder="/data/shared"></textarea>
+              <span class="muted tiny">默认脚本只能读系统目录和自己的技能目录。要让脚本读别的地方，在这里显式列出——别把 agent 自己的配置目录加进来。</span>
             </label>
+            <label class="field span2" v-if="sandbox.backend !== 'docker'">
+              <span class="label">额外可写路径（每行一个绝对路径）</span>
+              <textarea v-model="sandbox.write_paths" class="input mono" rows="2" placeholder="/data/repos"></textarea>
+              <span class="muted tiny">默认脚本只能写自己的技能目录。同步代码这类要写到别处的脚本，把目标目录列在这里。列出的路径同时也可读——能写不能读的目录只会让 git 报些看不懂的错。read-only 模式下这里一律无效。</span>
+            </label>
+
             <label class="field span2" v-if="sandbox.backend === 'docker' || (sandbox.backend === '' && sandbox.allow_docker)">
               <span class="label">docker 镜像</span>
               <input v-model="sandbox.image" class="input mono" :placeholder="sandboxMeta.defaults.image || 'python:3.12-slim'" />
@@ -330,7 +371,7 @@ async function onZipPicked(e) {
               <input v-model.number="sandbox.memory_mb" type="number" min="0" class="input" :placeholder="String(sandboxMeta.defaults.memory_mb || '')" />
             </label>
           </div>
-          <p class="muted tiny">数值留空/为 0 表示使用默认值（占位符所示）。native 无法限制网络/进程数/内存，仅 docker 后端可强制。</p>
+          <p class="muted tiny">数值留空/为 0 表示使用默认值（占位符所示）。进程数与内存上限只有 docker 后端能强制；native 后端对文件系统和网络完全不设限，模式在它上面只是空话。</p>
           <div class="form-actions">
             <button class="btn btn-primary" :disabled="savingSandbox" @click="saveSandbox">{{ savingSandbox ? '保存中…' : '保存沙箱设置' }}</button>
           </div>
@@ -353,6 +394,13 @@ async function onZipPicked(e) {
           <label class="field span2">
             <span class="label">描述 *（进清单，供 Agent 判断何时使用）</span>
             <input v-model="form.description" class="input" placeholder="把本周事项整理成结构化中文周报" />
+          </label>
+          <label class="field">
+            <span class="label">脚本沙箱（可选，只能比全局更严）</span>
+            <select v-model="form.sandbox" class="input">
+              <option value="">跟随全局策略</option>
+              <option v-for="m in sandboxMeta.modes" :key="m" :value="m">{{ m }}</option>
+            </select>
           </label>
           <label class="field span2">
             <span class="label">技能正文（Markdown，调用 use_skill 时返回）</span>
@@ -521,6 +569,18 @@ async function onZipPicked(e) {
   border-radius: 6px;
   padding: 1px 8px;
   font-family: var(--font-mono);
+}
+.sb-divider {
+  border-top: 1px solid var(--border, #e5e5e5);
+  padding-top: 12px;
+}
+.sb-note {
+  margin: 0;
+  font-size: 12px;
+  color: var(--muted, #888);
+}
+.sb-note.warn {
+  color: #b26a00;
 }
 .sandbox-body {
   padding: 0 var(--sp-4) var(--sp-4);

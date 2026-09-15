@@ -129,9 +129,10 @@ func TestAuditHookFires(t *testing.T) {
 	}
 }
 
-// docker auto-selection must degrade to native when no docker binary exists,
-// rather than failing the run.
-func TestDockerBackendFallsBackToNative(t *testing.T) {
+// An explicitly requested docker backend must degrade rather than fail the run
+// when no docker binary exists — to the os backend where the platform has one,
+// and only then to native. Either way the degradation has to be visible.
+func TestDockerBackendDegradesWhenUnavailable(t *testing.T) {
 	if dockerAvailable() {
 		t.Skip("docker present; fallback path not exercised here")
 	}
@@ -140,7 +141,14 @@ func TestDockerBackendFallsBackToNative(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
-	if res.Backend != "native" {
-		t.Fatalf("expected fallback to native, got %q", res.Backend)
+	want := "native"
+	if osAvailable() {
+		want = "os"
+	}
+	if res.Backend != want {
+		t.Fatalf("expected fallback to %q, got %q", want, res.Backend)
+	}
+	if res.Degraded == "" {
+		t.Fatal("degradation must be reported, not silent")
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strings"
 
@@ -313,16 +314,33 @@ func (a Admin) Configured() bool {
 
 // Sandbox configures the execution envelope for skill scripts (and future
 // run_code). The zero value is valid: the sandbox package applies its defaults
-// (60s timeout, 8 KiB output, native best-effort confinement). See PLAN §8
-// risk 6.
+// (workspace mode, 60s timeout, 8 KiB output, and the strongest backend this
+// host offers). See PLAN §8 risk 6.
 type Sandbox struct {
-	// Backend selects the isolation backend: "" (auto), "native", or "docker".
-	// Auto uses native unless AllowDocker is set and a docker binary is found.
+	// Mode is the confinement intent, and the only knob most deployments need:
+	// read-only / workspace / workspace-net / full. Empty ⇒ workspace (or
+	// workspace-net when the legacy Network flag is set).
+	Mode string `mapstructure:"mode" yaml:"mode,omitempty"`
+	// Backend selects the isolation backend: "" (auto), "native", "os", or
+	// "docker". Auto prefers docker when AllowDocker is set and docker exists,
+	// then the OS sandbox (macOS Seatbelt / Linux Landlock), then native.
 	Backend string `mapstructure:"backend" yaml:"backend,omitempty"`
 	// AllowDocker permits the auto/explicit docker backend (strong isolation).
 	AllowDocker bool `mapstructure:"allow_docker" yaml:"allow_docker,omitempty"`
-	// Network allows network access in the docker backend (native cannot
-	// restrict it either way). Default false ⇒ docker runs with --network none.
+	// ReadPaths are extra host paths a script may read under the os backend, on
+	// top of the system directories and its own working directory. Use it for a
+	// shared data dir the scripts genuinely need — not for the agent's config.
+	ReadPaths []string `mapstructure:"read_paths" yaml:"read_paths,omitempty"`
+	// WritePaths are extra host paths a script may write under the os backend.
+	// A sync script has to write outside its own directory; saying which
+	// directory in config is the alternative to switching confinement off for
+	// the one skill that holds a token and talks to the network. Listing a path
+	// here also makes it readable — a directory you can write but not stat is a
+	// trap that looks like a bug, not like a policy.
+	WritePaths []string `mapstructure:"write_paths" yaml:"write_paths,omitempty"`
+	// Network is the pre-Mode switch, kept so existing config keeps working:
+	// it is honored only when Mode is empty, where it means workspace-net.
+	// Deprecated: set Mode instead.
 	Network bool `mapstructure:"network" yaml:"network,omitempty"`
 	// Image is the docker image used by the docker backend ("" ⇒ python:3-slim).
 	Image string `mapstructure:"image" yaml:"image,omitempty"`
@@ -474,7 +492,9 @@ func Save(c *Config, path string) error {
 		sk := c.Skills
 		p.Skills = &sk
 	}
-	if c.Sandbox != (Sandbox{}) {
+	// Sandbox holds a slice, so it is not comparable with ==; DeepEqual also
+	// keeps this honest when the struct grows another field.
+	if !reflect.DeepEqual(c.Sandbox, Sandbox{}) {
 		sb := c.Sandbox
 		p.Sandbox = &sb
 	}

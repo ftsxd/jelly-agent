@@ -32,17 +32,21 @@ func DockerAvailable() bool {
 	return err == nil
 }
 
-// runDocker executes the script inside an ephemeral container. The working
-// directory is bind-mounted at /work (the only writable host path); the root
-// filesystem is read-only, /tmp is a small tmpfs, and — unless Policy.Network is
-// set — the container has no network at all. Memory and PID caps come from the
-// policy.
-func runDocker(ctx context.Context, p Policy, s Spec) (Result, error) {
+// dockerArgs renders the full `docker …` argv for one run. It is separate from
+// runDocker so the envelope can be asserted without a docker daemon.
+func dockerArgs(p Policy, s Spec) []string {
 	mem := strconv.Itoa(p.MemoryMB) + "m"
+	// The mode governs docker exactly as it governs the os backend: the one
+	// word an operator sets has to mean the same thing whichever backend ends up
+	// running, or picking a stronger backend would silently change the envelope.
+	mount := s.Dir + ":/work"
+	if !p.Mode.CanWrite() {
+		mount += ":ro"
+	}
 	args := []string{
 		"run", "--rm", "-i",
 		"--workdir", "/work",
-		"--volume", s.Dir + ":/work",
+		"--volume", mount,
 		"--read-only",
 		"--tmpfs", "/tmp:rw,exec,size=64m",
 		"--pids-limit", strconv.Itoa(p.MaxProcs),
@@ -50,7 +54,7 @@ func runDocker(ctx context.Context, p Policy, s Spec) (Result, error) {
 		"--memory-swap", mem, // == memory ⇒ no swap
 		"--env", "HOME=/tmp",
 	}
-	if !p.Network {
+	if !p.Mode.CanNetwork() {
 		args = append(args, "--network", "none")
 	}
 	args = append(args, dockerUser()...)
@@ -66,6 +70,17 @@ func runDocker(ctx context.Context, p Policy, s Spec) (Result, error) {
 		args = append(args, rel)
 	}
 	args = append(args, s.Args...)
+	return args
+}
+
+// runDocker executes the script inside an ephemeral container. The working
+// directory is bind-mounted at /work (the only writable host path); the root
+// filesystem is read-only, /tmp is a small tmpfs, and — unless the mode allows
+// the network — the container has no network at all. Under read-only the
+// workspace mount itself is read-only too. Memory and PID caps come from the
+// policy.
+func runDocker(ctx context.Context, p Policy, s Spec) (Result, error) {
+	args := dockerArgs(p, s)
 
 	ctx, cancel := context.WithTimeout(ctx, p.Timeout)
 	defer cancel()

@@ -20,6 +20,7 @@ type useSkillResult struct {
 	Description  string   `json:"description,omitempty"`
 	Instructions string   `json:"instructions,omitempty"` // the skill body to follow
 	Scripts      []string `json:"scripts,omitempty"`      // runnable script files (call run_script)
+	Sandbox      string   `json:"sandbox,omitempty"`      // what those scripts will be allowed to do
 	VarKeys      []string `json:"var_keys,omitempty"`     // configured variable names (values injected at run; never shown)
 	Message      string   `json:"message,omitempty"`      // set when not found
 }
@@ -27,10 +28,14 @@ type useSkillResult struct {
 // SkillTool builds the use_skill tool: given a skill name, it returns that
 // skill's full instructions for the agent to follow (progressive disclosure —
 // the base prompt only carries the catalog). When scriptsEnabled, the result
-// also lists the skill's runnable scripts and its configured variable names
-// (names only — values are injected into run_script's environment, never shown).
-// store must be non-nil; varsFor may be nil.
-func SkillTool(store *skill.Store, varsFor func(skill string) map[string]string, scriptsEnabled bool) (adktool.Tool, error) {
+// also lists the skill's runnable scripts, the sandbox envelope those scripts
+// will run under, and its configured variable names (names only — values are
+// injected into run_script's environment, never shown).
+//
+// Telling the model the envelope up front is not decoration: a model that does
+// not know the network is closed writes a script that curls, watches it fail,
+// and retries. store must be non-nil; varsFor may be nil.
+func SkillTool(store *skill.Store, varsFor func(skill string) map[string]string, scriptsEnabled bool, pol sandbox.Policy) (adktool.Tool, error) {
 	return functiontool.New(
 		functiontool.Config{
 			Name:        "use_skill",
@@ -48,6 +53,9 @@ func SkillTool(store *skill.Store, varsFor func(skill string) map[string]string,
 			if scriptsEnabled {
 				res.Scripts = store.Scripts(sk.Name)
 				res.VarKeys = sortedVarKeys(varsFor, sk.Name)
+				if len(res.Scripts) > 0 {
+					res.Sandbox = describeMode(store.SkillMode(sk.Name, pol))
+				}
 			}
 			return res, nil
 		},
@@ -88,6 +96,21 @@ func RunScriptTool(store *skill.Store, varsFor func(skill string) map[string]str
 			return runScriptResult{OK: true, Output: out}, nil
 		},
 	)
+}
+
+// describeMode spells out a mode for the model in the terms it needs when
+// writing a script: what it may write, and whether it may reach the network.
+func describeMode(m sandbox.Mode) string {
+	switch m {
+	case sandbox.ModeReadOnly:
+		return string(m) + "：脚本不能写任何文件，也不能联网"
+	case sandbox.ModeWorkspaceNet:
+		return string(m) + "：脚本只能写自己所在的技能目录，可以联网"
+	case sandbox.ModeFull:
+		return string(m) + "：不受限"
+	default:
+		return string(sandbox.ModeWorkspace) + "：脚本只能写自己所在的技能目录，不能联网"
+	}
 }
 
 func sortedVarKeys(varsFor func(string) map[string]string, skill string) []string {

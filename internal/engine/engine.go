@@ -57,9 +57,17 @@ func init() {
 		} else if ev.Err != "" {
 			status = "start-error: " + ev.Err
 		}
-		slog.Info("沙箱执行",
-			"backend", ev.Backend, "file", ev.File, "args", ev.Args,
-			"status", status, "duration_ms", ev.Duration.Milliseconds())
+		// mode and degraded belong in the line, not just the backend: a reviewer
+		// asking "what was this allowed to do" must not have to guess, and a run
+		// that silently enforced less than configured has to be visible here.
+		attrs := []any{
+			"backend", ev.Backend, "mode", string(ev.Mode), "file", ev.File, "args", ev.Args,
+			"status", status, "duration_ms", ev.Duration.Milliseconds(),
+		}
+		if ev.Degraded != "" {
+			attrs = append(attrs, "degraded", ev.Degraded)
+		}
+		slog.Info("沙箱执行", attrs...)
 	}
 }
 
@@ -1208,8 +1216,11 @@ func (e *Engine) Skills() (*skill.Store, error) {
 func (e *Engine) sandboxPolicy() sandbox.Policy {
 	sb := e.cfg.Sandbox
 	p := sandbox.Policy{
+		Mode:        sandbox.Mode(sb.Mode),
 		Backend:     sb.Backend,
 		AllowDocker: sb.AllowDocker,
+		ReadPaths:   sb.ReadPaths,
+		WritePaths:  sb.WritePaths,
 		Network:     sb.Network,
 		Image:       sb.Image,
 		CPUSeconds:  sb.CPUSeconds,
@@ -1489,7 +1500,7 @@ func (e *Engine) buildNode(name, description, provider, instruction string, tool
 	varsFor := func(name string) map[string]string { return e.cfg.SkillVars[name] }
 	if skills, err := e.Skills(); err == nil {
 		if cat, err := skills.Catalog(); err == nil && cat != "" {
-			if st, err := jellytool.SkillTool(skills, varsFor, allowScripts); err == nil {
+			if st, err := jellytool.SkillTool(skills, varsFor, allowScripts, e.sandboxPolicy()); err == nil {
 				tools = append(tools, st)
 			}
 			if allowScripts {

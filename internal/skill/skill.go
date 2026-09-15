@@ -17,6 +17,8 @@ import (
 	"strings"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/jelly-agent/jelly-agent/internal/sandbox"
 )
 
 // nameRe restricts a skill name so it is a safe, stable file name and a clean
@@ -31,7 +33,12 @@ type Skill struct {
 	Name        string `json:"name"`
 	Description string `json:"description"`
 	Enabled     bool   `json:"enabled"`
-	Body        string `json:"body,omitempty"`
+	// Sandbox optionally narrows the execution envelope for this skill's scripts
+	// (a sandbox.Mode). It can only tighten the operator's global policy, never
+	// loosen it — a skill that asks for the network does not get it unless the
+	// global mode already grants it. Empty ⇒ inherit the global policy.
+	Sandbox string `json:"sandbox,omitempty"`
+	Body    string `json:"body,omitempty"`
 }
 
 // frontmatter is the YAML header persisted at the top of each skill file.
@@ -39,6 +46,7 @@ type frontmatter struct {
 	Name        string `yaml:"name"`
 	Description string `yaml:"description"`
 	Enabled     bool   `yaml:"enabled"`
+	Sandbox     string `yaml:"sandbox,omitempty"`
 }
 
 // Store is a directory of skill Markdown files.
@@ -146,6 +154,9 @@ func (s *Store) Get(name string) (Skill, bool, error) {
 func (s *Store) Save(sk Skill) error {
 	if !ValidName(sk.Name) {
 		return fmt.Errorf("技能名仅允许字母、数字、下划线、连字符")
+	}
+	if sk.Sandbox != "" && !sandbox.Mode(sk.Sandbox).Valid() {
+		return fmt.Errorf("sandbox 只能是 %s 之一，收到 %q", modeList(), sk.Sandbox)
 	}
 	target := s.flatPath(sk.Name)
 	if _, err := os.Stat(s.dirSkillPath(sk.Name)); err == nil {
@@ -291,7 +302,7 @@ func readZipEntry(f *zip.File) ([]byte, error) {
 
 // render serializes a skill to its file form (YAML frontmatter + body).
 func render(sk Skill) string {
-	fm, _ := yaml.Marshal(frontmatter{Name: sk.Name, Description: sk.Description, Enabled: sk.Enabled})
+	fm, _ := yaml.Marshal(frontmatter{Name: sk.Name, Description: sk.Description, Enabled: sk.Enabled, Sandbox: sk.Sandbox})
 	return "---\n" + string(fm) + "---\n\n" + strings.TrimRight(sk.Body, "\n") + "\n"
 }
 
@@ -334,5 +345,5 @@ func parse(raw []byte) Skill {
 	_ = yaml.Unmarshal([]byte(rest[:end]), &fm)
 	body := rest[end+len("\n---"):]
 	body = strings.TrimPrefix(body, "\n")
-	return Skill{Name: fm.Name, Description: fm.Description, Enabled: fm.Enabled, Body: strings.TrimSpace(body)}
+	return Skill{Name: fm.Name, Description: fm.Description, Enabled: fm.Enabled, Sandbox: fm.Sandbox, Body: strings.TrimSpace(body)}
 }

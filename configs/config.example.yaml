@@ -98,19 +98,33 @@ skills:
   # dir: ~/.jelly-agent/skills    # 技能目录，留空用默认
   allow_scripts: false          # 开启 run_script 工具（在沙箱中执行技能脚本）
 
-# 沙箱：run_script（及后续 run_code）的执行隔离与资源上限。整段省略即用默认值。
-# ⚠️ native 后端是“尽力而为”加固（清洗环境、限工作目录、超时杀进程组、限 CPU 时长 +
-#    输出截断），不限制文件系统/网络，不是安全边界；需要强隔离请用 docker 后端。
+# 沙箱：run_script（及后续 run_code）的执行隔离与资源上限。整段省略即用默认值
+# （mode=workspace + 本机能提供的最强轻量后端）。详见 docs/sandbox.md。
+#
+# 日常只需要关心 mode 这一项，后端让它自动选：
+#   read-only      不能写任何文件，不能联网
+#   workspace      只能写技能自己的目录，不能联网（默认）
+#   workspace-net  同上 + 放开网络（诊断脚本要查 Prometheus / K8s API 时用这个）
+#   full           不隔离，只保留超时和输出上限
+#
+# ⚠️ native 后端只是加固（清洗环境、限工作目录、超时杀进程组、限 CPU 时长 + 输出
+#    截断），不限制文件系统/网络，在它上面 mode 是空话。os 后端才是真边界：
+#    macOS 用 Seatbelt，Linux 用 Landlock（网络限制还需内核 6.7+）。
 sandbox:
-  backend: ""                   # ""=自动（有 docker 且 allow_docker 时用 docker，否则 native）；可显式填 native / docker
+  mode: workspace               # 见上；留空=workspace（旧配置只写了 network: true 时=workspace-net）
+  backend: ""                   # ""=自动（allow_docker 且有 docker 时用 docker，其次 os，最后 native）；可显式填 os / native / docker
   allow_docker: false           # 允许自动/显式选用 docker 强隔离后端
-  network: false                # docker 后端是否放开网络（false=--network none；native 无法限制）
+  # read_paths: []              # os 后端：额外允许脚本读取的绝对路径（默认只有系统目录 + 技能目录）
+  # write_paths: []             # os 后端：额外允许脚本写入的绝对路径（默认只有技能目录）；同步代码的脚本要写 /data/repos 就填在这
+                                #   列出的路径同时可读——能写不能读的目录只会让 git 报些看不懂的错
+                                #   read-only 模式下本项一律无效
+  # network: false              # 已废弃，被 mode 取代；仅在 mode 留空时仍然生效
   image: python:3.12-slim       # docker 后端使用的镜像
   timeout_sec: 60               # 单次执行墙钟超时
   max_output_kb: 8              # 捕获的 stdout+stderr 上限
-  cpu_seconds: 30               # native：CPU 时长上限（best-effort）
-  max_procs: 64                 # docker：--pids-limit（native 无法按沙箱限制）
-  memory_mb: 512                # docker：--memory（native 无法可靠限制）
+  cpu_seconds: 30               # native/os：CPU 时长上限（best-effort）
+  max_procs: 64                 # docker：--pids-limit（native/os 无法按沙箱限制）
+  memory_mb: 512                # docker：--memory（native/os 无法可靠限制）
 
 # 多 Agent（可选）。整段省略即用默认单 Agent。给协调者填 sub_agents 即开启
 # ADK 的 transfer_to_agent 转交：协调者按子 Agent 的 description 判断委派给谁。

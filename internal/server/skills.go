@@ -19,6 +19,10 @@ type skillInput struct {
 	Description string `json:"description"`
 	Body        string `json:"body"`
 	Enabled     bool   `json:"enabled"`
+	// Sandbox optionally tightens the execution envelope for this skill's
+	// scripts. It is part of the payload because a save that omitted it would
+	// silently drop the declaration from the file's frontmatter.
+	Sandbox string `json:"sandbox"`
 }
 
 // handleListSkills lists the configured skills (metadata only — no body — to
@@ -73,6 +77,7 @@ func (s *Server) handleSkillDetail(w http.ResponseWriter, r *http.Request) {
 		"name":        sk.Name,
 		"description": sk.Description,
 		"enabled":     sk.Enabled,
+		"sandbox":     sk.Sandbox,
 		"body":        sk.Body,
 		"var_keys":    sortedKeys(cfg.SkillVars[sk.Name]),
 		"scripts":     store.Scripts(sk.Name),
@@ -101,7 +106,13 @@ func (s *Server) handleSaveSkill(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	sk := skill.Skill{Name: in.Name, Description: strings.TrimSpace(in.Description), Body: in.Body, Enabled: in.Enabled}
+	sk := skill.Skill{
+		Name:        in.Name,
+		Description: strings.TrimSpace(in.Description),
+		Body:        in.Body,
+		Enabled:     in.Enabled,
+		Sandbox:     strings.TrimSpace(in.Sandbox),
+	}
 	if err := store.Save(sk); err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
