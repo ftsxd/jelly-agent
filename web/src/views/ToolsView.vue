@@ -93,8 +93,10 @@ async function runFetch() {
             <div class="tool-card-head">
               <Icon name="tool" :size="16" />
               <span class="mono name">{{ t.name }}</span>
+              <span v-if="t.scope === 'project'" class="badge" :title="t.note">代码项目</span>
             </div>
             <p class="desc">{{ t.description }}</p>
+            <p v-if="t.note" class="muted note">{{ t.note }}</p>
           </div>
         </div>
       </section>
@@ -237,6 +239,7 @@ async function runFetch() {
 .tool-card {
   padding: var(--sp-3) var(--sp-4);
 }
+.note { font-size: 12px; margin-top: 6px; line-height: 1.6; }
 .tool-card-head {
   display: flex;
   align-items: center;

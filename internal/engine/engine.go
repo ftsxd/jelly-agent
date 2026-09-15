@@ -1224,7 +1224,29 @@ func (e *Engine) Tools(core *memory.Core, withSearch bool) ([]adktool.Tool, erro
 		slog.Warn("结果存储不可用，read_result / search_result 未启用（被裁剪的工具返回将无法找回）",
 			logging.Err(serr))
 	}
+
+	// Codebase tools, only when the operator has named a directory to expose.
+	// No roots ⇒ no tools ⇒ the agent has no filesystem access at all, which is
+	// the right default for a diagnosis agent that has no business reading disk.
+	if roots := e.FileRoots(); !roots.Empty() {
+		ft, ferr := jellytool.FileTools(roots)
+		if ferr != nil {
+			return nil, fmt.Errorf("build file tools: %w", ferr)
+		}
+		tools = append(tools, ft...)
+	}
 	return tools, nil
+}
+
+// FileRoots resolves the configured code directories once per call. Resolution
+// is deliberately not cached: a root that did not exist at boot appears the
+// first time the sync task runs, and an agent built after that should see it
+// without a restart.
+func (e *Engine) FileRoots() jellytool.Roots {
+	if e.cfg == nil {
+		return jellytool.Roots{}
+	}
+	return jellytool.NewRoots(e.sharedCodeRoots())
 }
 
 // Skills opens the Agent Skills store from config (or its default dir).
@@ -1234,13 +1256,17 @@ func (e *Engine) Skills() (*skill.Store, error) {
 
 // sandboxPolicy translates the config's sandbox section into a sandbox.Policy
 // for script execution. Zero fields keep the sandbox package's own defaults.
+//
+// files.roots are folded into the readable paths: a script analysing the same
+// code the file tools read should not have to be granted it a second time, in a
+// second list, that can drift from the first.
 func (e *Engine) sandboxPolicy() sandbox.Policy {
 	sb := e.cfg.Sandbox
 	p := sandbox.Policy{
 		Mode:        sandbox.Mode(sb.Mode),
 		Backend:     sb.Backend,
 		AllowDocker: sb.AllowDocker,
-		ReadPaths:   sb.ReadPaths,
+		ReadPaths:   append(append([]string{}, sb.ReadPaths...), e.sharedCodeRoots()...),
 		WritePaths:  sb.WritePaths,
 		Network:     sb.Network,
 		Image:       sb.Image,
@@ -1512,6 +1538,11 @@ func (e *Engine) buildNode(name, description, provider, instruction string, tool
 	if err != nil {
 		return nil, prov, fmt.Errorf("build tools: %w", err)
 	}
+	projectTools, err := jellytool.ProjectTools(e.CodeProjects(), name)
+	if err != nil {
+		return nil, prov, fmt.Errorf("build project tools: %w", err)
+	}
+	tools = append(tools, projectTools...)
 	tools = append(tools, e.extraTools...)
 
 	// Agent Skills: when any skill is enabled, add the use_skill tool so the

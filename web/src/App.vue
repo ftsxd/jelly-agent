@@ -368,6 +368,7 @@ async function submitChange() {
 }
 
 .content {
+  min-width: 0;
   overflow-y: auto;
   overflow-x: hidden;
   height: 100%;
@@ -437,10 +438,12 @@ async function submitChange() {
 
 @media (max-width: 720px) {
   .shell {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
     grid-template-rows: auto 1fr;
   }
   .sidebar {
+    min-width: 0;
+    overflow-x: auto;
     flex-direction: row;
     align-items: center;
     border-right: none;
@@ -448,6 +451,7 @@ async function submitChange() {
     padding: var(--sp-2) var(--sp-3);
   }
   .brand {
+    flex-shrink: 0;
     padding: 0;
   }
   .nav {

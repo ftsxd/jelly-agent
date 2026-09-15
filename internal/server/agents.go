@@ -125,6 +125,10 @@ func (s *Server) handleDeleteAgent(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, "agent 不存在")
 		return
 	}
+	if err := s.engineFor(r).CodeProjects().RevokeAgent(name); err != nil {
+		writeErr(w, http.StatusInternalServerError, "无法收回项目授权: "+err.Error())
+		return
+	}
 	raw.Agents = append(raw.Agents[:idx], raw.Agents[idx+1:]...)
 	for i := range raw.Agents {
 		raw.Agents[i].SubAgents = removeName(raw.Agents[i].SubAgents, name)

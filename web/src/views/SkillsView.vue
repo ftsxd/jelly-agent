@@ -346,6 +346,9 @@ async function onZipPicked(e) {
               <span class="muted tiny">默认脚本只能写自己的技能目录。同步代码这类要写到别处的脚本，把目标目录列在这里。列出的路径同时也可读——能写不能读的目录只会让 git 报些看不懂的错。read-only 模式下这里一律无效。</span>
             </label>
 
+            <p class="field span2 sb-note">
+              代码分析用的目录不在这里配——它有自己的一页（左侧「代码」）。那里配好的目录会自动对脚本可读，不用在上面再写一遍。
+            </p>
             <label class="field span2" v-if="sandbox.backend === 'docker' || (sandbox.backend === '' && sandbox.allow_docker)">
               <span class="label">docker 镜像</span>
               <input v-model="sandbox.image" class="input mono" :placeholder="sandboxMeta.defaults.image || 'python:3.12-slim'" />

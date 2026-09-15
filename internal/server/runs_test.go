@@ -137,3 +137,78 @@ func TestFinishingTwiceRetiresOneRun(t *testing.T) {
 		t.Errorf("status = %q, want completed", st)
 	}
 }
+
+// The chat view asks by session, and a run joined to an earlier task is filed
+// under that task's id — which is not the id the asker has.
+//
+// Answering per-task only, the conversation showing a continuation had no way
+// to learn that anything was in flight: it knows the session it is displaying
+// and nothing else.
+func TestSessionStatusFindsARunFiledUnderAnotherTaskOfTheSameSession(t *testing.T) {
+	r := newRunRegistry()
+	end := r.start("web-1", "inv-2", "web-1/inv-1")
+
+	if st, ok := r.sessionStatus("web-1"); !ok || st != TaskRunning {
+		t.Fatalf("session status = %q/%v, want running", st, ok)
+	}
+	if _, ok := r.sessionStatus("web-2"); ok {
+		t.Error("另一条会话也被报成了有运行在跑")
+	}
+	end(TaskCompleted)
+	if st, ok := r.sessionStatus("web-1"); !ok || st != TaskCompleted {
+		t.Errorf("after finishing = %q/%v, want completed", st, ok)
+	}
+}
+
+// A session nobody is running says nothing, rather than saying it is idle.
+//
+// The distinction is the whole point of the flag: after a restart, or past the
+// outcome TTL, this process genuinely does not know how a turn ended, and a
+// page told "not running" would render a half-written answer as the finished
+// one — the failure this was added to stop.
+func TestSessionStatusIsSilentWhenNothingIsKnown(t *testing.T) {
+	r := newRunRegistry()
+	if st, ok := r.sessionStatus("web-1"); ok {
+		t.Errorf("status = %q/%v, want nothing known", st, ok)
+	}
+	if _, ok := r.sessionStatus(""); ok {
+		t.Error("空会话 id 也拿到了状态")
+	}
+}
+
+// And the replay endpoint carries it: leaving the chat view and coming back is
+// a fresh replay, so that is the only place the page can find out that the run
+// it walked away from is still going.
+func TestTheTimelineSaysWhetherTheSessionIsStillRunning(t *testing.T) {
+	s := newTestServer(t)
+	writeSession(t, s, "web-live", "inv-1",
+		event(at(0), "user", []*genai.Part{textPart("巡检一下 k8s-test 集群")}),
+		event(at(5), "model", []*genai.Part{callPart("c1", "query_instant", nil)}),
+	)
+
+	timelineStatus := func() (string, bool) {
+		t.Helper()
+		w := do(t, s, "GET", "/api/sessions/web-live/timeline", "")
+		if w.Code != http.StatusOK {
+			t.Fatalf("status = %d: %s", w.Code, w.Body.String())
+		}
+		var got map[string]any
+		if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+			t.Fatal(err)
+		}
+		st, ok := got["status"].(string)
+		return st, ok
+	}
+
+	if st, ok := timelineStatus(); ok {
+		t.Errorf("replay of an untracked session = %q, want no status at all", st)
+	}
+	end := s.runs().start("web-live", "inv-1", "")
+	if st, ok := timelineStatus(); !ok || st != TaskRunning {
+		t.Errorf("replay while running = %q/%v; 页面看不出这轮还在跑", st, ok)
+	}
+	end(TaskCompleted)
+	if st, ok := timelineStatus(); !ok || st != TaskCompleted {
+		t.Errorf("replay just after the turn = %q/%v, want completed", st, ok)
+	}
+}

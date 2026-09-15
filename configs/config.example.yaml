@@ -126,6 +126,23 @@ sandbox:
   max_procs: 64                 # docker：--pids-limit（native/os 无法按沙箱限制）
   memory_mb: 512                # docker：--memory（native/os 无法可靠限制）
 
+# 代码目录：Agent 的只读文件工具（read_file / list_dir / grep_files）能看到哪些目录。
+# 整段省略 = 这三个工具**根本不注册**，Agent 没有任何文件访问能力（诊断类 Agent 的合理默认）。
+#
+# 列出的目录会自动同时对沙箱脚本可读，不用在 sandbox.read_paths 里再写一遍。
+# 路径越界检查在解析完符号链接之后才做，所以仓库里 checkin 的软链跑不出去；
+# 但根目录本身填错了不是越界检查能救的 —— **别把 ~/.jelly-agent 填进来**。
+# files:
+#   roots:
+#     - /data/repos
+#   # 代码项目（页面上创建、平台自己拉取的仓库快照）的上限。
+#   # 默认值按「整仓拉一个微服务大仓库」来定：一个 126 服务的仓库工作树
+#   # 400MB / 18000 文件是常态，3 分钟 / 512MB 的旧默认值根本拉不下来。
+#   code_projects:
+#     sync_timeout_sec: 1800      # 一次同步的上限，默认 1800（30 分钟）
+#     max_snapshot_mb: 2048       # 单个快照体积上限，默认 2048
+#     max_snapshot_files: 200000  # 单个快照文件数上限，默认 200000
+
 # 多 Agent（可选）。整段省略即用默认单 Agent。给协调者填 sub_agents 即开启
 # ADK 的 transfer_to_agent 转交：协调者按子 Agent 的 description 判断委派给谁。
 # default_agent: coordinator      # 对话/消息绑定默认用哪个 Agent；留空=默认单 Agent

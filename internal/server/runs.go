@@ -154,3 +154,43 @@ func (s *Server) runs() *runRegistry {
 	s.runsOnce.Do(func() { s.runReg = newRunRegistry() })
 	return s.runReg
 }
+
+// sessionStatus reports what the newest run of one session is doing.
+//
+// The chat view asks by session rather than by task: it is showing a
+// conversation, and which task a run was filed under is neither something it
+// knows nor something it should have to look up. Every key here is either
+// task.ID(session, invocation) or a task id the run joined, and task.Owns
+// keeps the latter prefixed by the same session — so a session's runs are
+// exactly the keys whose first segment matches.
+func (r *runRegistry) sessionStatus(sessionID string) (string, bool) {
+	if sessionID == "" {
+		return "", false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for id, e := range r.running {
+		if s, _ := task.Split(id); s == sessionID && len(e.started) > 0 {
+			return TaskRunning, true
+		}
+	}
+	// Nothing in flight, so the newest verdict still inside the TTL. A page
+	// that opens moments after the turn ended is told how it ended rather than
+	// told nothing — which is what it would read as still loading.
+	var (
+		newest runOutcome
+		found  bool
+	)
+	for id, o := range r.outcomes {
+		if s, _ := task.Split(id); s != sessionID || time.Since(o.at) >= outcomeTTL {
+			continue
+		}
+		if !found || o.at.After(newest.at) {
+			newest, found = o, true
+		}
+	}
+	if !found {
+		return "", false
+	}
+	return newest.status, true
+}

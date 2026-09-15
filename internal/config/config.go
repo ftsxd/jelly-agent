@@ -155,6 +155,7 @@ type Config struct {
 	Tools           Tools      `mapstructure:"tools" yaml:"tools,omitempty"`
 	Skills          Skills     `mapstructure:"skills" yaml:"skills,omitempty"`
 	Sandbox         Sandbox    `mapstructure:"sandbox" yaml:"sandbox,omitempty"`
+	Files           Files      `mapstructure:"files" yaml:"files,omitempty"`
 	Web             Web        `mapstructure:"web" yaml:"web,omitempty"`
 	Storage         Storage    `mapstructure:"storage" yaml:"storage,omitempty"`
 	// SkillVars holds per-skill variables (skill name → KV), where secret-ish
@@ -367,6 +368,40 @@ type Sandbox struct {
 	MemoryMB    int `mapstructure:"memory_mb" yaml:"memory_mb,omitempty"`
 }
 
+// Files declares the directories the agent's read-only file tools may reach —
+// typically a directory of synced repositories. It is the whole switch for
+// read_file / list_dir / grep_files: with no root configured those tools are not
+// registered at all, so an agent has no filesystem access unless someone
+// deliberately granted it.
+//
+// The roots are also handed to the sandbox as readable paths, so a skill script
+// analysing the same code does not have to be configured twice.
+//
+// Do NOT list the agent's own config or state directory here. The tools resolve
+// symlinks before checking containment, so a repository cannot escape — but a
+// root that is itself the wrong directory is not something containment can fix.
+type Files struct {
+	Roots []string `mapstructure:"roots" yaml:"roots,omitempty"`
+	// CodeProjects bounds the managed per-project snapshots, which are pulled
+	// from real repositories and are therefore as big as whoever wrote them
+	// made them. Separate from Roots: those are directories an operator
+	// already has on disk, these are directories this process creates.
+	CodeProjects CodeProjects `mapstructure:"code_projects" yaml:"code_projects,omitempty"`
+}
+
+// CodeProjects bounds one code-project sync. The defaults are sized for a real
+// microservice monorepo checked out in full — a 400 MB / 18k-file working tree
+// is an ordinary case, not an abusive one, and the earlier 3-minute / 512 MB
+// limits simply could not pull one.
+type CodeProjects struct {
+	// SyncTimeoutSec bounds one git clone plus the snapshot walk. Default 1800.
+	SyncTimeoutSec int `mapstructure:"sync_timeout_sec" yaml:"sync_timeout_sec,omitempty"`
+	// MaxSnapshotMB caps the published snapshot. Default 2048.
+	MaxSnapshotMB int `mapstructure:"max_snapshot_mb" yaml:"max_snapshot_mb,omitempty"`
+	// MaxSnapshotFiles caps the file count. Default 200000.
+	MaxSnapshotFiles int `mapstructure:"max_snapshot_files" yaml:"max_snapshot_files,omitempty"`
+}
+
 // Storage says which database holds the state everything shares: ADK's
 // sessions and events, tool deliveries, call records, task links, the schedule
 // log and the L2 memory index.
@@ -480,6 +515,7 @@ func Save(c *Config, path string) error {
 		Tools           *Tools                       `yaml:"tools,omitempty"`
 		Skills          *Skills                      `yaml:"skills,omitempty"`
 		Sandbox         *Sandbox                     `yaml:"sandbox,omitempty"`
+		Files           *Files                       `yaml:"files,omitempty"`
 		Web             *Web                         `yaml:"web,omitempty"`
 		Storage         *Storage                     `yaml:"storage,omitempty"`
 		SkillVars       map[string]map[string]string `yaml:"skill_vars,omitempty"`
@@ -512,6 +548,10 @@ func Save(c *Config, path string) error {
 	if !reflect.DeepEqual(c.Sandbox, Sandbox{}) {
 		sb := c.Sandbox
 		p.Sandbox = &sb
+	}
+	if !reflect.DeepEqual(c.Files, Files{}) {
+		f := c.Files
+		p.Files = &f
 	}
 	if c.Memory != (Memory{}) {
 		m := c.Memory

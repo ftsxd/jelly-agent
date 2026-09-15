@@ -23,6 +23,67 @@ func BuiltinMetadata() toolreg.Source {
 	return toolreg.StaticSource{
 		Label: "builtin",
 		Metas: []ops.ToolMetadata{
+			// Project reads deliberately keep Idempotent false: a live grant or
+			// snapshot may change between calls, so each must reach the handler.
+			{
+				Name: "list_code_projects", Description: "列出当前 Agent 获得授权的代码项目和版本。",
+				Suites: []string{"code-analysis"}, Tags: []string{"代码", "项目", "仓库", "分析"},
+				Produces: ops.KindText, Latency: ops.LatencyFast, SideEffect: ops.SideEffectReadOnly,
+				ParallelSafe: true, Fallback: true, Timeout: 5 * time.Second,
+			},
+			{
+				Name: "read_project_file", Description: "按行读取已授权项目的代码文件，分析具体实现。",
+				Suites: []string{"code-analysis"}, Tags: []string{"代码", "文件", "项目", "分析"},
+				Produces: ops.KindText, Latency: ops.LatencyFast, SideEffect: ops.SideEffectReadOnly,
+				ParallelSafe: true, Timeout: 30 * time.Second,
+			},
+			{
+				Name: "list_project_dir", Description: "查看已授权项目的目录结构和代码文件。",
+				Suites: []string{"code-analysis"}, Tags: []string{"代码", "目录", "项目", "分析"},
+				Produces: ops.KindText, Latency: ops.LatencyFast, SideEffect: ops.SideEffectReadOnly,
+				ParallelSafe: true, Timeout: 5 * time.Second,
+			},
+			{
+				Name: "grep_project_files", Description: "搜索已授权项目的代码，定位函数实现和调用链。",
+				Suites: []string{"code-analysis"}, Tags: []string{"代码", "搜索", "项目", "分析"},
+				Produces: ops.KindText, Latency: ops.LatencyFast, SideEffect: ops.SideEffectReadOnly,
+				ParallelSafe: true, Timeout: 30 * time.Second,
+			},
+			{
+				Name:        "search_project_dirs",
+				Description: "按业务名称、描述或标签查找已标注的目录，把业务叫法对应到仓库路径。",
+				UseCases:    []string{"用户用业务名称指代服务", "按标签圈定一类服务"},
+				AntiExamples: []string{
+					"要找的是代码内容而非目录用途时（用 grep_project_files）",
+					"已经知道确切目录路径时",
+				},
+				Suites: []string{"code-analysis"}, Tags: []string{"代码", "目录", "标注", "标签", "项目", "分析"},
+				Produces: ops.KindText, Latency: ops.LatencyFast, SideEffect: ops.SideEffectReadOnly,
+				ParallelSafe: true, Timeout: 5 * time.Second,
+			},
+			{
+				Name:        "list_project_tags",
+				Description: "列出项目里用到的目录标签及各自的目录数量，先看清仓库是怎么分类的。",
+				Suites:      []string{"code-analysis"}, Tags: []string{"代码", "标签", "项目", "分析"},
+				Produces: ops.KindText, Latency: ops.LatencyFast, SideEffect: ops.SideEffectReadOnly,
+				ParallelSafe: true, Timeout: 5 * time.Second,
+			},
+			{
+				// Mutating, not read-only: this is the one project tool that
+				// writes. What it writes is a draft nobody has accepted, so it
+				// cannot change any analysis — but calling it read-only would
+				// put a write behind a label that says there is none.
+				Name:        "propose_project_dir_info",
+				Description: "为目录提交业务名称、描述和标签的草稿，交用户在代码页面审核采纳。",
+				UseCases:    []string{"用户要求给仓库里的服务补上说明", "扫描目录后批量整理业务标注"},
+				AntiExamples: []string{
+					"用户没有要求整理目录说明时",
+					"没有实际读过该目录的代码、只能靠目录名猜测时",
+				},
+				Suites: []string{"code-analysis"}, Tags: []string{"代码", "目录", "标注", "标签", "项目"},
+				Produces: ops.KindText, Latency: ops.LatencyFast, SideEffect: ops.SideEffectMutating,
+				Timeout: 15 * time.Second,
+			},
 			{
 				Name:        "web_search",
 				Description: "搜索互联网获取实时信息。需要当前事实、新闻或本地知识以外的内容时使用；已知具体网址时改用 fetch_url。",

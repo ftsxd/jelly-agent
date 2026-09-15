@@ -23,6 +23,12 @@ RUN mkdir -p /out/data/.jelly-agent && touch /out/data/.jelly-agent/.keep
 # skills.allow_scripts 关掉，再把这层换回 gcr.io/distroless/base-debian12:nonroot。
 # 镜像本身不是隔离边界——边界由 internal/sandbox 的 os 后端（Landlock）提供。
 FROM python:3.12-slim-bookworm
+# git 不是可选的：代码同步技能靠它拉代码，而 python:slim 里既没有 git 也没有 curl
+# （实测确认）。少了它，周期同步任务在容器里会以「command not found」失败，而那
+# 看起来完全不像是镜像的问题。
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends git ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
 RUN useradd --uid 65532 --user-group --home-dir /data --shell /usr/sbin/nologin nonroot
 COPY --from=build /out/jelly /usr/local/bin/jelly
 COPY --chown=nonroot:nonroot --from=build /out/data /data

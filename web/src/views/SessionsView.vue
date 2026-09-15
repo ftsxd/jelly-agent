@@ -4,9 +4,8 @@ import { useRouter } from 'vue-router'
 import Icon from '../components/Icon.vue'
 import { api } from '../api'
 import { absTime, relTime } from '../time'
-import AgentTimeline from '../components/AgentTimeline.vue'
-import { renderMarkdown } from '../markdown'
-import { emptyTimeline, reduceFrames } from '../timeline'
+import ChatTranscript from '../components/ChatTranscript.vue'
+import { replayMessages } from '../replay'
 import { latestOnly } from '../latest'
 
 const PAGE = 50 // sessions per page
@@ -19,7 +18,7 @@ const loadingMore = ref(false)
 const error = ref('')
 
 const selected = ref(null) // session id of the open detail
-const detail = ref(null)
+const detail = ref(null) // {id, usage, messages} — see open()
 const detailLoading = ref(false)
 
 const q = ref('') // filter over the loaded rows
@@ -133,34 +132,27 @@ async function removeChecked() {
 
 // The stored run, folded by the same reducer the live stream uses.
 //
-// Replay reads /timeline rather than re-deriving a shape from the transcript,
-// so the two views cannot drift: the frames are projected server-side by the
-// function the live path calls, and folded client-side by the function the
-// live path calls.
-const timeline = ref(null)
+// One endpoint and one projection, shared with the chat view: frames are
+// projected server-side by the function the live path calls, and folded
+// client-side by the function the live path calls.
+//
+// This page used to render the transcript DTO underneath as well — a turn's
+// calls in one block and their results in the next, because that DTO carries
+// them as two arrays and the pairing is gone before it arrives. So the same
+// session was shown twice, once folded and once not, and the unfolded copy was
+// the longer one and the one people scrolled into.
 const openGate = latestOnly()
 
 async function open(id) {
   selected.value = id
   detailLoading.value = true
   detail.value = null
-  timeline.value = null
 
   const r = await openGate.run(async (signal) => {
     const mine = openGate.current()
-    const d = await api.session(id, signal)
+    const d = await api.sessionTimeline(id, signal)
     if (!openGate.owns(mine)) return null
-    detail.value = d
-    try {
-      const { frames } = await api.sessionTimeline(id, signal)
-      if (!openGate.owns(mine)) return null
-      timeline.value = reduceFrames(frames || [], emptyTimeline())
-    } catch (e) {
-      if (e?.name === 'AbortError') return null
-      // The transcript below still renders. A replay that cannot be projected
-      // is a degraded view, not a broken page.
-      if (openGate.owns(mine)) timeline.value = null
-    }
+    detail.value = { id: d.id, usage: d.usage || {}, messages: replayMessages(d.frames) }
     return d
   })
   if (!r.owned) return
@@ -188,19 +180,6 @@ async function remove(s) {
   }
 }
 
-function fmtArgs(args) {
-  if (!args) return ''
-  return Object.entries(args)
-    .map(([k, v]) => `${k}=${JSON.stringify(v)}`)
-    .join(', ')
-}
-// A tool that failed still comes back as a normal response, so the summary is
-// driven by the server's `ok` flag rather than by the payload's shape.
-function resultSummary(tr) {
-  if (tr.error) return tr.error.length > 160 ? tr.error.slice(0, 160) + '…' : tr.error
-  if (Array.isArray(tr.response?.results)) return `${tr.response.results.length} 条结果`
-  return '已返回'
-}
 function continueChat(id) { router.push({ path: '/chat', query: { session: id } }) }
 </script>
 
@@ -301,38 +280,9 @@ function continueChat(id) { router.push({ path: '/chat', query: { session: id } 
             <span class="mono dim">{{ detail.id }}</span>
             <div class="detail-actions"><span class="badge mono">total {{ detail.usage.total }} tok</span><button class="btn btn-sm" @click="continueChat(detail.id)">继续对话</button></div>
           </div>
-          <AgentTimeline v-if="timeline" :timeline="timeline" dense class="detail-tl" />
-
-          <div class="transcript">
-            <div v-if="!detail.events.length" class="empty"><span class="muted">（空会话）</span></div>
-            <div v-for="(ev, i) in detail.events" :key="i" class="ev" :class="ev.role">
-              <div class="ev-head">
-                <Icon :name="ev.role === 'user' ? 'user' : 'bot'" :size="14" />
-                <span class="mono author">{{ ev.author }}</span>
-              </div>
-              <!-- An agent's prose is markdown, a user's own message is not —
-                   the same split the chat bubble makes, for the same two
-                   reasons: the model writes tables and lists that are
-                   unreadable as source, and running what the operator typed
-                   through a renderer would let them paste markup into their
-                   own transcript for nothing. Tool calls and results below
-                   stay plain text: they come from MCP servers and fetch_url,
-                   which is the hole markdown.js exists to keep shut. -->
-              <div
-                v-if="ev.text && ev.role === 'agent'"
-                class="ev-text md"
-                v-html="renderMarkdown(ev.text)"
-              ></div>
-              <div v-else-if="ev.text" class="ev-text">{{ ev.text }}</div>
-              <div v-for="(tc, ti) in ev.tool_calls" :key="'c' + ti" class="ev-tool">
-                <Icon name="tool" :size="13" />
-                <span class="mono">{{ tc.name }}({{ fmtArgs(tc.args) }})</span>
-              </div>
-              <div v-for="(tr, ti) in ev.tool_results" :key="'r' + ti" class="ev-tool" :class="tr.ok ? 'result' : 'failed'">
-                <Icon :name="tr.ok ? 'check' : 'alert'" :size="13" />
-                <span class="mono">{{ tr.name }} → {{ resultSummary(tr) }}</span>
-              </div>
-            </div>
+          <div v-if="!detail.messages.length" class="empty"><span class="muted">（空会话）</span></div>
+          <div v-else class="transcript">
+            <ChatTranscript :messages="detail.messages" />
           </div>
         </template>
       </section>
@@ -341,10 +291,6 @@ function continueChat(id) { router.push({ path: '/chat', query: { session: id } 
 </template>
 
 <style scoped>
-.detail-tl {
-  margin-bottom: var(--sp-3);
-}
-
 .view {
   display: flex;
   flex-direction: column;
@@ -600,62 +546,11 @@ function continueChat(id) { router.push({ path: '/chat', query: { session: id } 
   margin-bottom: var(--sp-4);
   border-bottom: 1px solid var(--border);
 }
+/* The bubbles bring their own layout; this only spaces the turns apart. */
 .transcript {
   display: flex;
   flex-direction: column;
-  gap: var(--sp-4);
-  max-width: 760px;
-}
-.ev {
-  border-left: 2px solid var(--border-strong);
-  padding: var(--sp-3);
-  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
-  background: color-mix(in srgb, var(--surface-2) 70%, transparent);
-}
-.ev.user {
-  border-left: 3px solid transparent;
-  border-color: var(--primary);
-  background: var(--primary-tint);
-}
-.ev.agent {
-  border-left-color: var(--accent);
-  background: var(--accent-tint);
-}
-.ev-head {
-  display: flex;
-  align-items: center;
-  gap: var(--sp-2);
-  color: var(--text-dim);
-  margin-bottom: var(--sp-2);
-}
-.author {
-  font-size: 12px;
-}
-.ev-text {
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-/* pre-wrap would turn the newlines *between* markdown's block tags into real
-   blank lines — see the note above .md in style.css. The container has to
-   switch it off, because a scoped rule outranks the global one. */
-.ev-text.md {
-  white-space: normal;
-}
-.ev-tool {
-  display: flex;
-  align-items: center;
-  gap: var(--sp-2);
-  font-size: 12px;
-  color: var(--text-dim);
-  margin-top: var(--sp-2);
-}
-.ev-tool.result {
-  color: var(--accent);
-}
-.ev-tool.failed {
-  color: var(--danger);
-  align-items: flex-start;
-  word-break: break-word;
+  gap: var(--sp-5);
 }
 .error-bar {
   display: flex;

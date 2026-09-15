@@ -1,18 +1,23 @@
 <script setup>
-import { computed, nextTick, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import Icon from '../components/Icon.vue'
 import SessionPicker from '../components/SessionPicker.vue'
-import AgentTimeline from '../components/AgentTimeline.vue'
+import ChatTranscript from '../components/ChatTranscript.vue'
 import { api, streamChat } from '../api'
-import { renderMarkdown } from '../markdown'
-import { applyFrame, emptyTimeline, finalAnswer } from '../timeline'
+import { applyFrame, emptyTimeline, summarize } from '../timeline'
+import { replayMessages } from '../replay'
 import { latestOnly } from '../latest'
 import { sendOnEnter } from '../ime'
-import { taskOfSession } from '../tasks'
+import { statusOf, taskOfSession } from '../tasks'
 
 const PROVIDER_KEY = 'jelly.provider' // remembers the last-used provider
 const AGENT_KEY = 'jelly.agent' // remembers the last-used agent (multi-agent)
+// Remembers which conversation this browser was in. The sidebar links to a
+// bare /chat, so leaving the view and coming back drops ?session= and the
+// route alone can no longer say what to reopen.
+const SESSION_KEY = 'jelly.session'
+const POLL_MS = 3000 // how often an open session is re-read while it runs
 
 const providers = ref([])
 const historySessions = ref([])
@@ -23,6 +28,10 @@ const messages = ref([]) // {role, text, timeline, usage, provider, model}
 const input = ref('')
 const sessionId = ref('')
 const busy = ref(false)
+// What the server says the open session is doing, as of the last replay.
+// Empty when it says nothing — see the endpoint's note on why "nothing known"
+// is not the same as "not running".
+const remoteStatus = ref('')
 const error = ref('')
 const scroller = ref(null)
 let abort = null
@@ -32,6 +41,46 @@ const router = useRouter()
 // Tag agent messages with the model that produced them only when there's a
 // choice to make — a single-provider setup needs no per-message label.
 const showProviderTag = computed(() => providers.value.length > 1)
+
+// A turn of this session is in flight, whoever started it: this page (busy),
+// another tab, or this tab before the user walked away from the view.
+const running = computed(() => busy.value || remoteStatus.value === 'running')
+// The same run, but driven by somebody else — which is the only case that has
+// to be polled for, and the only one worth telling the user about separately.
+const remoteRunning = computed(() => !busy.value && remoteStatus.value === 'running')
+// Nothing may be sent while a turn of this session is going. Two turns at once
+// on one session interleave into one event log.
+const locked = computed(() => running.value)
+
+// How the last turn ended, when the server still remembers and nothing is
+// running now.
+//
+// Shown rather than left blank, because "no badge" has to keep meaning "this
+// process has no idea" — the state after a restart, or past the outcome TTL.
+// A conversation whose timeline simply stops looks identical whether the agent
+// is thinking, has finished, or was cut off; saying so is the whole point.
+const endedStatus = computed(() => (running.value ? '' : remoteStatus.value))
+
+// A transcript that stops in the middle of a tool call while nothing is
+// running.
+//
+// The registry holds every run this process drives, so a replay with no status
+// means nothing is in flight — it is only the *outcome* that is forgotten once
+// the TTL passes. A call still waiting for its result under those conditions
+// did not finish: it was cut off, by a restart or by the browser hanging up.
+// Saying nothing there is what left a half-run looking like a finished one.
+const interrupted = computed(() => {
+  if (running.value || endedStatus.value) return false
+  const last = messages.value[messages.value.length - 1]
+  return !!last?.timeline && summarize(last.timeline).pending > 0
+})
+
+// Badge colour per status tone, since the tone classes live inside the task
+// centre's scoped styles.
+const BADGE_TONE = { run: 'badge-primary', ok: 'badge-accent', bad: 'badge-danger', warn: 'badge-amber', muted: '' }
+function badgeClass(status) {
+  return BADGE_TONE[statusOf(status).tone] ?? ''
+}
 
 function modelOf(name) {
   return providers.value.find((p) => p.name === name)?.model ?? ''
@@ -63,8 +112,30 @@ onMounted(async () => {
     /* agents are optional; ignore when unavailable */
   }
   await loadHistorySessions()
-  if (typeof route.query.session === 'string') await openHistorySession(route.query.session)
+  await restoreSession()
 })
+
+onUnmounted(stopPolling)
+
+// Which conversation to open on arrival: the one the route names, else the one
+// this browser was last in.
+//
+// The route is authoritative when it has a session — that is a deep link or a
+// continue-from-task, and it opens even if the history list has not heard of
+// it. The remembered id is only honoured when the list still has it: a session
+// that was deleted, or one left over from another server, must not greet the
+// user with an error banner instead of a composer.
+async function restoreSession() {
+  if (typeof route.query.session === 'string' && route.query.session) {
+    await openHistorySession(route.query.session)
+    return
+  }
+  const saved = localStorage.getItem(SESSION_KEY) || ''
+  if (!saved || !historySessions.value.some((s) => s.id === saved)) return
+  await openHistorySession(saved)
+  // The URL is made to match, so a reload of the restored page stays put.
+  if (sessionId.value) router.replace({ query: { ...route.query, session: sessionId.value } })
+}
 
 // The task this conversation is continuing, if the user came from one.
 //
@@ -104,44 +175,64 @@ async function openHistorySession(id) {
     if (!openGate.owns(mine)) return null
     sessionId.value = detail.id
     messages.value = replayMessages(detail.frames || [])
+    remoteStatus.value = detail.status || ''
     await scrollDown()
     return detail
   })
   if (r.owned && r.error) error.value = r.error.message
 }
 
-// replayMessages splits a session's frames into the alternating user/agent
-// bubbles the chat view shows.
+// refreshOpen re-reads the open session in place.
 //
-// A user_message frame starts a new pair. Everything until the next one
-// belongs to the agent's answer, which is exactly the grouping the live path
-// produces one request at a time.
-function replayMessages(frames) {
-  const out = []
-  let live = null
-  for (const fr of frames) {
-    if (fr.type === 'user_message') {
-      out.push({ role: 'user', text: fr.text || '' })
-      live = {
-        role: 'agent', text: '', timeline: emptyTimeline(),
-        usage: null, provider: '', model: '', author: '',
-      }
-      out.push(live)
-      continue
-    }
-    if (!live) {
-      // Frames before any user message — a session that starts mid-run.
-      live = {
-        role: 'agent', text: '', timeline: emptyTimeline(),
-        usage: null, provider: '', model: '', author: '',
-      }
-      out.push(live)
-    }
-    applyFrame(live.timeline, fr)
-    live.usage = live.timeline.usage
-  }
-  return out
+// Same endpoint, same reducer, same ownership gate as opening it — a poll that
+// lands after the user has switched sessions must not paint one conversation's
+// frames under another's id. The scroll is only followed when the user was
+// already at the bottom; yanking them back down every three seconds while they
+// read the middle of a long run is worse than not following at all.
+async function refreshOpen() {
+  const id = sessionId.value
+  if (!id || busy.value) return
+  // The result is deliberately not inspected. A failed poll is worth neither a
+  // banner nor a stop: the next tick may well succeed, whereas an error bar
+  // appearing on its own while nobody is touching the page reads as the run
+  // having failed — which is the one thing a failed poll cannot tell you.
+  await openGate.run(async (signal) => {
+    const mine = openGate.current()
+    const detail = await api.sessionTimeline(id, signal)
+    if (!openGate.owns(mine) || sessionId.value !== id) return null
+    const follow = atBottom()
+    messages.value = replayMessages(detail.frames || [])
+    remoteStatus.value = detail.status || ''
+    if (follow) await scrollDown()
+    return detail
+  })
 }
+
+// Polling, only while a run this page is not driving is still going.
+//
+// The server's only push channel is the chat stream, and that is a POST that
+// runs a turn — a page cannot subscribe to a run somebody else started, not
+// even its own from before it was unmounted. Polling is what the task centre
+// already does for the same reason. An idle conversation sends nothing.
+let poller = null
+function stopPolling() {
+  if (poller) clearInterval(poller)
+  poller = null
+}
+function retime() {
+  stopPolling()
+  if (!remoteRunning.value) return
+  poller = setInterval(refreshOpen, POLL_MS)
+}
+watch(remoteRunning, retime)
+
+// The open conversation is remembered so that leaving the view and coming
+// back reopens it. Cleared with the view: an empty id means a new chat, and
+// restoring the previous one on top of that would undo the button.
+watch(sessionId, (id) => {
+  if (id) localStorage.setItem(SESSION_KEY, id)
+  else localStorage.removeItem(SESSION_KEY)
+})
 
 watch(provider, (name) => {
   if (name) localStorage.setItem(PROVIDER_KEY, name)
@@ -155,14 +246,28 @@ async function scrollDown() {
   if (scroller.value) scroller.value.scrollTop = scroller.value.scrollHeight
 }
 
+// Near enough to the bottom that the user is following the run rather than
+// reading back through it.
+function atBottom() {
+  const el = scroller.value
+  if (!el) return true
+  return el.scrollHeight - el.scrollTop - el.clientHeight < 80
+}
+
 // Enter sends — unless it belongs to the input method. Typing Chinese, Enter
 // picks the highlighted candidate, and sending then posts the raw pinyin.
 const enter = sendOnEnter(() => send())
 
 function newChat() {
   if (busy.value) return
+  // The gate is abandoned, not just ignored: a replay still in flight would
+  // otherwise land after this and refill the view with the session the user
+  // just left. Polling stops for the same reason.
+  openGate.abandon()
+  stopPolling()
   messages.value = []
   sessionId.value = ''
+  remoteStatus.value = ''
   continuingTask.value = ''
   error.value = ''
   router.replace({ query: {} })
@@ -170,8 +275,11 @@ function newChat() {
 
 async function send() {
   const text = input.value.trim()
-  if (!text || busy.value) return
+  if (!text || locked.value) return
   error.value = ''
+  // This page is driving the turn now, so what a replay said about the
+  // previous one stops being the answer.
+  remoteStatus.value = ''
   input.value = ''
   messages.value.push({ role: 'user', text })
   const agentMsg = {
@@ -208,7 +316,11 @@ async function send() {
       abort.signal,
     )
   } catch (e) {
-    if (e.name !== 'AbortError') error.value = e.message
+    if (e.name === 'AbortError') remoteStatus.value = 'cancelled'
+    else {
+      error.value = e.message
+      remoteStatus.value = 'failed'
+    }
   } finally {
     // Cleared however the turn ended. It is an attachment the user made once,
     // by arriving from a task; carrying it into the next question would let
@@ -241,6 +353,14 @@ function handleFrame(live, ev) {
       break
     case 'error':
       error.value = ev.message
+      // The stream said so, so the status line can stop guessing. Without it a
+      // turn that failed mid-way left the same silent transcript as one that
+      // finished, with only the banner to tell them apart — and the banner is
+      // at the other end of a long page.
+      remoteStatus.value = 'failed'
+      break
+    case 'done':
+      remoteStatus.value = 'completed'
       break
     default:
       break
@@ -250,20 +370,6 @@ function handleFrame(live, ev) {
   if (ev.type === 'text_delta' || ev.type === 'tool_call') scrollDown()
 }
 
-// The reply bubble is the last root-level text the reducer folded. Sub-agent
-// prose stays in the timeline: merging it into the answer is what made a
-// handoff produce one bubble attributed to whichever agent spoke last.
-function answerOf(m) {
-  if (m.role !== 'agent') return m.text || ''
-  const step = m.timeline ? finalAnswer(m.timeline) : null
-  return step ? step.text : m.text || ''
-}
-
-function authorOf(m) {
-  if (!m.timeline) return m.author || ''
-  const step = finalAnswer(m.timeline)
-  return step ? step.agent : m.author || ''
-}
 </script>
 
 <template>
@@ -272,6 +378,15 @@ function authorOf(m) {
       <div class="topbar-l">
         <h1>对话</h1>
         <span v-if="sessionId" class="badge mono">{{ sessionId }}</span>
+        <!-- Running is a fact about the server, not about this page: it shows
+             for a run started here, in another tab, or by this tab before the
+             user walked away from the view. -->
+        <span v-if="running" class="badge badge-primary">
+          <span class="spinner sm" /> {{ statusOf('running').label }}
+        </span>
+        <span v-else-if="endedStatus" class="badge" :class="badgeClass(endedStatus)">
+          <Icon :name="statusOf(endedStatus).icon" :size="12" /> {{ statusOf(endedStatus).label }}
+        </span>
       </div>
       <div class="topbar-r">
         <SessionPicker
@@ -315,35 +430,24 @@ function authorOf(m) {
         </div>
       </div>
 
-      <div v-for="(m, i) in messages" :key="i" class="msg" :class="m.role">
-        <div class="avatar" :class="m.role">
-          <Icon :name="m.role === 'user' ? 'user' : 'bot'" :size="16" />
-        </div>
-        <div class="bubble-wrap">
-          <div v-if="m.role === 'agent' && authorOf(m) && authorOf(m) !== 'root'" class="who mono dim">
-            <Icon name="bot" :size="12" /> {{ authorOf(m) }}
-          </div>
-          <div v-else-if="m.role === 'agent' && m.provider && showProviderTag" class="who mono dim">
-            <Icon name="bot" :size="12" /> {{ m.provider }}<span v-if="m.model"> · {{ m.model }}</span>
-          </div>
-          <AgentTimeline v-if="m.timeline" :timeline="m.timeline" class="msg-tl" />
+      <ChatTranscript :messages="messages" :show-provider="showProviderTag" :pending="locked" />
 
-          <!-- Agent replies are markdown; a user's own message is not. Sending
-               user input through the renderer would let someone paste markup
-               into their own transcript, and there is nothing to gain from
-               formatting what they just typed. -->
-          <div v-if="answerOf(m) && m.role === 'agent'" class="bubble agent md" v-html="renderMarkdown(answerOf(m))"></div>
-          <div v-else-if="m.text" class="bubble" :class="m.role">{{ m.text }}</div>
-          <div v-else-if="m.role === 'agent' && busy" class="bubble agent typing">
-            <span class="spinner" />
-            <span class="muted">思考中…</span>
-          </div>
-
-          <div v-if="m.usage" class="usage mono">
-            prompt {{ m.usage.prompt }} · completion {{ m.usage.completion }} · total
-            {{ m.usage.total }}
-          </div>
-        </div>
+      <!-- Below the transcript, not above it. A run is watched from the bottom
+           of a long page, and a notice at the top is a notice nobody sees.
+           It also covers the gap the timeline cannot: between a finished tool
+           and the next call there is no pending step to spin, so a model that
+           is thinking renders as a row of ticks and reads as done. -->
+      <div v-if="running" class="livebar">
+        <span class="spinner sm" />
+        <span>{{ remoteRunning ? '仍在后台运行，本页每 3 秒自动刷新' : '正在运行…' }}</span>
+      </div>
+      <div v-else-if="endedStatus" class="livebar done">
+        <Icon :name="statusOf(endedStatus).icon" :size="12" />
+        <span>本轮{{ statusOf(endedStatus).label }}</span>
+      </div>
+      <div v-else-if="interrupted" class="livebar warn">
+        <Icon name="alert" :size="12" />
+        <span>本轮未正常结束：有工具调用没有回结果，且当前没有运行在进行</span>
       </div>
     </div>
 
@@ -356,15 +460,15 @@ function authorOf(m) {
         v-model="input"
         class="textarea"
         rows="1"
-        placeholder="输入消息，Enter 发送，Shift+Enter 换行"
         @keydown.enter.exact="enter.keydown"
         @compositionend="enter.compositionend"
-        :disabled="busy"
+        :disabled="locked"
+        :placeholder="remoteRunning ? '本轮运行尚未结束，结束后可继续输入' : '输入消息，Enter 发送，Shift+Enter 换行'"
       />
       <button v-if="busy" class="btn btn-icon" @click="stop" title="停止">
         <span class="stop-square" />
       </button>
-      <button v-else class="btn btn-primary btn-icon" @click="send" :disabled="!input.trim()" title="发送">
+      <button v-else class="btn btn-primary btn-icon" @click="send" :disabled="!input.trim() || locked" title="发送">
         <Icon name="send" :size="16" />
       </button>
     </footer>
@@ -411,94 +515,31 @@ function authorOf(m) {
   gap: var(--sp-5);
 }
 
-.msg {
+/* The shared spinner is sized for a bubble; inside a badge it has to match
+   the text next to it. */
+.spinner.sm {
+  width: 10px;
+  height: 10px;
+  border-width: 1.5px;
+}
+
+/* The run's own status line, under the transcript it belongs to. */
+.livebar {
   display: flex;
-  gap: var(--sp-3);
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-2);
   max-width: 820px;
   width: 100%;
   margin: 0 auto;
-}
-.avatar {
-  flex-shrink: 0;
-  width: 30px;
-  height: 30px;
-  border-radius: var(--radius-sm);
-  display: grid;
-  place-items: center;
-  border: 1px solid var(--border);
-}
-.avatar.user {
-  background: var(--primary);
-  border-color: transparent;
-  color: #fff;
-}
-.avatar.agent {
-  background: var(--accent-tint);
-  color: var(--accent);
-}
-.bubble-wrap {
-  display: flex;
-  flex-direction: column;
-  gap: var(--sp-2);
-  min-width: 0;
-  flex: 1;
-}
-.bubble {
-  padding: var(--sp-3) var(--sp-4);
-  border-radius: var(--radius);
-  /* Newlines are preserved for the plain-text bubbles — a user's own message,
-     and an agent's before it is rendered. Not for a rendered one: markdown
-     output already carries its own block elements, and pre-wrap turns the
-     newlines *between* those tags into real blank lines. That is what made the
-     chat's copy of a reply twice as tall as the task centre's copy of the same
-     text, with the table's header floating off from its body. */
-  white-space: pre-wrap;
-  word-break: break-word;
-  border: 1px solid var(--border);
-}
-.bubble.md {
-  white-space: normal;
-}
-.bubble.user {
-  /* A flat tint with the accent as its edge. The gradient fill plus gradient
-     border needed a dark surround to read as one shape; on white the two
-     gradients fought each other and the text sat on a moving ground. */
-  background: var(--primary-tint);
-  border-color: var(--primary-border);
-}
-
-/* Rendered markdown lives in style.css under .md, shared with the task
-   centre. See the note there. */
-
-.bubble.agent {
-  background: var(--surface-2);
-  border-left: 3px solid var(--accent);
-}
-.bubble.typing {
-  display: flex;
-  align-items: center;
-  gap: var(--sp-2);
-}
-
-/* The timeline sits above the reply, close enough to read as part of the same
-   answer rather than as a separate panel. */
-.msg-tl {
-  margin-bottom: var(--sp-2);
-}
-
-.who {
-  display: flex;
-  align-items: center;
-  gap: 4px;
   font-size: 12px;
-  color: var(--text-dim);
-  padding-left: var(--sp-1);
+  color: var(--primary);
 }
-
-.usage {
-  font-size: 11px;
+.livebar.done {
   color: var(--text-muted);
-  padding-left: var(--sp-1);
+}
+.livebar.warn {
+  color: var(--warning);
 }
 
 .error-bar {

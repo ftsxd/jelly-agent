@@ -79,10 +79,27 @@ func (s *Server) handleTools(w http.ResponseWriter, r *http.Request) {
 	type toolDTO struct {
 		Name        string `json:"name"`
 		Description string `json:"description"`
+		// Scope says where the tool comes from. The project tools are built per
+		// agent rather than globally, which is why this listing never showed
+		// them: an operator looking here to find out what their code-analysis
+		// agent can do saw a list that simply omitted the answer.
+		Scope string `json:"scope,omitempty"`
+		Note  string `json:"note,omitempty"`
 	}
 	out := make([]toolDTO, 0, len(tools))
 	for _, t := range tools {
 		out = append(out, toolDTO{Name: t.Name(), Description: t.Description()})
+	}
+	// Built with a placeholder identity: only the names and descriptions are
+	// read here, and what each agent may actually reach is decided per call
+	// against the live project assignment, not by this listing.
+	if projectTools, err := jellytool.ProjectTools(s.engineFor(r).CodeProjects(), "root"); err == nil {
+		for _, t := range projectTools {
+			out = append(out, toolDTO{
+				Name: t.Name(), Description: t.Description(),
+				Scope: "project", Note: "每个 Agent 都有，但只能读到已分配给它的代码项目",
+			})
+		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"tools": out})
 }
@@ -271,10 +288,23 @@ func (s *Server) handleSessionTimeline(w http.ResponseWriter, r *http.Request) {
 	// silently rendered nothing — an empty array folds to a timeline with no
 	// steps, and a component that hides itself when it has no steps looks
 	// exactly like a feature nobody wired up.
-	writeJSON(w, http.StatusOK, map[string]any{
+	out := map[string]any{
 		"id": resp.Session.ID(), "v": frameVersion,
 		"frames": frames, "usage": usage,
-	})
+	}
+	// Whether a run of this session is happening right now, which the events
+	// cannot say: a log that stops looks the same whether the agent is still
+	// thinking or the run was abandoned (see runs.go). Without it the chat
+	// view rendered a half-finished turn as a finished one, and the only place
+	// that could tell you otherwise was the task centre.
+	//
+	// Omitted when nothing is known rather than reported as some resting
+	// state: after a restart, or past the outcome TTL, "not running" and "no
+	// idea" are different answers and only one of them is true.
+	if st, known := s.runs().sessionStatus(resp.Session.ID()); known {
+		out["status"] = st
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 func (s *Server) handleSessionDetail(w http.ResponseWriter, r *http.Request) {

@@ -19,6 +19,7 @@
 - **技能（Skills）**：Claude/Agent Skills 风格的 Markdown 能力包，清单注入 + `use_skill` 按需加载（渐进式披露）；Web 页增删改 + 上传 ZIP 包导入。技能可附带脚本，经 `run_script` 在**沙箱**中执行。
 - **沙箱执行**：脚本运行走 `internal/sandbox`。用一个 `mode` 表达意图（`read-only` / `workspace` / `workspace-net` / `full`），三套后端按强度递增——`native`（纯 Go 加固，**不是安全边界**）、`os`（系统级轻量隔离：macOS Seatbelt、Linux Landlock，默认走这条）、`docker`（最强也最重）。读限系统目录+技能目录、写限技能目录、网络按 mode 开关；后端或内核给不到的部分会如实报告降级，不会假装隔离。技能可在 frontmatter 里用 `sandbox:` 收紧自己的档位（只能收紧）。每次执行写审计日志。后端与资源上限可在 Web **技能**页的「脚本沙箱设置」配置（保存即热重载），也可编辑 `configs/config.example.yaml` 的 `sandbox` 段。详见 [docs/sandbox.md](docs/sandbox.md)。
 - **技能按 Agent 分配**：Agent 定义里的 `skills` 有三态——不写=全部技能（老配置行为不变）、`[a,b]`=只有这些、`[]`=一个都没有（协调者通常就该这样：它只管转交，握着技能反而会倾向自己做掉）。与 `mcp` 的「不选=不挂」相反，因为技能在被调用前只占目录里的一行。过滤发生在目录注入层，拿不到的技能不会出现在该 Agent 的提示里。
+- **代码分析**：Web 控制台的**「代码」页**（或配置里的 `files.roots`）配好代码目录后，Agent 获得只读文件工具 `read_file` / `list_dir` / `grep_files`；不配则这三个工具**根本不注册**。路径越界在解析符号链接之后判断，仓库里 checkin 的软链跑不出去。配合周期任务 + 技能脚本做代码同步（沙箱 `write_paths` 放开目标目录）。详见 [docs/code-analysis.md](docs/code-analysis.md)。
 - **消息绑定（多平台）**：把同一套 Agent 接入聊天平台，纯本地无需公网。
   - **钉钉**：官方 Stream 模式（出站 WebSocket）；可绑定 AI 卡片模板实现**流式回复**。
   - **个人微信**：经 WeChatPadPro 网关（iPad 协议）接入，Web 页扫码登录，文本收发（⚠️ 第三方协议有封号风险）。

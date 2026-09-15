@@ -21,6 +21,8 @@ const paths = {
     '<path d="M12 3v4M12 17v4M3 12h4M17 12h4"/><path d="M12 8a4 4 0 0 0 0 8 4 4 0 0 0 0-8z"/>',
   user: '<circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/>',
   bot: '<rect x="4" y="8" width="16" height="11" rx="2"/><path d="M12 8V4M8 3h8"/><circle cx="9" cy="13" r="1"/><circle cx="15" cy="13" r="1"/>',
+  lock: '<rect x="4" y="10" width="16" height="11" rx="2"/><path d="M8 10V6a4 4 0 0 1 8 0v4"/>',
+  code: '<path d="m9 18-6-6 6-6"/><path d="m15 6 6 6-6 6"/>',
   doc: '<path d="M14 3v5h5"/><path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>',
   copy: '<rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/>',
   check: '<path d="M20 6 9 17l-5-5"/>',
