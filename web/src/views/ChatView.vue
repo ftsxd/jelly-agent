@@ -333,8 +333,14 @@ async function send() {
   }
 }
 
-function stop() {
+// Stopping has two halves, and a reopened page only has the second one. The
+// abort ends this browser's stream; the request ends the run, which is driven
+// by whichever request started it — not necessarily this one.
+async function stop() {
   if (abort) abort.abort()
+  if (!sessionId.value) return
+  try { await api.stopSession(sessionId.value) }
+  catch (e) { error.value = e.message }
 }
 
 // handleFrame folds one frame into a message, plus the few things that are
@@ -440,6 +446,10 @@ function handleFrame(live, ev) {
       <div v-if="running" class="livebar">
         <span class="spinner sm" />
         <span>{{ remoteRunning ? '仍在后台运行，本页每 3 秒自动刷新' : '正在运行…' }}</span>
+        <!-- Only when this page is not the one streaming: the composer already
+             carries a stop button for that case, and it sits where the hand
+             already is. Here there is nothing else to click. -->
+        <button v-if="remoteRunning" class="btn livebar-stop" @click="stop">停止本轮</button>
       </div>
       <div v-else-if="endedStatus" class="livebar done">
         <Icon :name="statusOf(endedStatus).icon" :size="12" />
@@ -535,6 +545,14 @@ function handleFrame(live, ev) {
   font-size: 12px;
   color: var(--primary);
 }
+/* Sized down to sit inside a 12px status line without becoming the loudest
+   thing on the page — it is an escape hatch, not the main action. */
+.livebar-stop {
+  padding: 2px 10px;
+  min-height: 0;
+  font-size: 12px;
+}
+
 .livebar.done {
   color: var(--text-muted);
 }

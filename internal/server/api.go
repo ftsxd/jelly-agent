@@ -348,6 +348,21 @@ func (s *Server) handleSessionDetail(w http.ResponseWriter, r *http.Request) {
 // finishing quickly; bounded, because it no longer has a request to end it.
 const purgeTimeout = 30 * time.Second
 
+// handleStopSession cancels whatever this conversation has in flight.
+//
+// The browser that started a turn can drop its own stream, but that is not the
+// same thing and it is not always available: reload the page, or open the
+// conversation in another tab, and the only honest thing the view could say was
+// "仍在后台运行" with no way to end it. A long tool call — a repository sync, a
+// slow MCP server — is exactly when someone wants out.
+//
+// Stopping a session that is idle is success, not an error: the caller wanted
+// nothing running, and nothing is running.
+func (s *Server) handleStopSession(w http.ResponseWriter, r *http.Request) {
+	stopped := s.runs().cancelSession(r.PathValue("id"))
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "stopped": stopped})
+}
+
 // handleDeleteSession removes one persisted session (and its events) from the
 // store. Deleting a missing session is treated as success (idempotent).
 //

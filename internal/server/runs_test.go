@@ -1,9 +1,12 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
+	"time"
 
 	"google.golang.org/genai"
 
@@ -21,7 +24,7 @@ import (
 // direction that looks plausible.
 func TestAContinuationsStatusIsFiledUnderTheTaskItJoined(t *testing.T) {
 	r := newRunRegistry()
-	end := r.start("web-1", "inv-2", "web-1/inv-1")
+	end := r.start("web-1", "inv-2", "web-1/inv-1", nil)
 
 	if st, ok := r.status("web-1/inv-1"); !ok || st != TaskRunning {
 		t.Fatalf("folded task status = %q/%v, want running", st, ok)
@@ -38,7 +41,7 @@ func TestAContinuationsStatusIsFiledUnderTheTaskItJoined(t *testing.T) {
 // With no task to join, a run is its own task and is filed under itself.
 func TestAnUnjoinedRunIsFiledUnderItself(t *testing.T) {
 	r := newRunRegistry()
-	end := r.start("web-1", "inv-1", "")
+	end := r.start("web-1", "inv-1", "", nil)
 	if st, ok := r.status("web-1/inv-1"); !ok || st != TaskRunning {
 		t.Fatalf("status = %q/%v", st, ok)
 	}
@@ -72,7 +75,7 @@ func TestTheListShowsAJoinedRunAsTheTasksStatus(t *testing.T) {
 	if err := task.Link(stateDBOf(t, s), "web-live/inv-1", "web-live", "inv-2"); err != nil {
 		t.Fatal(err)
 	}
-	s.runs().start("web-live", "inv-2", "web-live/inv-1")
+	s.runs().start("web-live", "inv-2", "web-live/inv-1", nil)
 
 	w := do(t, s, "GET", "/api/tasks", "")
 	if w.Code != http.StatusOK {
@@ -101,8 +104,8 @@ func TestTheListShowsAJoinedRunAsTheTasksStatus(t *testing.T) {
 // this particular lie: it looks exactly like a finished answer.
 func TestATaskWithTwoRunsInFlightStaysRunningUntilBothEnd(t *testing.T) {
 	r := newRunRegistry()
-	endA := r.start("web-1", "inv-2", "web-1/inv-1")
-	endB := r.start("web-1", "inv-3", "web-1/inv-1")
+	endA := r.start("web-1", "inv-2", "web-1/inv-1", nil)
+	endB := r.start("web-1", "inv-3", "web-1/inv-1", nil)
 
 	if st, ok := r.status("web-1/inv-1"); !ok || st != TaskRunning {
 		t.Fatalf("status = %q/%v, want running", st, ok)
@@ -123,8 +126,8 @@ func TestATaskWithTwoRunsInFlightStaysRunningUntilBothEnd(t *testing.T) {
 // entry it finds now belongs to somebody else.
 func TestFinishingTwiceRetiresOneRun(t *testing.T) {
 	r := newRunRegistry()
-	endA := r.start("web-1", "inv-2", "web-1/inv-1")
-	endB := r.start("web-1", "inv-3", "web-1/inv-1")
+	endA := r.start("web-1", "inv-2", "web-1/inv-1", nil)
+	endB := r.start("web-1", "inv-3", "web-1/inv-1", nil)
 
 	endA(TaskCompleted)
 	endA(TaskCancelled)
@@ -146,7 +149,7 @@ func TestFinishingTwiceRetiresOneRun(t *testing.T) {
 // and nothing else.
 func TestSessionStatusFindsARunFiledUnderAnotherTaskOfTheSameSession(t *testing.T) {
 	r := newRunRegistry()
-	end := r.start("web-1", "inv-2", "web-1/inv-1")
+	end := r.start("web-1", "inv-2", "web-1/inv-1", nil)
 
 	if st, ok := r.sessionStatus("web-1"); !ok || st != TaskRunning {
 		t.Fatalf("session status = %q/%v, want running", st, ok)
@@ -203,12 +206,50 @@ func TestTheTimelineSaysWhetherTheSessionIsStillRunning(t *testing.T) {
 	if st, ok := timelineStatus(); ok {
 		t.Errorf("replay of an untracked session = %q, want no status at all", st)
 	}
-	end := s.runs().start("web-live", "inv-1", "")
+	end := s.runs().start("web-live", "inv-1", "", nil)
 	if st, ok := timelineStatus(); !ok || st != TaskRunning {
 		t.Errorf("replay while running = %q/%v; 页面看不出这轮还在跑", st, ok)
 	}
 	end(TaskCompleted)
 	if st, ok := timelineStatus(); !ok || st != TaskCompleted {
 		t.Errorf("replay just after the turn = %q/%v, want completed", st, ok)
+	}
+}
+
+// Someone who reopens a conversation mid-turn must be able to end it. The run
+// is driven by the request that started it, so the only thing that can stop it
+// from another request is the cancel the registry is holding.
+func TestStopSessionCancelsRunsStartedByAnotherRequest(t *testing.T) {
+	s := newTestServer(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	end := s.runs().start("web-live", "inv-1", "", cancel)
+
+	// A conversation with nothing running is not an error — the caller wanted
+	// nothing running, and nothing is.
+	if w := do(t, s, "POST", "/api/sessions/web-idle/stop", `{}`); w.Code != 200 {
+		t.Fatalf("空闲会话被当成错误：%d %s", w.Code, w.Body.String())
+	}
+	if ctx.Err() != nil {
+		t.Fatal("停止另一个会话却取消了这一个")
+	}
+
+	w := do(t, s, "POST", "/api/sessions/web-live/stop", `{}`)
+	if w.Code != 200 || !strings.Contains(w.Body.String(), `"stopped":1`) {
+		t.Fatalf("停止没有生效：%d %s", w.Code, w.Body.String())
+	}
+	select {
+	case <-ctx.Done():
+	case <-time.After(time.Second):
+		t.Fatal("运行中的那一轮没有被取消")
+	}
+	// The handler still reports its own outcome; stopping does not retire the
+	// run behind its back.
+	if st, ok := s.runs().sessionStatus("web-live"); !ok || st != TaskRunning {
+		t.Fatalf("取消后立刻就不算运行中了：%q %v", st, ok)
+	}
+	end(TaskCancelled)
+	if st, _ := s.runs().sessionStatus("web-live"); st != TaskCancelled {
+		t.Fatalf("结束后的状态是 %q", st)
 	}
 }

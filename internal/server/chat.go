@@ -90,7 +90,12 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ctx := r.Context()
+	// Cancellable independently of the client's connection: the browser that
+	// opened this stream can abandon it, but a reload or a second tab cannot —
+	// and a turn that runs for minutes will be watched from one of those. The
+	// cancel goes into the run registry, where /api/sessions/{id}/stop finds it.
+	ctx, cancelRun := context.WithCancel(r.Context())
+	defer cancelRun()
 	sessionID, err := s.resolveSession(ctx, svc, req.SessionID)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
@@ -161,7 +166,7 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 					under = req.TaskID
 				}
 			}
-			end := s.runs().start(sessionID, round, under)
+			end := s.runs().start(sessionID, round, under, cancelRun)
 			finish = func(status string) { finish = nil; end(status) }
 		})
 	if err != nil {

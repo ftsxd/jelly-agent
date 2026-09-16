@@ -15,6 +15,7 @@ package server
 // progress with nothing driving it — a lie that outlives every restart.
 
 import (
+	"context"
 	"sync"
 	"time"
 
@@ -57,8 +58,20 @@ type runRegistry struct {
 // the handler's own call and the deferred safety net — removes one run rather
 // than two.
 type taskRuns struct {
-	started map[string]time.Time
+	started map[string]liveRun
 	first   time.Time // for eviction: the oldest thing this entry is holding
+}
+
+// liveRun is one in-flight run: when it started, and how to stop it.
+//
+// The cancel function is why this is a struct. A run is driven by the request
+// that started it, so the browser that opened the stream could always abandon
+// it — but a second tab, or the same tab after a reload, has no handle on that
+// request and could only watch. "仍在后台运行" with no way to stop it is the
+// one state a long turn must not leave someone in.
+type liveRun struct {
+	at     time.Time
+	cancel context.CancelFunc
 }
 
 func newRunRegistry() *runRegistry {
@@ -76,7 +89,7 @@ func newRunRegistry() *runRegistry {
 // registering it under session/its-own-invocation put the status somewhere
 // nothing looks. The continuation of a task showed as idle while it ran, then
 // as whatever the first run had ended as. Empty means the run is its own task.
-func (r *runRegistry) start(session, round, taskID string) func(status string) {
+func (r *runRegistry) start(session, round, taskID string, cancel context.CancelFunc) func(status string) {
 	id := taskID
 	if id == "" {
 		id = task.ID(session, round)
@@ -88,10 +101,10 @@ func (r *runRegistry) start(session, round, taskID string) func(status string) {
 	}
 	e, ok := r.running[id]
 	if !ok {
-		e = &taskRuns{started: map[string]time.Time{}, first: now}
+		e = &taskRuns{started: map[string]liveRun{}, first: now}
 		r.running[id] = e
 	}
-	e.started[round] = now
+	e.started[round] = liveRun{at: now, cancel: cancel}
 	r.mu.Unlock()
 
 	// Idempotent by construction rather than by a guard: the run is removed by
@@ -115,6 +128,38 @@ func (r *runRegistry) start(session, round, taskID string) func(status string) {
 			delete(r.running, id)
 		}
 	}
+}
+
+// cancelSession stops every run in flight for one conversation, and reports how
+// many it stopped.
+//
+// By session, like sessionStatus and for the same reason: the page is showing a
+// conversation and has no business knowing which task a run was filed under.
+// The runs are not removed here — each handler ends its own run and states its
+// own outcome, which is what keeps "cancelled" honest.
+func (r *runRegistry) cancelSession(sessionID string) int {
+	if sessionID == "" {
+		return 0
+	}
+	r.mu.Lock()
+	var cancels []context.CancelFunc
+	for id, e := range r.running {
+		if s, _ := task.Split(id); s != sessionID {
+			continue
+		}
+		for _, run := range e.started {
+			if run.cancel != nil {
+				cancels = append(cancels, run.cancel)
+			}
+		}
+	}
+	r.mu.Unlock()
+	// Called outside the lock: cancel wakes the handler, which ends its run
+	// through the function start handed back — and that takes this same lock.
+	for _, cancel := range cancels {
+		cancel()
+	}
+	return len(cancels)
 }
 
 // status reports what is known about a task, and whether anything is.

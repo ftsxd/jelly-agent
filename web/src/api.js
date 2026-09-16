@@ -118,6 +118,7 @@ export const api = {
       signal,
     )
   },
+  stopSession: (id) => jpost(`/api/sessions/${encodeURIComponent(id)}/stop`, {}),
   deleteSession: (id) => jdelete(`/api/sessions/${encodeURIComponent(id)}`),
   deleteSessions: (ids) => jpost('/api/sessions/delete', { ids }),
   skills: () => jget('/api/skills'),
