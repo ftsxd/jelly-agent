@@ -373,8 +373,28 @@ func (g *Gateway) Execute(ctx context.Context, ic *ops.IncidentContext, origin o
 }
 
 // ExecuteAs is Execute with the conversation identifiers a sink needs to
-// attribute the row.
+// attribute the row. It routes to the executor registered for the tool's
+// server.
 func (g *Gateway) ExecuteAs(ctx context.Context, meta CallMeta, ic *ops.IncidentContext, origin ops.Origin, name string, args map[string]any) (res Result, err error) {
+	return g.ExecuteWith(ctx, meta, ic, origin, name, args, nil)
+}
+
+// ExecuteWith is ExecuteAs for a caller that already holds the tool instance
+// to run, and must not be routed by name.
+//
+// A bound tool carries its own executor because the per-server registry cannot
+// tell two instances of the same tool apart, and for built-ins (server "") it
+// does not even try: every agent build registers over the same slot. In an
+// agent tree the children are built first and the root last, so the root's
+// instances served every node's calls — a sub-agent's code-project tools ran
+// under the coordinator's identity and reported no assigned projects, while
+// the same sub-agent addressed directly worked. Per-agent skills and script
+// variables were bound the same way and failed the same way. Concurrent
+// requests made it worse: each build overwrote the slot process-wide.
+//
+// The registry stays for callers that have no instance in hand — the console's
+// direct invocation and scheduled runs address a tool by name alone.
+func (g *Gateway) ExecuteWith(ctx context.Context, meta CallMeta, ic *ops.IncidentContext, origin ops.Origin, name string, args map[string]any, bound Executor) (res Result, err error) {
 	started := time.Now()
 	// Recorded on every path out, including the early rejections: a call that
 	// was denied or unroutable is part of what happened, and leaving those out
@@ -412,7 +432,10 @@ func (g *Gateway) ExecuteAs(ctx context.Context, meta CallMeta, ic *ops.Incident
 		return Result{Call: call}, err
 	}
 
-	exec, ok := g.executor(m.Server)
+	exec, ok := bound, bound != nil
+	if !ok {
+		exec, ok = g.executor(m.Server)
+	}
 	if !ok {
 		call.Duration = time.Since(started)
 		call.ErrKind = "no_executor"

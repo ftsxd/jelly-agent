@@ -2,6 +2,7 @@ package tool
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -76,7 +77,21 @@ func ProjectTools(store *codeproject.Store, agent string) ([]adktool.Tool, error
 			}
 			projects = append(projects, item)
 		}
-		return map[string]any{"projects": projects}, err
+		out := map[string]any{"projects": projects, "agent": agent}
+		if err == nil && len(projects) == 0 {
+			// An empty list is the one result that cannot be acted on and
+			// cannot be explained from the inside: it reads the same whether
+			// nothing was ever assigned, or the assignment landed on a
+			// different name than the one actually asking. An agent tree makes
+			// that easy to hit — a grant to the coordinator is not a grant to
+			// the node it transfers to, and the transcript shows a label, not
+			// the string the check ran against. So name the identity here, and
+			// log where it was checked: two data directories look exactly like
+			// a missing grant from inside the tool.
+			out["hint"] = "没有任何代码项目分配给 Agent「" + agent + "」。请在代码页面把项目分配给这个名字——授权按 Agent 名精确匹配，子 Agent 需要单独分配。"
+			slog.Warn("list_code_projects 无可见项目", "agent", agent, "dir", store.Dir())
+		}
+		return out, err
 	})
 	if err != nil {
 		return nil, err

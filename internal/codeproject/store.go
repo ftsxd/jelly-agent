@@ -771,7 +771,13 @@ func (s *Store) WithRead(agent, id string, fn func(dir string, p Project) error)
 			return fn(filepath.Join(s.dir, p.Snapshot), p)
 		}
 	}
-	return ErrDenied
+	// The identity is named because the merged message hides the one thing a
+	// denial never tells anyone: which agent was asked about. A project read
+	// from inside an agent tree is checked against the node's own name, and
+	// "not granted to CodeAnalyzer" is a different afternoon from "not granted
+	// to whoever you thought was asking". Existence stays merged in — naming
+	// the caller is not the same as confirming the project is there.
+	return fmt.Errorf("%w（当前 Agent：%s）", ErrDenied, agent)
 }
 
 func (s *Store) removeSnapshot(name string) {

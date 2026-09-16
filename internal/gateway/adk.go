@@ -159,6 +159,11 @@ func (b *Binder) Tools(server string, tools []adktool.Tool) []adktool.Tool {
 			origin:      ops.OriginModel,
 			declaration: stripInjected(r.Declaration(), m),
 			inner:       r,
+			// This tool runs itself. The per-server executor registered above
+			// still serves callers that only have a name, but a call arriving
+			// through this wrapper must reach this instance — see
+			// Gateway.ExecuteWith for what routing by name cost.
+			exec: InnerExecutor([]adktool.Tool{t}),
 		})
 	}
 	if b.Report != nil && len(undeclared) > 0 {
@@ -275,6 +280,10 @@ type Wrapped struct {
 
 	declaration *genai.FunctionDeclaration
 	inner       runnable
+	// exec runs inner. Bound per instance so that two agents holding
+	// same-named tools — every node of an agent tree holds the same built-ins,
+	// each closed over its own agent identity — cannot execute each other's.
+	exec Executor
 }
 
 // Name is our name, not the server's. Two servers exposing get_pods are
@@ -333,7 +342,7 @@ func (w *Wrapped) Run(ctx agent.ToolContext, args any) (map[string]any, error) {
 		Agent:        ctx.AgentName(),
 		CallID:       ctx.FunctionCallID(),
 	}
-	res, err := w.gw.ExecuteAs(WithToolContext(ctx, ctx), meta, ic, w.origin, w.meta.Name, modelArgs)
+	res, err := w.gw.ExecuteWith(WithToolContext(ctx, ctx), meta, ic, w.origin, w.meta.Name, modelArgs, w.exec)
 	if err != nil {
 		// Returned as an error, not as a payload: ADK's after-tool callback
 		// receives it either way, and an error keeps the failure legible to

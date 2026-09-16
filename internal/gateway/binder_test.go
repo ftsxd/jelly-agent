@@ -313,3 +313,37 @@ func payloadField(t *testing.T, res map[string]any, key string) any {
 	t.Fatalf("no %q in %v", key, res)
 	return nil
 }
+
+// Every node of an agent tree binds the same built-in tools, each instance
+// closed over its own agent identity, and they all register under server "".
+// Children are built before the root, so routing by server name sent every
+// node's calls to the root's instances: a sub-agent read code projects, skills
+// and script variables as the coordinator. Each wrapper must run the tool it
+// was built around.
+func TestRebindingBuiltinsDoesNotStealTheEarlierAgentsTools(t *testing.T) {
+	reg := emptyReg()
+	gw := New(Config{Registry: reg})
+	b := governing(gw, reg)
+
+	decl := &genai.FunctionDeclaration{Name: "list_code_projects"}
+	child := &innerTool{name: "list_code_projects", decl: decl, result: map[string]any{"agent": "CodeAnalyzer"}}
+	parent := &innerTool{name: "list_code_projects", decl: decl, result: map[string]any{"agent": "OrchestrationAgent"}}
+
+	// The order a tree builds in: sub-agents first, root last.
+	sub := b.Tools("", []adktool.Tool{child})
+	b.Tools("", []adktool.Tool{parent})
+
+	w, ok := sub[0].(*Wrapped)
+	if !ok {
+		t.Fatalf("built-in was not wrapped: %T", sub[0])
+	}
+	if _, err := w.Run(newToolCtx(), map[string]any{}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if child.gotArgs == nil {
+		t.Error("子 agent 的工具没有被调用")
+	}
+	if parent.gotArgs != nil {
+		t.Error("调用落在了后建的根 agent 实例上——身份被顶掉了")
+	}
+}

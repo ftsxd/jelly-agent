@@ -518,3 +518,61 @@ func TestProposeIsDraftOnlyAndScopeBound(t *testing.T) {
 		t.Fatalf("accepted draft never became an annotation: %s", raw)
 	}
 }
+
+// An empty project list is the worst result this tool can return: it is the
+// same output whether nothing was ever assigned or the assignment went to a
+// different name than the one asking. Inside an agent tree that distinction is
+// the whole answer — a grant to the coordinator is not a grant to the sub-agent
+// it transfers to — so the result has to name the identity it was checked
+// against, and a denial has to do the same.
+func TestEmptyProjectListNamesTheIdentityItWasCheckedAgainst(t *testing.T) {
+	store := seedProject(t, codeproject.Project{
+		ID: "silkworm", Name: "Silkworm", URL: "https://git.example.com/silkworm.git",
+		Branch: "master", Grants: []codeproject.Grant{{Agent: "CodeAnalyzer"}},
+	})
+	tools, err := ProjectTools(store, "OrchestrationAgent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := runnableNamed(t, tools, "list_code_projects").Run(&projectTestContext{}, map[string]any{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out["agent"] != "OrchestrationAgent" {
+		t.Fatalf("agent = %v, want the identity the grant is matched against", out["agent"])
+	}
+	hint, _ := out["hint"].(string)
+	if !strings.Contains(hint, "OrchestrationAgent") {
+		t.Fatalf("hint = %q, want the unassigned identity named", hint)
+	}
+	// The granted agent gets no hint, and still sees the project.
+	granted, err := ProjectTools(store, "CodeAnalyzer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err = runnableNamed(t, granted, "list_code_projects").Run(&projectTestContext{}, map[string]any{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := out["hint"]; ok {
+		t.Fatalf("hint on a non-empty list: %v", out)
+	}
+	var listed struct {
+		Projects []struct {
+			ID string `json:"id"`
+		} `json:"projects"`
+	}
+	raw, _ := json.Marshal(out)
+	if err := json.Unmarshal(raw, &listed); err != nil {
+		t.Fatal(err)
+	}
+	if len(listed.Projects) != 1 || listed.Projects[0].ID != "silkworm" {
+		t.Fatalf("projects = %s, want the granted project", raw)
+	}
+	// The denial names the caller too: the merged "不存在/未授权/已过期" message
+	// is what makes this unreadable from the transcript alone.
+	_, err = runnableNamed(t, tools, "list_project_dir").Run(&projectTestContext{}, map[string]any{"project": "silkworm"})
+	if err == nil || !strings.Contains(err.Error(), "OrchestrationAgent") {
+		t.Fatalf("denial = %v, want the asking identity named", err)
+	}
+}
