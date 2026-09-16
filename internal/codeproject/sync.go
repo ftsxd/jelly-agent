@@ -7,7 +7,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -34,7 +33,7 @@ func (s *Store) StartSync(id string) (string, error) {
 		return taskID, nil // already running; caller gets the same task
 	}
 	go func() {
-		defer s.release(id)
+		defer s.release(id, taskID)
 		ctx, cancel := context.WithTimeout(context.WithoutCancel(context.Background()), limits.SyncTimeout)
 		defer cancel()
 		_ = s.perform(ctx, p, taskID, limits)
@@ -91,7 +90,7 @@ func (s *Store) Sync(ctx context.Context, id string) error {
 	if p.ID == "" {
 		return ErrBusy
 	}
-	defer s.release(id)
+	defer s.release(id, taskID)
 	ctx, cancel := context.WithTimeout(ctx, limits.SyncTimeout)
 	defer cancel()
 	return s.perform(ctx, p, taskID, limits)
@@ -128,18 +127,25 @@ func (s *Store) begin(id string) (Project, string, Limits, error) {
 	return Project{}, "", s.limits, ErrNotFound
 }
 
-func (s *Store) release(id string) {
+func (s *Store) release(id, taskID string) {
 	s.mu.Lock()
-	delete(s.busy, id)
+	if s.busy[id] == taskID {
+		delete(s.busy, id)
+	}
 	s.mu.Unlock()
 }
 
-// perform clones and publishes. It runs outside the metadata lock so assigning
+// perform fetches and publishes. It runs outside the metadata lock so assigning
 // an agent stays available meanwhile, and only a complete snapshot is ever
 // published. No repository scripts are executed.
 func (s *Store) perform(ctx context.Context, p Project, taskID string, limits Limits) error {
 	s.setState(p.ID, taskID, SyncRunning)
-	snapshot, revision, syncErr := s.clone(ctx, p, limits)
+	snapshot, revision, syncErr := s.syncSnapshot(ctx, p, limits)
+	discardSnapshot := func() {
+		if snapshot != p.Snapshot {
+			s.removeSnapshot(snapshot)
+		}
+	}
 	var issues []string
 	if syncErr == nil {
 		issues = checkDirs(filepath.Join(s.dir, snapshot), p)
@@ -154,7 +160,7 @@ func (s *Store) perform(ctx context.Context, p Project, taskID string, limits Li
 	delete(s.busy, p.ID)
 	ps, err := s.read()
 	if err != nil {
-		s.removeSnapshot(snapshot)
+		discardSnapshot()
 		return err
 	}
 	for i := range ps {
@@ -180,7 +186,7 @@ func (s *Store) perform(ctx context.Context, p Project, taskID string, limits Li
 			ps[i].SyncRequest = nil
 		}
 		if err = s.write(ps); err != nil {
-			s.removeSnapshot(snapshot)
+			discardSnapshot()
 			return err
 		}
 		if syncErr == nil && oldSnapshot != snapshot {
@@ -188,7 +194,7 @@ func (s *Store) perform(ctx context.Context, p Project, taskID string, limits Li
 		}
 		return syncErr
 	}
-	s.removeSnapshot(snapshot)
+	discardSnapshot()
 	return ErrNotFound
 }
 
@@ -285,90 +291,24 @@ func (s *Store) newGitSession(p Project) (*gitSession, error) {
 	return g, nil
 }
 
-// run executes git with the hardening flags. Stderr is captured rather than
+// command prepares git with the hardening flags. Stderr is captured rather than
 // discarded: discarding it meant every failure — a 401, a typo in the URL, a
 // missing branch, no DNS — arrived as the same sentence listing five things to
 // check, which is not a diagnosis. It is scrubbed of the credential before it
 // goes anywhere, because last_error is persisted into projects.json.
-func (g *gitSession) run(ctx context.Context, args ...string) (string, error) {
+func (g *gitSession) command(ctx context.Context, args ...string) *exec.Cmd {
 	args = append([]string{"-c", "core.hooksPath=" + os.DevNull, "-c", "credential.helper=", "-c", "protocol.allow=never", "-c", "protocol.https.allow=always", "-c", "http.followRedirects=false"}, args...)
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Env = g.env
 	cmd.WaitDelay = 2 * time.Second
 	g.stderr.b.Reset()
 	cmd.Stderr = &g.stderr
-	b, err := cmd.Output()
-	return strings.TrimSpace(string(b)), err
+	return cmd
 }
 
-func (s *Store) clone(ctx context.Context, p Project, limits Limits) (string, string, error) {
-	g, err := s.newGitSession(p)
-	if err != nil {
-		return "", "", err
-	}
-	defer g.cleanup()
-	work, token, auth := g.work, g.token, g.auth
-	stderr := &g.stderr
-	run := func(args ...string) (string, error) { return g.run(ctx, args...) }
-	checkout := filepath.Join(work, "checkout")
-	if _, err := run("clone", "--depth=1", "--single-branch", "--no-tags", "--branch", p.Branch, "--", p.URL, checkout); err != nil {
-		if ctx.Err() != nil {
-			return "", "", fmt.Errorf("拉取已取消或超过 %s，请重试或调高 files.code_projects.sync_timeout_sec", limits.SyncTimeout)
-		}
-		return "", "", errors.New(diagnose(stderr.b.String(), token, auth, p, err))
-	}
-	revision, err := run("-C", checkout, "rev-parse", "HEAD")
-	if err != nil {
-		return "", "", fmt.Errorf("无法读取代码版本")
-	}
-	if err := os.RemoveAll(filepath.Join(checkout, ".git")); err != nil {
-		return "", "", err
-	}
-	// Exclude links and special files; a snapshot only contains regular code.
-	var total int64
-	var count int
-	err = filepath.WalkDir(checkout, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-		if d.IsDir() {
-			return nil
-		}
-		if !d.Type().IsRegular() {
-			return os.Remove(path)
-		}
-		info, err := d.Info()
-		if err != nil {
-			return err
-		}
-		total += info.Size()
-		count++
-		if total > limits.MaxSnapshotBytes {
-			return fmt.Errorf("代码快照超过 %d MB 上限，请调高 files.code_projects.max_snapshot_mb，或改用只含所需目录的项目", limits.MaxSnapshotBytes>>20)
-		}
-		if count > limits.MaxSnapshotFiles {
-			return fmt.Errorf("代码快照超过 %d 个文件上限，请调高 files.code_projects.max_snapshot_files", limits.MaxSnapshotFiles)
-		}
-		return nil
-	})
-	if err != nil {
-		return "", "", err
-	}
-	dest, err := os.MkdirTemp(s.dir, "snapshot-")
-	if err != nil {
-		return "", "", err
-	}
-	// Rename into a reserved name so no partially copied tree is ever visible.
-	if err = os.Remove(dest); err != nil {
-		return "", "", err
-	}
-	if err = os.Rename(checkout, dest); err != nil {
-		return "", "", err
-	}
-	return filepath.Base(dest), revision, nil
+func (g *gitSession) run(ctx context.Context, args ...string) (string, error) {
+	b, err := g.command(ctx, args...).Output()
+	return strings.TrimSpace(string(b)), err
 }
 
 // RemoteStatus is the answer to "is the snapshot I would analyse still current".
@@ -415,7 +355,29 @@ func (s *Store) CheckRemoteCached(ctx context.Context, id string, maxAge time.Du
 				ttl = min(maxAge, remoteProbeErrTTL)
 			}
 			if time.Since(e.at) < ttl {
-				return e.st, e.err
+				if e.err != nil {
+					return e.st, e.err
+				}
+				// "落后" is a comparison between two revisions, and only one of
+				// them was observed here. The local one moves whenever a sync
+				// lands — which, now that the agent syncs and immediately lists
+				// again, is exactly when this gets read. A verdict served
+				// unchanged would outlive its own fix and offer the same sync
+				// twice.
+				switch local := s.localRevision(id); local {
+				case e.st.Local:
+					// Nothing moved: the observation still describes reality.
+					return e.st, nil
+				case e.st.Remote:
+					// Synced to the head this probe saw. Whether the remote has
+					// moved on again since is the same thing every cached
+					// answer cannot know, and not a reason to call it behind.
+					e.st.Local, e.st.Behind = local, false
+					return e.st, nil
+				}
+				// The snapshot is at some third revision — synced to a newer
+				// head than this probe ever saw, or rewound. The observation
+				// cannot judge that, so ask the remote instead of guessing.
 			}
 		}
 	}
@@ -465,6 +427,23 @@ func (s *Store) SeedRemoteProbeForTest(id string, st RemoteStatus) {
 		s.probes = map[string]remoteProbe{}
 	}
 	s.probes[id] = remoteProbe{st: st, at: time.Now()}
+}
+
+// localRevision is the revision the published snapshot was built from, or
+// empty when the project is gone or was never synced.
+func (s *Store) localRevision(id string) string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	ps, err := s.read()
+	if err != nil {
+		return ""
+	}
+	for _, p := range ps {
+		if p.ID == id {
+			return p.Revision
+		}
+	}
+	return ""
 }
 
 func (s *Store) checkRemote(ctx context.Context, id string) (RemoteStatus, error) {

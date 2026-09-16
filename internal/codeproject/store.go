@@ -660,6 +660,9 @@ func (s *Store) Save(p Project) error {
 			if p.Snapshot != old.Snapshot {
 				s.removeSnapshot(old.Snapshot)
 			}
+			if p.URL != old.URL || p.Branch != old.Branch {
+				s.removeGitCache(p.ID)
+			}
 			return s.applyFormAnnotations(p, fromForm)
 		}
 	}
@@ -756,6 +759,7 @@ func (s *Store) Delete(id string) error {
 				return err
 			}
 			s.removeSnapshot(p.Snapshot)
+			s.removeGitCache(p.ID)
 			// The credential has no owner left; leaving it behind would let a
 			// project recreated under the same id silently inherit it.
 			_ = s.setTokenLocked(id, "")

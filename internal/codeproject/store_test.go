@@ -1,6 +1,8 @@
 package codeproject
 
 import (
+	"archive/tar"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -148,23 +150,43 @@ func TestSyncPublicationFailureAndMetadataIsolation(t *testing.T) {
 	t.Setenv("PROJECT_TEST_TOKEN", "do-not-leak")
 	bin := t.TempDir()
 	failure := filepath.Join(bin, "fail")
+	var archive bytes.Buffer
+	tw := tar.NewWriter(&archive)
+	for _, h := range []*tar.Header{
+		{Name: "main.go", Mode: 0600, Size: int64(len("package main\n")), Typeflag: tar.TypeReg},
+		{Name: "escape", Typeflag: tar.TypeSymlink, Linkname: "/etc/passwd"},
+	} {
+		if err := tw.WriteHeader(h); err != nil {
+			t.Fatal(err)
+		}
+		if h.Typeflag == tar.TypeReg {
+			_, _ = tw.Write([]byte("package main\n"))
+		}
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	archivePath := filepath.Join(bin, "snapshot.tar")
+	if err := os.WriteFile(archivePath, archive.Bytes(), 0600); err != nil {
+		t.Fatal(err)
+	}
 	script := fmt.Sprintf(`#!/bin/sh
 if [ -f '%s' ]; then echo do-not-leak >&2; exit 1; fi
 mode=
 for arg do
-  if [ "$arg" = clone ]; then mode=clone; fi
-  if [ "$arg" = rev-parse ]; then mode=revision; fi
+  case "$arg" in
+    init|fetch|archive|rev-parse) mode="$arg" ;;
+    --is-bare-repository) mode=bare ;;
+  esac
   last="$arg"
 done
-if [ "$mode" = clone ]; then
-  /bin/mkdir -p "$last/.git"
-  echo private-config > "$last/.git/config"
-  echo 'package main' > "$last/main.go"
-  /bin/ln -s /etc/passwd "$last/escape"
-else
-  echo 0123456789abcdef
-fi
-`, failure)
+case "$mode" in
+  init) /bin/mkdir -p "$last/info" ;;
+  bare) echo true ;;
+  rev-parse) echo 0123456789abcdef ;;
+  archive) /bin/cat '%s' ;;
+esac
+`, failure, archivePath)
 	if err := os.WriteFile(filepath.Join(bin, "git"), []byte(script), 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -186,7 +208,7 @@ fi
 		t.Fatal(err)
 	}
 	if err := s.Sync(context.Background(), p.ID); err == nil {
-		t.Fatal("failed clone succeeded")
+		t.Fatal("failed fetch succeeded")
 	}
 	ps, _ = s.List()
 	if ps[0].Snapshot != old.Snapshot || ps[0].LastError == "" || strings.Contains(ps[0].LastError, "do-not-leak") {
@@ -803,5 +825,60 @@ func TestStartSyncForNeedsTheGrant(t *testing.T) {
 	ps, _ := s.read()
 	if ps[0].SyncTaskID != "" || ps[0].SyncState != "" {
 		t.Fatalf("被拒绝的调用仍然动了同步状态: %+v", ps[0])
+	}
+}
+
+// The freshness probe is cached for minutes, and a sync lands inside that
+// window — by design, since the agent syncs and immediately lists again. What
+// the probe observed is the remote head; "落后" is a comparison against the
+// local revision, which moves under it. Serving the stored verdict unchanged
+// would tell the turn right after a successful sync that its snapshot is still
+// behind, and offer the same sync a second time.
+//
+// A cancelled context stands in for the network here: reaching it is the
+// assertion, in both directions.
+func TestCachedRemoteStatusFollowsTheLocalRevision(t *testing.T) {
+	s := Open(t.TempDir())
+	p := testProject()
+	p.Grants = []Grant{{Agent: "analyst"}}
+	if err := s.Save(p); err != nil {
+		t.Fatal(err)
+	}
+	// Save clears the snapshot fields on purpose (a config edit is not a pull),
+	// so the "already synced once" state is set the way a sync sets it.
+	setRevision := func(rev string) {
+		t.Helper()
+		if err := s.mutate(p.ID, func(p *Project) error { p.Revision = rev; return nil }); err != nil {
+			t.Fatal(err)
+		}
+	}
+	setRevision("old")
+	s.SetAutoProbe(true)
+	s.SeedRemoteProbeForTest(p.ID, RemoteStatus{Local: "old", Remote: "new", Behind: true})
+	dead, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	// Nothing moved: the observation still describes reality, and is reused.
+	st, err := s.CheckRemoteFor(dead, "analyst", p.ID, time.Minute)
+	if err != nil || !st.Behind {
+		t.Fatalf("落后的快照没有被报出来，或者白跑了一趟远端: %+v %v", st, err)
+	}
+
+	// The sync lands on the head this probe saw.
+	setRevision("new")
+	st, err = s.CheckRemoteFor(dead, "analyst", p.ID, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Behind || st.Local != "new" {
+		t.Fatalf("同步之后仍被判为落后（缓存里的旧结论活过了它的修复）: %+v", st)
+	}
+
+	// Synced past what the probe ever saw — the remote had moved on again
+	// before the pull ran. This observation cannot judge that revision at all,
+	// so the cache must be abandoned rather than reinterpreted.
+	setRevision("newer")
+	if st, err := s.CheckRemoteFor(dead, "analyst", p.ID, time.Minute); err == nil {
+		t.Fatalf("拿一条判断不了当前版本的旧观测当答案: %+v", st)
 	}
 }
