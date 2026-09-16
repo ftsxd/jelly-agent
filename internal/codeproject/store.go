@@ -19,6 +19,7 @@ import (
 var ErrNotFound = errors.New("项目不存在")
 var ErrDenied = errors.New("项目不存在、未授权或授权已过期")
 var ErrBusy = errors.New("项目正在拉取，请稍后再操作")
+var ErrProbeOff = errors.New("远端核对已关闭（files.code_projects.no_remote_check）")
 var identifier = regexp.MustCompile(`^[A-Za-z0-9_-]{1,80}$`)
 var envName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
@@ -82,6 +83,23 @@ const (
 	SyncInterrupted = "interrupted"
 )
 
+// SyncRequest is an agent asking for the snapshot to be refreshed.
+//
+// It is a request and not a sync: pulling uses the stored credential, takes
+// minutes on a monorepo and replaces the tree every later answer cites, so the
+// decision stays with a person. The agent's job is to notice that the snapshot
+// is behind and say so with the evidence it saw; the code page turns that into
+// one click.
+type SyncRequest struct {
+	Agent  string `json:"agent"`
+	Reason string `json:"reason,omitempty"`
+	// Remote is the head the agent saw when it asked, so the page can show
+	// what it would be syncing to rather than "something newer".
+	Remote      string    `json:"remote_revision,omitempty"`
+	Local       string    `json:"local_revision,omitempty"`
+	RequestedAt time.Time `json:"requested_at"`
+}
+
 type Project struct {
 	ID       string  `json:"id"`
 	Name     string  `json:"name"`
@@ -121,6 +139,11 @@ type Project struct {
 	// the repository and proposes labels. Kept beside the sync state because it
 	// is the same shape of thing: a long background job the page follows.
 	Annotate *AnnotateRun `json:"annotate,omitempty"`
+
+	// SyncRequest is a pending ask from an agent, cleared by approving it,
+	// rejecting it, or by any sync that succeeds — at which point the thing it
+	// asked for has happened, however it was triggered.
+	SyncRequest *SyncRequest `json:"sync_request,omitempty"`
 
 	SyncState     string     `json:"sync_state,omitempty"`
 	SyncTaskID    string     `json:"sync_task_id,omitempty"`
@@ -217,6 +240,21 @@ type Store struct {
 	busy    map[string]string // project id -> running sync task id
 	limits  Limits
 	recover sync.Once
+
+	// probes caches the last "is the remote ahead" answer per project. An
+	// agent asks at the start of every analysis and several agents share one
+	// store, so without this a busy afternoon is one ls-remote per turn
+	// against someone's git server. Guarded separately from mu: it is not part
+	// of what projects.json says.
+	probeMu   sync.Mutex
+	probes    map[string]remoteProbe
+	autoProbe bool
+}
+
+type remoteProbe struct {
+	st  RemoteStatus
+	err error
+	at  time.Time
 }
 
 // SetLimits applies configuration to the shared Store. Open returns the same
@@ -234,6 +272,17 @@ func (s *Store) SetLimits(l Limits) {
 	if l.MaxSnapshotFiles > 0 {
 		s.limits.MaxSnapshotFiles = l.MaxSnapshotFiles
 	}
+}
+
+// SetAutoProbe decides whether the agent-facing freshness check may reach the
+// network. Off until the engine turns it on, so a store opened by a test does
+// not shell out to git against whatever URL the fixture invented — and an
+// operator on a closed network can turn it off in config without losing the
+// console's explicit 检查更新 button.
+func (s *Store) SetAutoProbe(on bool) {
+	s.probeMu.Lock()
+	defer s.probeMu.Unlock()
+	s.autoProbe = on
 }
 
 var stores sync.Map
@@ -744,6 +793,9 @@ func (s *Store) Visible(agent string) ([]Project, error) {
 				Revision: p.Revision, SyncedAt: p.SyncedAt,
 				RootPath: p.Main(), ReferencePaths: p.ReferencePaths,
 				DirectoryMeta: p.DirectoryMeta, DirIssues: p.DirIssues,
+				// A pull already under way is the one case where "落后于远端"
+				// needs no decision from anyone: it is being fixed.
+				SyncState: p.SyncState,
 			})
 		}
 	}
@@ -929,6 +981,47 @@ func (s *Store) mutate(id string, fn func(*Project) error) error {
 func (s *Store) SetAnnotateRun(id string, run *AnnotateRun) error {
 	return s.mutate(id, func(p *Project) error {
 		p.Annotate = run
+		return nil
+	})
+}
+
+// RequestSync records an agent's ask that this project be pulled again.
+//
+// The grant is checked here rather than trusted from the caller: this is the
+// one project method an agent reaches that writes anything, and an agent that
+// may not read a project may not put a card on its page either.
+//
+// A second request replaces the first. Two agents asking for the same pull is
+// one decision for the operator, not a queue.
+func (s *Store) RequestSync(agent, id string, req SyncRequest) error {
+	s.mu.RLock()
+	ps, err := s.read()
+	s.mu.RUnlock()
+	if err != nil {
+		return err
+	}
+	ok := false
+	for _, p := range ps {
+		if p.ID == id && allowed(p, agent) {
+			ok = true
+			break
+		}
+	}
+	if !ok {
+		return fmt.Errorf("%w（当前 Agent：%s）", ErrDenied, agent)
+	}
+	req.Agent = agent
+	req.RequestedAt = time.Now().UTC()
+	return s.mutate(id, func(p *Project) error {
+		p.SyncRequest = &req
+		return nil
+	})
+}
+
+// ClearSyncRequest drops the pending ask, whether it was approved or refused.
+func (s *Store) ClearSyncRequest(id string) error {
+	return s.mutate(id, func(p *Project) error {
+		p.SyncRequest = nil
 		return nil
 	})
 }

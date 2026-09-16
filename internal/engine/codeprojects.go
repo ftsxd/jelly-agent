@@ -21,6 +21,7 @@ func (e *Engine) CodeProjects() *codeproject.Store {
 	// on every lookup rather than only at construction — that is what makes a
 	// config edit take effect without a restart.
 	c := e.cfg.Files.CodeProjects
+	store.SetAutoProbe(!c.NoRemoteCheck)
 	store.SetLimits(codeproject.Limits{
 		SyncTimeout:      time.Duration(c.SyncTimeoutSec) * time.Second,
 		MaxSnapshotBytes: int64(c.MaxSnapshotMB) << 20,

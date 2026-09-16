@@ -1,6 +1,7 @@
 package tool
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -14,7 +15,26 @@ import (
 	"google.golang.org/adk/tool/toolconfirmation"
 )
 
-type projectTestContext struct{ agent.StrictContextMock }
+// Ctx is set because the listing derives a deadline for the freshness probe.
+// StrictContextMock panics on a nil one, which is the point of it.
+type projectTestContext struct {
+	agent.StrictContextMock
+	session, invocation string
+}
+
+func newProjectCtx() *projectTestContext { return newProjectCtxIn("s1", "inv-1") }
+
+// The session and invocation identify one turn of one conversation, which is
+// what the stale-snapshot gate holds against.
+func newProjectCtxIn(session, invocation string) *projectTestContext {
+	return &projectTestContext{
+		StrictContextMock: agent.StrictContextMock{Ctx: context.Background()},
+		session:           session, invocation: invocation,
+	}
+}
+
+func (c *projectTestContext) SessionID() string    { return c.session }
+func (c *projectTestContext) InvocationID() string { return c.invocation }
 
 func (*projectTestContext) ToolConfirmation() *toolconfirmation.ToolConfirmation { return nil }
 
@@ -56,19 +76,19 @@ func TestProjectToolsBindIdentityAndRecheckLiveGrants(t *testing.T) {
 		}
 	}
 	args := map[string]any{"project": "orders", "path": "main.go"}
-	out, err := reader.Run(&projectTestContext{}, args)
+	out, err := reader.Run(newProjectCtx(), args)
 	if err != nil || !strings.Contains(out["content"].(string), "package main") {
 		t.Fatal(out, err)
 	}
 	for _, path := range []string{"../secret", outside, "escape"} {
-		if _, err := reader.Run(&projectTestContext{}, map[string]any{"project": "orders", "path": path}); err == nil {
+		if _, err := reader.Run(newProjectCtx(), map[string]any{"project": "orders", "path": path}); err == nil {
 			t.Fatalf("accepted path %q", path)
 		}
 	}
 	foreign, _ := ProjectTools(store, "coordinator")
 	for _, tool := range foreign {
 		if tool.Name() == "read_project_file" {
-			if _, err := tool.(projectRunnable).Run(&projectTestContext{}, args); err == nil {
+			if _, err := tool.(projectRunnable).Run(newProjectCtx(), args); err == nil {
 				t.Fatal("coordinator inherited analyst permissions")
 			}
 		}
@@ -76,7 +96,7 @@ func TestProjectToolsBindIdentityAndRecheckLiveGrants(t *testing.T) {
 	if err := store.SetGrants("orders", nil); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := reader.Run(&projectTestContext{}, args); err == nil {
+	if _, err := reader.Run(newProjectCtx(), args); err == nil {
 		t.Fatal("already-built tool ignored revocation")
 	}
 }
@@ -135,7 +155,7 @@ func TestListCodeProjectsReportsConfiguredDirectories(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	out, err := runnableNamed(t, tools, "list_code_projects").Run(&projectTestContext{}, map[string]any{})
+	out, err := runnableNamed(t, tools, "list_code_projects").Run(newProjectCtx(), map[string]any{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -186,15 +206,15 @@ func TestProjectToolsEnforceTheConfiguredRange(t *testing.T) {
 	list := runnableNamed(t, tools, "list_project_dir")
 	grep := runnableNamed(t, tools, "grep_project_files")
 
-	if _, err := read.Run(&projectTestContext{}, map[string]any{"project": "orders", "path": "services/order/main.go"}); err != nil {
+	if _, err := read.Run(newProjectCtx(), map[string]any{"project": "orders", "path": "services/order/main.go"}); err != nil {
 		t.Fatal("in-range read failed:", err)
 	}
-	if _, err := read.Run(&projectTestContext{}, map[string]any{"project": "orders", "path": "services/pay/main.go"}); err == nil {
+	if _, err := read.Run(newProjectCtx(), map[string]any{"project": "orders", "path": "services/pay/main.go"}); err == nil {
 		t.Fatal("read escaped the configured directory")
 	}
 
 	// services/ is a navigation node: it shows the way down, not the siblings.
-	out, err := list.Run(&projectTestContext{}, map[string]any{"project": "orders", "path": "services"})
+	out, err := list.Run(newProjectCtx(), map[string]any{"project": "orders", "path": "services"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -202,7 +222,7 @@ func TestProjectToolsEnforceTheConfiguredRange(t *testing.T) {
 		t.Fatalf("browsing exposed sibling services: %v", names)
 	}
 
-	out, err = grep.Run(&projectTestContext{}, map[string]any{"project": "orders", "pattern": "Marker"})
+	out, err = grep.Run(newProjectCtx(), map[string]any{"project": "orders", "pattern": "Marker"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -258,7 +278,7 @@ func TestLegacyProjectStillReadsTheWholeRepository(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	out, err := runnableNamed(t, tools, "grep_project_files").Run(&projectTestContext{}, map[string]any{"project": "legacy", "pattern": "Marker"})
+	out, err := runnableNamed(t, tools, "grep_project_files").Run(newProjectCtx(), map[string]any{"project": "legacy", "pattern": "Marker"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -291,7 +311,7 @@ func TestListCodeProjectsReportsSnapshotAge(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	out, err := runnableNamed(t, tools, "list_code_projects").Run(&projectTestContext{}, map[string]any{})
+	out, err := runnableNamed(t, tools, "list_code_projects").Run(newProjectCtx(), map[string]any{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -349,7 +369,7 @@ func TestListProjectDirCarriesTheLabels(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	out, err := runnableNamed(t, tools, "list_project_dir").Run(&projectTestContext{}, map[string]any{"project": "silkworm", "path": "services"})
+	out, err := runnableNamed(t, tools, "list_project_dir").Run(newProjectCtx(), map[string]any{"project": "silkworm", "path": "services"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -402,7 +422,7 @@ func TestSearchProjectDirsFindsByNameAndTag(t *testing.T) {
 		return got
 	}
 
-	out, err := search.Run(&projectTestContext{}, map[string]any{"project": "silkworm", "query": "订单"})
+	out, err := search.Run(newProjectCtx(), map[string]any{"project": "silkworm", "query": "订单"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -411,7 +431,7 @@ func TestSearchProjectDirsFindsByNameAndTag(t *testing.T) {
 	}
 
 	// A tag is how "所有核心链路的服务" gets answered without reading code.
-	out, err = search.Run(&projectTestContext{}, map[string]any{"project": "silkworm", "tag": "核心链路"})
+	out, err = search.Run(newProjectCtx(), map[string]any{"project": "silkworm", "tag": "核心链路"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -420,7 +440,7 @@ func TestSearchProjectDirsFindsByNameAndTag(t *testing.T) {
 	}
 
 	// An empty result must not read as "the code does not exist".
-	out, err = search.Run(&projectTestContext{}, map[string]any{"project": "silkworm", "query": "库存"})
+	out, err = search.Run(newProjectCtx(), map[string]any{"project": "silkworm", "query": "库存"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -435,7 +455,7 @@ func TestListProjectTagsSummarizesTheCatalogue(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	out, err := runnableNamed(t, tools, "list_project_tags").Run(&projectTestContext{}, map[string]any{"project": "silkworm"})
+	out, err := runnableNamed(t, tools, "list_project_tags").Run(newProjectCtx(), map[string]any{"project": "silkworm"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -473,27 +493,27 @@ func TestProposeIsDraftOnlyAndScopeBound(t *testing.T) {
 	propose := runnableNamed(t, tools, "propose_project_dir_info")
 
 	// Outside the configured scope.
-	if _, err := propose.Run(&projectTestContext{}, map[string]any{
+	if _, err := propose.Run(newProjectCtx(), map[string]any{
 		"project": "silkworm", "directories": []any{map[string]any{"path": "services/pay", "name": "支付服务"}},
 	}); err == nil {
 		t.Fatal("proposed a label for a directory the project cannot read")
 	}
 	// A path that does not exist in the snapshot.
-	if _, err := propose.Run(&projectTestContext{}, map[string]any{
+	if _, err := propose.Run(newProjectCtx(), map[string]any{
 		"project": "silkworm", "directories": []any{map[string]any{"path": "services/order/nope", "name": "无中生有"}},
 	}); err == nil {
 		t.Fatal("proposed a label for a directory that does not exist")
 	}
 	// An unassigned agent cannot propose at all.
 	foreign, _ := ProjectTools(store, "coordinator")
-	if _, err := runnableNamed(t, foreign, "propose_project_dir_info").Run(&projectTestContext{}, map[string]any{
+	if _, err := runnableNamed(t, foreign, "propose_project_dir_info").Run(newProjectCtx(), map[string]any{
 		"project": "silkworm", "directories": []any{map[string]any{"path": "services/order", "name": "x"}},
 	}); err == nil {
 		t.Fatal("an unassigned agent wrote a draft")
 	}
 
 	// A valid proposal lands as a draft and stays invisible to every read tool.
-	if _, err := propose.Run(&projectTestContext{}, map[string]any{
+	if _, err := propose.Run(newProjectCtx(), map[string]any{
 		"project": "silkworm",
 		"directories": []any{map[string]any{
 			"path": "services/order", "name": "订单服务（草稿）", "tags": []any{"核心链路"},
@@ -501,7 +521,7 @@ func TestProposeIsDraftOnlyAndScopeBound(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	out, err := runnableNamed(t, tools, "search_project_dirs").Run(&projectTestContext{}, map[string]any{"project": "silkworm", "query": "订单"})
+	out, err := runnableNamed(t, tools, "search_project_dirs").Run(newProjectCtx(), map[string]any{"project": "silkworm", "query": "订单"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -513,7 +533,7 @@ func TestProposeIsDraftOnlyAndScopeBound(t *testing.T) {
 	if _, err := store.ResolveDrafts("silkworm", nil, nil, true); err != nil {
 		t.Fatal(err)
 	}
-	out, _ = runnableNamed(t, tools, "search_project_dirs").Run(&projectTestContext{}, map[string]any{"project": "silkworm", "query": "订单"})
+	out, _ = runnableNamed(t, tools, "search_project_dirs").Run(newProjectCtx(), map[string]any{"project": "silkworm", "query": "订单"})
 	if raw, _ := json.Marshal(out); !strings.Contains(string(raw), "订单服务") {
 		t.Fatalf("accepted draft never became an annotation: %s", raw)
 	}
@@ -534,7 +554,7 @@ func TestEmptyProjectListNamesTheIdentityItWasCheckedAgainst(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	out, err := runnableNamed(t, tools, "list_code_projects").Run(&projectTestContext{}, map[string]any{})
+	out, err := runnableNamed(t, tools, "list_code_projects").Run(newProjectCtx(), map[string]any{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -550,7 +570,7 @@ func TestEmptyProjectListNamesTheIdentityItWasCheckedAgainst(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	out, err = runnableNamed(t, granted, "list_code_projects").Run(&projectTestContext{}, map[string]any{})
+	out, err = runnableNamed(t, granted, "list_code_projects").Run(newProjectCtx(), map[string]any{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -571,8 +591,160 @@ func TestEmptyProjectListNamesTheIdentityItWasCheckedAgainst(t *testing.T) {
 	}
 	// The denial names the caller too: the merged "不存在/未授权/已过期" message
 	// is what makes this unreadable from the transcript alone.
-	_, err = runnableNamed(t, tools, "list_project_dir").Run(&projectTestContext{}, map[string]any{"project": "silkworm"})
+	_, err = runnableNamed(t, tools, "list_project_dir").Run(newProjectCtx(), map[string]any{"project": "silkworm"})
 	if err == nil || !strings.Contains(err.Error(), "OrchestrationAgent") {
 		t.Fatalf("denial = %v, want the asking identity named", err)
+	}
+}
+
+// The agent's side of "代码该更新了": it can file the ask, with a reason the
+// person will read, and it cannot pull anything itself.
+func TestRequestProjectSyncFilesAnAskAndPullsNothing(t *testing.T) {
+	store := seedProject(t, codeproject.Project{
+		ID: "Silkworm", Name: "Silkworm", URL: "https://git.example.com/silkworm.git",
+		Branch: "master", Grants: []codeproject.Grant{{Agent: "CodeAnalyzer"}},
+	})
+	tools, err := ProjectTools(store, "CodeAnalyzer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := runnableNamed(t, tools, "request_project_sync")
+
+	if _, err := req.Run(newProjectCtx(), map[string]any{"project": "Silkworm"}); err == nil {
+		t.Error("没有理由也能提交：用户看到的就只有这句话")
+	}
+	out, err := req.Run(newProjectCtx(), map[string]any{"project": "Silkworm", "reason": "要回答最近的改动"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out["status"].(string), "等待用户") {
+		t.Errorf("返回没有说清楚这只是个请求：%v", out)
+	}
+	ps, err := store.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := ps[0].SyncRequest
+	if got == nil || got.Agent != "CodeAnalyzer" || got.Reason != "要回答最近的改动" {
+		t.Fatalf("请求没有落到项目上：%+v", got)
+	}
+	if ps[0].SyncState == codeproject.SyncRunning || ps[0].SyncState == codeproject.SyncQueued {
+		t.Errorf("提请求顺手把同步也启动了：%q", ps[0].SyncState)
+	}
+	// Another agent holding no grant cannot put a card on this project's page.
+	foreign, err := ProjectTools(store, "OrchestrationAgent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runnableNamed(t, foreign, "request_project_sync").Run(newProjectCtx(),
+		map[string]any{"project": "Silkworm", "reason": "帮个忙"}); err == nil {
+		t.Error("未分配的 Agent 也能提请求")
+	}
+}
+
+// The gate. A conversation that is told its snapshot is behind must ask before
+// it analyses — not after 112k tokens of reading the stale tree, with the
+// question at the bottom where it can no longer change anything.
+func TestStaleSnapshotHoldsTheTurnUntilTheUserIsAsked(t *testing.T) {
+	store := seedProject(t, codeproject.Project{
+		ID: "Silkworm", Name: "Silkworm", URL: "https://git.example.com/silkworm.git", Branch: "master",
+		Revision: "e33c30622411aaaabbbbccccddddeeeeffff0000",
+		Grants:   []codeproject.Grant{{Agent: "CodeAnalyzer"}},
+	})
+	store.SetAutoProbe(true)
+	store.SeedRemoteProbeForTest("Silkworm", codeproject.RemoteStatus{
+		Local:  "e33c30622411aaaabbbbccccddddeeeeffff0000",
+		Remote: "5f2720774f4b1111222233334444555566667777",
+		Behind: true,
+	})
+	tools, err := ProjectTools(store, "CodeAnalyzer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	list := runnableNamed(t, tools, "list_code_projects")
+	read := runnableNamed(t, tools, "list_project_dir")
+	args := map[string]any{"project": "Silkworm", "path": "services/order"}
+
+	// Turn one: the listing reports the staleness and closes the door.
+	out, err := list.Run(newProjectCtxIn("chat-1", "inv-1"), map[string]any{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := json.Marshal(out)
+	if !strings.Contains(string(raw), `"needs_sync":true`) {
+		t.Fatalf("没有报出落后：%s", raw)
+	}
+	_, err = read.Run(newProjectCtxIn("chat-1", "inv-1"), args)
+	if err == nil {
+		t.Fatal("被告知快照落后之后，本轮仍然读到了代码")
+	}
+	if !strings.Contains(err.Error(), "要不要现在同步") {
+		t.Fatalf("拒绝没有说清楚该做什么：%v", err)
+	}
+
+	// Turn two carries whatever the person answered, so analysis proceeds —
+	// including when the answer was "不用同步".
+	if _, err := read.Run(newProjectCtxIn("chat-1", "inv-2"), args); err != nil {
+		t.Fatalf("用户已经回答过，下一轮却还在拦：%v", err)
+	}
+	// And a second listing must not re-arm: that would ask the same question
+	// on every turn of the conversation.
+	if _, err := list.Run(newProjectCtxIn("chat-1", "inv-2"), map[string]any{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := read.Run(newProjectCtxIn("chat-1", "inv-2"), args); err != nil {
+		t.Fatalf("同一个会话被反复拦住：%v", err)
+	}
+	// A different conversation gets its own one question.
+	if _, err := list.Run(newProjectCtxIn("chat-2", "inv-9"), map[string]any{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := read.Run(newProjectCtxIn("chat-2", "inv-9"), args); err == nil {
+		t.Fatal("另一个会话没有被问")
+	}
+}
+
+// Confirming a sync must not hand the turn back to the person: they said "更新
+// 一下再看", and the answer to "再看" should arrive in the same breath. So the
+// tool waits for the pull and reports what happened — including when it failed,
+// which is the case a fixture can drive without a git server.
+func TestSyncProjectWaitsForThePullToFinish(t *testing.T) {
+	store := seedProject(t, codeproject.Project{
+		// Nothing listens here, so the pull fails at once instead of leaving a
+		// clone running past the test.
+		ID: "Silkworm", Name: "Silkworm", URL: "https://127.0.0.1:1/silkworm.git",
+		Branch: "master", Grants: []codeproject.Grant{{Agent: "CodeAnalyzer"}},
+	})
+	tools, err := ProjectTools(store, "CodeAnalyzer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := runnableNamed(t, tools, "sync_project").Run(newProjectCtx(), map[string]any{"project": "Silkworm"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out["synced"] != false {
+		t.Errorf("同步失败却报成已完成：%v", out)
+	}
+	status, _ := out["status"].(string)
+	if !strings.Contains(status, "同步失败") {
+		t.Errorf("没有把失败讲清楚：%q", status)
+	}
+	// It waited: the pull is over by the time the tool returned, which is what
+	// lets the model keep analysing in the same turn.
+	ps, err := store.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ps[0].SyncState != codeproject.SyncFailed {
+		t.Errorf("工具在同步结束前就返回了：state=%q", ps[0].SyncState)
+	}
+	// And an agent without the grant never gets that far.
+	foreign, err := ProjectTools(store, "OrchestrationAgent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runnableNamed(t, foreign, "sync_project").Run(newProjectCtx(), map[string]any{"project": "Silkworm"}); err == nil {
+		t.Error("未分配的 Agent 拉起了同步")
 	}
 }

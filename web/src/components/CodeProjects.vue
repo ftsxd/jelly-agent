@@ -151,6 +151,23 @@ async function sync(project) {
   } catch (e) { error.value = e.message }
   finally { syncing.delete(project.id); await refresh().catch(e => { error.value = e.message }) }
 }
+// An agent can ask for a pull but cannot run one. This is where that ask gets
+// answered — approving starts exactly the sync the button above would.
+async function resolveSyncRequest(project, approve) {
+  if (syncing.has(project.id)) return
+  syncing.add(project.id); error.value = ''; notice.value = ''
+  try {
+    if (approve) {
+      await api.approveCodeProjectSync(project.id)
+      delete remote[project.id]
+      notice.value = `${project.name} 已在后台同步，关闭页面不会中断。`
+    } else {
+      await api.rejectCodeProjectSync(project.id)
+      notice.value = `已忽略 ${project.name} 的同步请求。`
+    }
+  } catch (e) { error.value = e.message }
+  finally { syncing.delete(project.id); await refresh().catch(e => { error.value = e.message }) }
+}
 function openAssign(p) {
   assigning.value = p.id; chosenAgent.value = assignedTo(p)[0] || ''
   editing.value = null; deleting.value = null; error.value = ''; notice.value = ''
@@ -310,6 +327,19 @@ async function remove(p) {
         <template v-else-if="remote[p.id].behind"><span class="badge badge-warn">远端已更新</span> 远端 <code>{{ remote[p.id].remote_revision.slice(0, 12) }}</code>，本地还是 <code>{{ (remote[p.id].local_revision || '').slice(0, 12) || '无' }}</code>，同步一下再分析。</template>
         <template v-else><span class="badge badge-ok">已是最新</span> 与远端 <code>{{ remote[p.id].remote_revision.slice(0, 12) }}</code> 一致。</template>
       </div>
+      <div v-if="p.sync_request" class="inline-panel sync-request" role="alert">
+        <p><span class="badge badge-warn">待确认</span> <strong>{{ p.sync_request.agent }}</strong> 请求同步这个项目的代码。</p>
+        <p class="reason">{{ p.sync_request.reason }}</p>
+        <p v-if="p.sync_request.remote_revision" class="muted tiny">
+          远端 <code>{{ p.sync_request.remote_revision.slice(0, 12) }}</code>
+          <template v-if="p.sync_request.local_revision">，本地 <code>{{ p.sync_request.local_revision.slice(0, 12) }}</code></template>
+          · 请求于 {{ fmt(p.sync_request.requested_at) }}
+        </p>
+        <div class="actions">
+          <button class="btn" :disabled="busy(p) || saving" @click="resolveSyncRequest(p, false)">忽略</button>
+          <button class="btn btn-primary" :disabled="busy(p) || saving" @click="resolveSyncRequest(p, true)">同意并同步</button>
+        </div>
+      </div>
       <div class="dir-summary">
         <strong>可分析目录</strong>
         <span class="badge mono" :title="p.directory_metadata?.[p.root_path || '.']?.description">
@@ -439,6 +469,8 @@ small { font-size: 12px; color: var(--text-dim); }
 .search-label { flex: 1; }
 .repo-url { margin: 12px 0; overflow-wrap: anywhere; color: var(--text-dim); font-size: 13px; }
 .meta { display: flex; gap: 16px; flex-wrap: wrap; font-size: 12px; color: var(--text-dim); }
+.sync-request .reason { margin: 6px 0; }
+.sync-request .actions { margin-top: 12px; }
 .grant-summary { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 18px; font-size: 13px; }
 .grant-summary strong { font-weight: 500; margin-right: 4px; }
 .project-actions { justify-content: flex-start; }

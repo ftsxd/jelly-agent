@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jelly-agent/jelly-agent/internal/codeproject"
 )
@@ -215,5 +216,83 @@ func TestAnnotatePromptSteersTowardBatchedSearches(t *testing.T) {
 	}
 	if !strings.Contains(got, "跳过") {
 		t.Error("prompt does not tell the agent to skip what it cannot justify")
+	}
+}
+
+// An agent's sync request is a card on the page, not a pull. Answering it is
+// what turns it into one — and refusing it must leave the snapshot alone.
+func TestSyncRequestIsAnsweredByAPerson(t *testing.T) {
+	s, _ := codeServer(t)
+	// A port nothing listens on: approving really does start a pull, and this
+	// way it fails immediately instead of leaving a clone running past the end
+	// of the test — which raced the temp directory cleanup.
+	create := `{"id":"orders","name":"订单服务","url":"https://127.0.0.1:1/orders.git","branch":"main"}`
+	if w := do(t, s, "POST", "/api/code-projects", create); w.Code != 200 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	if w := do(t, s, "PUT", "/api/code-projects/orders/grants", `{"grants":[{"agent":"root"}]}`); w.Code != 200 {
+		t.Fatal(w.Body.String())
+	}
+	store := s.engine().CodeProjects()
+	file := func() {
+		t.Helper()
+		if err := store.RequestSync("root", "orders", codeproject.SyncRequest{Reason: "要看最近的改动"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// The card is visible to the page, with the reason on it.
+	file()
+	w := do(t, s, "GET", "/api/code-projects", "")
+	if !strings.Contains(w.Body.String(), "要看最近的改动") {
+		t.Fatalf("页面看不到这个请求：%s", w.Body.String())
+	}
+
+	// Refused: the card goes away and nothing was pulled.
+	if w := do(t, s, "DELETE", "/api/code-projects/orders/sync-request", ""); w.Code != 200 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	ps, err := store.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ps[0].SyncRequest != nil {
+		t.Error("忽略之后请求还在")
+	}
+	if ps[0].SyncState != "" {
+		t.Errorf("忽略请求却动了同步状态：%q", ps[0].SyncState)
+	}
+
+	// Approved: the card goes away and the pull is under way.
+	file()
+	w = do(t, s, "POST", "/api/code-projects/orders/sync-request", `{}`)
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("同意没有启动同步：%d %s", w.Code, w.Body.String())
+	}
+	if ps, err = store.List(); err != nil {
+		t.Fatal(err)
+	}
+	if ps[0].SyncRequest != nil {
+		t.Error("同意之后请求还挂在页面上")
+	}
+	// Not the task id: the pull runs in the background and a fast failure
+	// clears the id before this line reads it. That a pull was started — and
+	// then finished — is the durable fact.
+	if ps[0].SyncState == "" {
+		t.Error("同意之后没有启动同步")
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		ps, err = store.List()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ps[0].SyncState == codeproject.SyncFailed || ps[0].SyncState == codeproject.SyncSucceeded {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("同步既没成功也没失败，停在 %q", ps[0].SyncState)
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }

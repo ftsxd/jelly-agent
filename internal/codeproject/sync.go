@@ -42,6 +42,45 @@ func (s *Store) StartSync(id string) (string, error) {
 	return taskID, nil
 }
 
+// StartSyncFor is StartSync for an agent, which may only pull a project
+// assigned to it.
+//
+// The grant is the only thing checked here. Whether the person actually agreed
+// is not something this layer can know — the tool that calls it says so in its
+// description, and the conversation is the record. What this does guarantee is
+// that an agent cannot pull a repository it was never given.
+func (s *Store) StartSyncFor(agent, id string) (string, error) {
+	s.mu.RLock()
+	ps, err := s.read()
+	s.mu.RUnlock()
+	if err != nil {
+		return "", err
+	}
+	for _, p := range ps {
+		if p.ID == id && allowed(p, agent) {
+			return s.StartSync(id)
+		}
+	}
+	return "", fmt.Errorf("%w（当前 Agent：%s）", ErrDenied, agent)
+}
+
+// SyncStateFor reports where a pull has got to, for an agent waiting on one.
+// Grant-checked like every other agent-facing read.
+func (s *Store) SyncStateFor(agent, id string) (state, revision, lastErr string, err error) {
+	s.mu.RLock()
+	ps, rerr := s.read()
+	s.mu.RUnlock()
+	if rerr != nil {
+		return "", "", "", rerr
+	}
+	for _, p := range ps {
+		if p.ID == id && allowed(p, agent) {
+			return p.SyncState, p.Revision, p.LastError, nil
+		}
+	}
+	return "", "", "", fmt.Errorf("%w（当前 Agent：%s）", ErrDenied, agent)
+}
+
 // Sync pulls synchronously. The HTTP path uses StartSync; this stays for tests
 // and for any caller that genuinely wants to wait.
 func (s *Store) Sync(ctx context.Context, id string) error {
@@ -135,6 +174,10 @@ func (s *Store) perform(ctx context.Context, p Project, taskID string, limits Li
 			ps[i].SyncedAt = &now
 			ps[i].LastError = ""
 			ps[i].DirIssues = issues
+			// Whatever an agent was waiting for, this is it. Leaving the card
+			// up after the pull would ask the operator to approve a sync that
+			// already happened.
+			ps[i].SyncRequest = nil
 		}
 		if err = s.write(ps); err != nil {
 			s.removeSnapshot(snapshot)
@@ -335,11 +378,96 @@ type RemoteStatus struct {
 	Behind bool   `json:"behind"`
 }
 
+// Probe ages. A snapshot that just went stale is worth knowing about within
+// minutes, not seconds; a remote that cannot be reached is worth retrying
+// sooner than that, but not on every turn.
+const (
+	RemoteProbeTTL    = 5 * time.Minute
+	remoteProbeErrTTL = 30 * time.Second
+)
+
 // CheckRemote asks the server for the branch head without downloading anything.
 // One ls-remote is about a second against a real monorepo, where the clone it
 // would otherwise take to find out is 352 MB — so "am I current" is a question
 // worth answering separately from "make me current".
+//
+// Always goes to the remote: this is the console's 检查更新 button, and a
+// person who clicks it is asking for the current answer.
 func (s *Store) CheckRemote(ctx context.Context, id string) (RemoteStatus, error) {
+	return s.CheckRemoteCached(ctx, id, 0)
+}
+
+// CheckRemoteCached answers from the last probe when it is younger than maxAge,
+// and otherwise asks the remote and remembers the answer. maxAge of 0 always
+// asks.
+//
+// Failures are remembered too, for a shorter while: an unreachable git server
+// or an expired token fails the same way on every retry, and the agent path
+// calls this at the start of every analysis.
+func (s *Store) CheckRemoteCached(ctx context.Context, id string, maxAge time.Duration) (RemoteStatus, error) {
+	if maxAge > 0 {
+		s.probeMu.Lock()
+		e, ok := s.probes[id]
+		s.probeMu.Unlock()
+		if ok {
+			ttl := maxAge
+			if e.err != nil {
+				ttl = min(maxAge, remoteProbeErrTTL)
+			}
+			if time.Since(e.at) < ttl {
+				return e.st, e.err
+			}
+		}
+	}
+	st, err := s.checkRemote(ctx, id)
+	s.probeMu.Lock()
+	if s.probes == nil {
+		s.probes = map[string]remoteProbe{}
+	}
+	s.probes[id] = remoteProbe{st: st, err: err, at: time.Now()}
+	s.probeMu.Unlock()
+	return st, err
+}
+
+// CheckRemoteFor is CheckRemoteCached for an agent, which may only ask about a
+// project assigned to it. The grant is checked here for the same reason the
+// read tools check it on every call: an assignment can be withdrawn while a
+// conversation is still going.
+func (s *Store) CheckRemoteFor(ctx context.Context, agent, id string, maxAge time.Duration) (RemoteStatus, error) {
+	s.probeMu.Lock()
+	on := s.autoProbe
+	s.probeMu.Unlock()
+	if !on {
+		return RemoteStatus{}, ErrProbeOff
+	}
+	s.mu.RLock()
+	ps, err := s.read()
+	s.mu.RUnlock()
+	if err != nil {
+		return RemoteStatus{}, err
+	}
+	for _, p := range ps {
+		if p.ID == id && allowed(p, agent) {
+			return s.CheckRemoteCached(ctx, id, maxAge)
+		}
+	}
+	return RemoteStatus{}, fmt.Errorf("%w（当前 Agent：%s）", ErrDenied, agent)
+}
+
+// SeedRemoteProbeForTest plants a freshness answer, so a test can exercise the
+// "snapshot is behind" path without standing up a git server — the repository
+// URL is required to be HTTPS, which is what stops a local fixture repo from
+// standing in for one. Nothing in production calls it.
+func (s *Store) SeedRemoteProbeForTest(id string, st RemoteStatus) {
+	s.probeMu.Lock()
+	defer s.probeMu.Unlock()
+	if s.probes == nil {
+		s.probes = map[string]remoteProbe{}
+	}
+	s.probes[id] = remoteProbe{st: st, at: time.Now()}
+}
+
+func (s *Store) checkRemote(ctx context.Context, id string) (RemoteStatus, error) {
 	s.mu.RLock()
 	var p *Project
 	ps, err := s.read()

@@ -26,10 +26,14 @@ func BuiltinMetadata() toolreg.Source {
 			// Project reads deliberately keep Idempotent false: a live grant or
 			// snapshot may change between calls, so each must reach the handler.
 			{
-				Name: "list_code_projects", Description: "列出当前 Agent 获得授权的代码项目和版本。",
+				Name: "list_code_projects", Description: "列出当前 Agent 获得授权的代码项目和版本，并核对快照是否落后于远端。",
 				Suites: []string{"code-analysis"}, Tags: []string{"代码", "项目", "仓库", "分析"},
-				Produces: ops.KindText, Latency: ops.LatencyFast, SideEffect: ops.SideEffectReadOnly,
-				ParallelSafe: true, Fallback: true, Timeout: 5 * time.Second,
+				Produces: ops.KindText, Latency: ops.LatencyMedium, SideEffect: ops.SideEffectReadOnly,
+				// The timeout covers the remote freshness probe, which is a
+				// network round trip to the git server. The old 5s ceiling
+				// killed the first listing after the probe cache expired — and
+				// a listing that dies reads to the model as "没有任何授权项目".
+				ParallelSafe: true, Fallback: true, Timeout: 20 * time.Second,
 			},
 			{
 				Name: "read_project_file", Description: "按行读取已授权项目的代码文件，分析具体实现。",
@@ -81,6 +85,58 @@ func BuiltinMetadata() toolreg.Source {
 					"没有实际读过该目录的代码、只能靠目录名猜测时",
 				},
 				Suites: []string{"code-analysis"}, Tags: []string{"代码", "目录", "标注", "标签", "项目"},
+				Produces: ops.KindText, Latency: ops.LatencyFast, SideEffect: ops.SideEffectMutating,
+				Timeout: 15 * time.Second,
+			},
+			{
+				Name:        "check_project_updates",
+				Description: "现查远端分支头，确认项目快照是否仍与远端一致。",
+				UseCases:    []string{"用户说刚同步过，要确认", "上一次远端核对失败后重试"},
+				AntiExamples: []string{
+					"list_code_projects 刚给出过 needs_sync 时（那次已经查过，结果一样）",
+					"问题与代码版本新旧无关时",
+				},
+				Suites: []string{"code-analysis"}, Tags: []string{"代码", "项目", "同步", "版本", "更新"},
+				Produces: ops.KindText, Latency: ops.LatencyMedium, SideEffect: ops.SideEffectReadOnly,
+				ParallelSafe: true, Timeout: 20 * time.Second,
+			},
+			{
+				// The one project tool that changes what every later answer
+				// reads: it replaces the snapshot. Risky rather than merely
+				// mutating would overstate it — the previous snapshot is a
+				// pull away — but it is emphatically not read-only.
+				Name:        "sync_project",
+				Description: "把项目代码同步到远端最新版本并等待完成；必须先问过用户并得到确认。",
+				UseCases: []string{
+					"用户在对话里回复确认要同步",
+					"用户直接要求更新某个项目的代码",
+				},
+				AntiExamples: []string{
+					"用户还没表态时（先问）",
+					"快照已经和远端一致时",
+					"用户只是问代码内容、不关心版本新旧时",
+				},
+				Suites: []string{"code-analysis"}, Tags: []string{"代码", "项目", "同步", "更新", "拉取"},
+				Produces: ops.KindText, Latency: ops.LatencySlow, SideEffect: ops.SideEffectMutating,
+				// Covers the in-tool wait (3 minutes) plus the pull's own
+				// startup. A ceiling under the wait would kill the call at the
+				// exact moment the clone is about to land.
+				Timeout: 4 * time.Minute,
+			},
+			{
+				// Mutating for the same reason propose_project_dir_info is: it
+				// writes a card onto the code page. It still pulls nothing —
+				// the person who answers the card does.
+				Name:        "request_project_sync",
+				Description: "在代码页面留一张同步请求卡片，供用户稍后确认；用于没有用户在对话里的场景。",
+				UseCases: []string{
+					"定时任务或后台巡检发现快照落后，没人可以当面问",
+				},
+				AntiExamples: []string{
+					"正在和用户对话时（直接问一句，确认后用 sync_project）",
+					"快照与远端一致时",
+				},
+				Suites: []string{"code-analysis"}, Tags: []string{"代码", "项目", "同步", "更新", "请求"},
 				Produces: ops.KindText, Latency: ops.LatencyFast, SideEffect: ops.SideEffectMutating,
 				Timeout: 15 * time.Second,
 			},

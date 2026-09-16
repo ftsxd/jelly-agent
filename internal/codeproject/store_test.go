@@ -730,3 +730,78 @@ func TestRepoKeyTreatsTheSameRepositorySpelledTwoWaysAsOne(t *testing.T) {
 		t.Error("different repositories collapsed to one key")
 	}
 }
+
+// An agent may ask for a pull and may not perform one. The ask is a write, and
+// it is the only write an agent reaches here — so it has to be gated by the
+// same live grant as reading, and it must not do anything by itself.
+func TestSyncRequestNeedsTheGrantAndRunsNothing(t *testing.T) {
+	s := Open(t.TempDir())
+	p := testProject()
+	p.Grants = []Grant{{Agent: "analyst"}}
+	if err := s.Save(p); err != nil {
+		t.Fatal(err)
+	}
+	seedSnapshot(t, s)
+
+	if err := s.RequestSync("coordinator", p.ID, SyncRequest{Reason: "要看最近的改动"}); !errors.Is(err, ErrDenied) {
+		t.Fatalf("未分配的 Agent 也能提请求: %v", err)
+	}
+	if err := s.RequestSync("analyst", p.ID, SyncRequest{Reason: "要看最近的改动", Remote: "newhead"}); err != nil {
+		t.Fatal(err)
+	}
+	ps, _ := s.read()
+	got := ps[0].SyncRequest
+	if got == nil || got.Agent != "analyst" || got.Reason != "要看最近的改动" || got.Remote != "newhead" {
+		t.Fatalf("请求没有按提交的内容记下来: %+v", got)
+	}
+	if got.RequestedAt.IsZero() {
+		t.Error("请求没有记录时间，页面无从判断它有多旧")
+	}
+	// Nothing was pulled: the revision and snapshot are untouched.
+	if ps[0].Revision != "old" || ps[0].SyncState == SyncRunning {
+		t.Fatalf("提请求动到了实际同步状态: revision=%q state=%q", ps[0].Revision, ps[0].SyncState)
+	}
+	if err := s.ClearSyncRequest(p.ID); err != nil {
+		t.Fatal(err)
+	}
+	if ps, _ = s.read(); ps[0].SyncRequest != nil {
+		t.Error("请求没有被清掉")
+	}
+}
+
+// The probe is off until the engine turns it on, so a store opened by anything
+// else never shells out to git behind the caller's back.
+func TestRemoteProbeIsOffUntilEnabled(t *testing.T) {
+	s := Open(t.TempDir())
+	p := testProject()
+	p.Grants = []Grant{{Agent: "analyst"}}
+	if err := s.Save(p); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CheckRemoteFor(context.Background(), "analyst", p.ID, time.Minute); !errors.Is(err, ErrProbeOff) {
+		t.Fatalf("默认就去连远端了: %v", err)
+	}
+	s.SetAutoProbe(true)
+	if _, err := s.CheckRemoteFor(context.Background(), "coordinator", p.ID, time.Minute); !errors.Is(err, ErrDenied) {
+		t.Fatalf("打开后未分配的 Agent 也能核对远端: %v", err)
+	}
+}
+
+// Confirmation happens in the conversation, so the pull itself is a tool call.
+// What this layer still owes is the grant: an agent may only pull a project
+// that was assigned to it.
+func TestStartSyncForNeedsTheGrant(t *testing.T) {
+	s := Open(t.TempDir())
+	p := testProject()
+	p.Grants = []Grant{{Agent: "analyst"}}
+	if err := s.Save(p); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.StartSyncFor("coordinator", p.ID); !errors.Is(err, ErrDenied) {
+		t.Fatalf("未分配的 Agent 拉起了同步: %v", err)
+	}
+	ps, _ := s.read()
+	if ps[0].SyncTaskID != "" || ps[0].SyncState != "" {
+		t.Fatalf("被拒绝的调用仍然动了同步状态: %+v", ps[0])
+	}
+}

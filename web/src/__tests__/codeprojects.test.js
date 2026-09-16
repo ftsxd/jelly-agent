@@ -7,7 +7,7 @@ vi.mock('../api', () => ({ api: {
   codeProjects: vi.fn(), agents: vi.fn(), saveCodeProject: vi.fn(),
   grantCodeProject: vi.fn(), syncCodeProject: vi.fn(), deleteCodeProject: vi.fn(),
   checkCodeProjectUpdate: vi.fn(), setCodeProjectAnnotation: vi.fn(), resolveCodeProjectDrafts: vi.fn(),
-  annotateCodeProject: vi.fn(),
+  annotateCodeProject: vi.fn(), approveCodeProjectSync: vi.fn(), rejectCodeProjectSync: vi.fn(),
 } }))
 let app, host
 const project = { id: 'orders', name: '订单服务', url: 'https://git.example.com/orders.git', branch: 'main', grants: [] }
@@ -175,5 +175,27 @@ describe('code project management', () => {
     reject(new Error('仓库无法访问')); await settle()
     expect(host.querySelector('[role="alert"]').textContent).toContain('仓库无法访问')
     expect(button('首次同步').disabled).toBe(false)
+  })
+
+  // An agent can say the snapshot is stale; pulling is still a person's click.
+  it('shows an agent sync request with its reason, and only syncs when approved', async () => {
+    const asked = {
+      ...project, synced_at: new Date().toISOString(), revision: 'e33c30622411aaa',
+      sync_request: { agent: 'CodeAnalyzer', reason: '要回答最近的改动', remote_revision: '5f2720774f4bbbb', local_revision: 'e33c30622411aaa', requested_at: new Date().toISOString() },
+    }
+    await mount([asked])
+    expect(host.textContent).toContain('CodeAnalyzer')
+    expect(host.textContent).toContain('要回答最近的改动')
+    expect(host.textContent).toContain('5f2720774f4b')
+
+    api.rejectCodeProjectSync.mockResolvedValue({ ok: true })
+    await click('忽略')
+    expect(api.rejectCodeProjectSync).toHaveBeenCalledWith('orders')
+    expect(api.syncCodeProject).not.toHaveBeenCalled()
+
+    await mount([asked])
+    api.approveCodeProjectSync.mockResolvedValue({ ok: true, task_id: 't1' })
+    await click('同意并同步')
+    expect(api.approveCodeProjectSync).toHaveBeenCalledWith('orders')
   })
 })

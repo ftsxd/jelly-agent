@@ -155,6 +155,34 @@ func (s *Server) handleSyncCodeProject(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, map[string]any{"ok": true, "task_id": taskID})
 }
 
+// handleResolveSyncRequest answers an agent's ask that a project be pulled.
+//
+// Approval is a person's click, not a tool call: the pull uses the stored
+// credential, takes minutes on a monorepo and replaces the tree that every
+// later answer cites. The agent can say a snapshot is stale and why — which is
+// the part it is actually in a position to know — and the decision stays here.
+func (s *Server) handleResolveSyncRequest(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	store := s.engineFor(r).CodeProjects()
+	approve := r.Method == http.MethodPost
+	// Cleared first either way: an approval that starts the pull and then
+	// fails to clear would leave a card asking for something already running.
+	if err := store.ClearSyncRequest(id); err != nil {
+		projectError(w, err)
+		return
+	}
+	if !approve {
+		writeJSON(w, 200, map[string]any{"ok": true, "approved": false})
+		return
+	}
+	taskID, err := store.StartSync(id)
+	if err != nil {
+		projectError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]any{"ok": true, "approved": true, "task_id": taskID})
+}
+
 // Annotations are edited one row at a time rather than as one big document:
 // a monorepo project can hold a label per service, and resending the whole
 // catalogue to rename one of them is the kind of thing that silently drops the

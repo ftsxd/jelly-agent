@@ -406,6 +406,12 @@ type CodeProjects struct {
 	MaxSnapshotMB int `mapstructure:"max_snapshot_mb" yaml:"max_snapshot_mb,omitempty"`
 	// MaxSnapshotFiles caps the file count. Default 200000.
 	MaxSnapshotFiles int `mapstructure:"max_snapshot_files" yaml:"max_snapshot_files,omitempty"`
+	// NoRemoteCheck stops agents from checking whether a snapshot is still the
+	// branch head. That check is one ls-remote per project per few minutes, but
+	// it does reach the git server from wherever the agent runs; a deployment
+	// that cannot allow that turns it off here. The console's 检查更新 button
+	// is unaffected — a person clicking it is asking on purpose.
+	NoRemoteCheck bool `mapstructure:"no_remote_check" yaml:"no_remote_check,omitempty"`
 }
 
 // Storage says which database holds the state everything shares: ADK's

@@ -232,6 +232,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PUT /api/code-projects/{id}/annotations", s.handleSetCodeProjectAnnotation)
 	mux.HandleFunc("POST /api/code-projects/{id}/drafts", s.handleResolveCodeProjectDrafts)
 	mux.HandleFunc("POST /api/code-projects/{id}/annotate", s.handleAnnotateCodeProject)
+	mux.HandleFunc("POST /api/code-projects/{id}/sync-request", s.handleResolveSyncRequest)
+	mux.HandleFunc("DELETE /api/code-projects/{id}/sync-request", s.handleResolveSyncRequest)
 	mux.HandleFunc("GET /api/files", s.handleFiles)
 	mux.HandleFunc("POST /api/files", s.handleSetFiles)
 	mux.HandleFunc("GET /api/sandbox", s.handleSandbox)
