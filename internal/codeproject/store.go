@@ -109,6 +109,14 @@ type Project struct {
 	TokenEnv string  `json:"token_env,omitempty"`
 	Grants   []Grant `json:"grants"`
 
+	// HistoryDepth overrides how many commits this project's sync keeps, and
+	// therefore how far back its history tools can look. Per project because
+	// the right answer is not a property of the deployment: a 400 MB monorepo
+	// where fifty commits is already a big fetch and a small service where
+	// five hundred costs nothing both live behind the same server. 0 means
+	// follow files.code_projects.history_depth.
+	HistoryDepth int `json:"history_depth,omitempty"`
+
 	// RootPath is the main analysis directory, repo-relative. "." (the zero
 	// value's meaning) is the whole repository, which is what every project
 	// created before this field existed gets.
@@ -229,10 +237,15 @@ type Limits struct {
 	SyncTimeout      time.Duration
 	MaxSnapshotBytes int64
 	MaxSnapshotFiles int
+	// HistoryDepth is how many commits each fetch keeps, and therefore how far
+	// back log/show/diff can see. It is not free — every commit in the window
+	// brings its own trees and blobs — but on top of a tip tree already
+	// downloaded it is the deltas of that many commits, not another clone.
+	HistoryDepth int
 }
 
 // DefaultLimits is sized for a full microservice monorepo checkout.
-var DefaultLimits = Limits{SyncTimeout: 30 * time.Minute, MaxSnapshotBytes: 2 << 30, MaxSnapshotFiles: 200000}
+var DefaultLimits = Limits{SyncTimeout: 30 * time.Minute, MaxSnapshotBytes: 2 << 30, MaxSnapshotFiles: 200000, HistoryDepth: DefaultHistoryDepth}
 
 type Store struct {
 	dir     string
@@ -249,6 +262,21 @@ type Store struct {
 	probeMu   sync.Mutex
 	probes    map[string]remoteProbe
 	autoProbe bool
+
+	// cacheLocks guards each project's object cache against the two moments a
+	// sync destroys objects rather than adding them: housekeeping's prune, and
+	// replacing a cache that failed its identity check. A history read is the
+	// only thing outside a sync that reads those objects, and it does not hold
+	// the project reservation the sync path relies on — without this, a git log
+	// that happens to land during the once-in-32-syncs gc reads a pack that is
+	// being rewritten under it. A fetch itself only adds objects and stays
+	// concurrent with readers: that is the common case and it must not block.
+	cacheLocks sync.Map // project id -> *sync.RWMutex
+}
+
+func (s *Store) cacheLock(id string) *sync.RWMutex {
+	v, _ := s.cacheLocks.LoadOrStore(id, &sync.RWMutex{})
+	return v.(*sync.RWMutex)
 }
 
 type remoteProbe struct {
@@ -271,6 +299,9 @@ func (s *Store) SetLimits(l Limits) {
 	}
 	if l.MaxSnapshotFiles > 0 {
 		s.limits.MaxSnapshotFiles = l.MaxSnapshotFiles
+	}
+	if l.HistoryDepth > 0 {
+		s.limits.HistoryDepth = min(l.HistoryDepth, maxHistoryDepth)
 	}
 }
 
@@ -402,6 +433,9 @@ func Validate(p Project) error {
 	}
 	if strings.ContainsAny(p.Username, "\r\n:") {
 		return fmt.Errorf("Git 用户名不能包含冒号或换行")
+	}
+	if p.HistoryDepth < 0 || p.HistoryDepth > maxHistoryDepth {
+		return fmt.Errorf("保留的提交历史请填 1–%d 之间的数字，留空表示按全局配置", maxHistoryDepth)
 	}
 	seen := map[string]bool{}
 	for _, g := range p.Grants {

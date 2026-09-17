@@ -748,3 +748,49 @@ func TestSyncProjectWaitsForThePullToFinish(t *testing.T) {
 		t.Error("未分配的 Agent 拉起了同步")
 	}
 }
+
+// History is code analysis, so it ships with the read tools rather than as an
+// opt-in extra — and it answers to the same gate. "最近有什么更新" is the exact
+// question a stale snapshot answers wrongly and convincingly, so a conversation
+// that has just been told the snapshot is behind must not reach for git log to
+// answer it either.
+func TestHistoryToolsShipWithTheReadToolsAndRespectTheGate(t *testing.T) {
+	store := seedProject(t, codeproject.Project{
+		ID: "Silkworm", Name: "Silkworm", URL: "https://git.example.com/silkworm.git", Branch: "master",
+		Revision: "a1b2c3d4e5f60000111122223333444455556666",
+		Grants:   []codeproject.Grant{{Agent: "CodeAnalyzer"}},
+	})
+	store.SetAutoProbe(true)
+	store.SeedRemoteProbeForTest("Silkworm", codeproject.RemoteStatus{
+		Local:  "a1b2c3d4e5f60000111122223333444455556666",
+		Remote: "9999888877776666555544443333222211110000",
+		Behind: true,
+	})
+	tools, err := ProjectTools(store, "CodeAnalyzer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runnableNamed(t, tools, "list_code_projects").Run(newProjectCtxIn("chat-1", "inv-1"), map[string]any{}); err != nil {
+		t.Fatal(err)
+	}
+	for name, args := range map[string]map[string]any{
+		"log_project_commits":    {"project": "Silkworm"},
+		"show_project_commit":    {"project": "Silkworm"},
+		"diff_project_revisions": {"project": "Silkworm", "from": "a1b2c3d4e5f6"},
+	} {
+		out, err := runnableNamed(t, tools, name).Run(newProjectCtxIn("chat-1", "inv-1"), args)
+		if err == nil {
+			t.Fatalf("%s 在快照落后的那一轮仍然作答了：%v", name, out)
+		}
+		if !strings.Contains(err.Error(), "要不要现在同步") {
+			t.Fatalf("%s 的拒绝没有说清楚该做什么：%v", name, err)
+		}
+	}
+	// A diff with nothing to compare against is a mistake worth naming, not a
+	// comparison against whatever the empty string resolves to. The schema
+	// catches an absent field; an empty one reaches the handler.
+	_, err = runnableNamed(t, tools, "diff_project_revisions").Run(newProjectCtxIn("chat-2", "inv-1"), map[string]any{"project": "Silkworm", "from": "  "})
+	if err == nil || !strings.Contains(err.Error(), "from 不能为空") {
+		t.Fatalf("diff 没有要求给出对比基准：%v", err)
+	}
+}

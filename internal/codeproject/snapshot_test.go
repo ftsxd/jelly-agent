@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -161,6 +162,11 @@ func TestIncrementalSyncHTTPS(t *testing.T) {
 	commands, _ := os.ReadFile(log)
 	if strings.Count(string(commands), " archive ") != 1 || strings.Count(string(commands), " init ") != 1 || strings.Count(string(commands), " fetch ") != 2 {
 		t.Fatalf("unchanged sync did not reuse the cache and snapshot:\n%s", commands)
+	}
+	// The fetch has to bring history, not just the tip. At depth 1 the code
+	// tools work and every "最近改了什么" is answered with an apology.
+	if !strings.Contains(string(commands), "--depth="+strconv.Itoa(DefaultLimits.HistoryDepth)) {
+		t.Fatalf("同步没有按配置的历史深度拉取:\n%s", commands)
 	}
 	write("main.go", "package updated\n")
 	write("new.go", "package newfile\n")

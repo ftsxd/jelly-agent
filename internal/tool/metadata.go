@@ -141,6 +141,55 @@ func BuiltinMetadata() toolreg.Source {
 				Timeout: 15 * time.Second,
 			},
 			{
+				// The history trio reads the object cache the sync already
+				// keeps: local disk, no network, no credential. Fast for the
+				// same reason grep is, and read-only in the strongest sense —
+				// nothing it runs can write to the repository.
+				Name:        "log_project_commits",
+				Description: "查看已授权项目的提交历史（git log），可按目录、时间、作者、关键词筛选。",
+				UseCases: []string{
+					"用户问某个服务最近有什么改动",
+					"要知道某个目录近期谁在改、改了什么",
+				},
+				AntiExamples: []string{
+					"问的是远端有没有新代码要拉（用 list_code_projects 的 needs_sync）",
+					"要看某一段代码现在长什么样（用 read_project_file）",
+				},
+				Suites: []string{"code-analysis"}, Tags: []string{"代码", "历史", "提交", "git", "项目", "分析"},
+				Produces: ops.KindText, Latency: ops.LatencyFast, SideEffect: ops.SideEffectReadOnly,
+				ParallelSafe: true, Timeout: 30 * time.Second,
+			},
+			{
+				Name:        "show_project_commit",
+				Description: "查看一个提交的作者、时间、提交信息、改动文件，以及可选的代码改动。",
+				UseCases: []string{
+					"log 里看到一个可疑提交，要看它具体做了什么",
+					"要确认某次改动碰了哪些文件",
+				},
+				AntiExamples: []string{
+					"还不知道是哪个提交时（先用 log_project_commits）",
+					"要比较两个版本时（用 diff_project_revisions）",
+				},
+				Suites: []string{"code-analysis"}, Tags: []string{"代码", "历史", "提交", "diff", "git", "项目"},
+				Produces: ops.KindText, Latency: ops.LatencyFast, SideEffect: ops.SideEffectReadOnly,
+				ParallelSafe: true, Timeout: 30 * time.Second,
+			},
+			{
+				Name:        "diff_project_revisions",
+				Description: "比较已授权项目两个提交之间的代码差异，可限定到具体目录或文件。",
+				UseCases: []string{
+					"排查某次上线前后代码差了什么",
+					"确认某个目录在两个版本之间的改动范围",
+				},
+				AntiExamples: []string{
+					"只关心单个提交时（用 show_project_commit）",
+					"两个版本里有一个早于本地同步深度时（先调深 history_depth 再同步）",
+				},
+				Suites: []string{"code-analysis"}, Tags: []string{"代码", "历史", "对比", "diff", "git", "项目"},
+				Produces: ops.KindText, Latency: ops.LatencyFast, SideEffect: ops.SideEffectReadOnly,
+				ParallelSafe: true, Timeout: 60 * time.Second,
+			},
+			{
 				Name:        "web_search",
 				Description: "搜索互联网获取实时信息。需要当前事实、新闻或本地知识以外的内容时使用；已知具体网址时改用 fetch_url。",
 				UseCases:    []string{"实时信息", "近期事件", "外部事实核查"},

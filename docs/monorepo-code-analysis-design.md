@@ -183,6 +183,7 @@
 | `files.code_projects.sync_timeout_sec` | 1800（30 分钟） | 180 | 3 分钟拉 400 MB 不够 |
 | `files.code_projects.max_snapshot_mb` | 2048 | 512 | Silkworm 已占 400 MB，贴着旧上限 |
 | `files.code_projects.max_snapshot_files` | 200000 | 100000 | 18119 文件尚有余量，一并对齐 |
+| `files.code_projects.history_depth` | 50 | 1（隐含） | 深度 1 意味着只有快照没有历史，`git log`/`diff` 无从答起 |
 
 超限的报错要指向可操作的下一步（调哪个配置项，或改用只含所需目录的项目），不是把内部错误原文抛给用户。
 
@@ -211,7 +212,9 @@ Silkworm 支付（services/silkworm_pay）→ PaymentAnalyst
 - 未同步时返回“尚未同步”，不读取空目录。
 - 取消或更换分配后，后续读取使用新的关联关系。
 
-沿用现有只读工具：`list_code_projects`、`list_project_dir`、`grep_project_files`、`read_project_file`。
+沿用现有只读工具：`list_code_projects`、`list_project_dir`、`grep_project_files`、`read_project_file`，以及读提交历史的 `log_project_commits`、`show_project_commit`、`diff_project_revisions`。
+
+历史工具读的是同步留下的裸对象缓存（快照里没有 `.git`），因此不联网、不用凭据；pathspec 同样钉死在配置目录上——diff 的内容就是文件本身，范围外的改动不出现在列表里，也不出现在 patch 里。能看多远由 `history_depth` 决定，结果里始终带着本地提交数与 `shallow` 标记，避免把同步深度说成仓库的全部历史。
 
 `list_code_projects` 返回项目中已配置目录的路径、业务名称、描述及主目录/参考目录角色。Agent 因此能将“订单服务”等业务叫法映射到实际路径，无需用户每次重述。仅返回当前已分配且可见目录的说明，且不返回仓库地址、凭据变量名和快照目录名。
 

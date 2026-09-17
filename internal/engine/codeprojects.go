@@ -26,6 +26,7 @@ func (e *Engine) CodeProjects() *codeproject.Store {
 		SyncTimeout:      time.Duration(c.SyncTimeoutSec) * time.Second,
 		MaxSnapshotBytes: int64(c.MaxSnapshotMB) << 20,
 		MaxSnapshotFiles: c.MaxSnapshotFiles,
+		HistoryDepth:     c.HistoryDepth,
 	})
 	return store
 }

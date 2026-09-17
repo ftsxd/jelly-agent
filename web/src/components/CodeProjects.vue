@@ -14,7 +14,7 @@ const editing = ref(null)
 const assigning = ref(null)
 const deleting = ref(null)
 const query = ref('')
-const blank = { id: '', name: '', url: '', branch: 'main', token_env: '', username: '', token: '', clear_token: false }
+const blank = { id: '', name: '', url: '', branch: 'main', history_depth: '', token_env: '', username: '', token: '', clear_token: false }
 const form = reactive({ ...blank })
 // dirs[0] is always the main analysis directory; the rest are references.
 const dirs = ref([{ path: '.', name: '', description: '' }])
@@ -115,6 +115,9 @@ function payload() {
   }
   const body = {
     id: form.id, name: form.name, url: form.url, branch: form.branch,
+    // Blank means "follow the global default", which is what the server reads
+    // a zero as — so an untouched field must not become a literal 0.
+    history_depth: Number(form.history_depth) || 0,
     token_env: form.token_env, username: form.username,
     root_path: rows[0].path || '.',
     reference_paths: rows.slice(1).map(d => d.path),
@@ -278,6 +281,7 @@ async function remove(p) {
         <label>项目标识<input class="input mono" v-model.trim="form.id" :disabled="editing !== ''" required pattern="[A-Za-z0-9_-]{1,80}" placeholder="silkworm-coupon" /><small>字母、数字、下划线或连字符，创建后不可修改</small></label>
         <label class="wide">Git 仓库地址<input class="input mono" v-model.trim="form.url" type="url" required placeholder="https://git.example.com/team/silkworm.git" /><small>支持 HTTPS 公有或私有仓库</small></label>
         <label>分支<input class="input mono" v-model.trim="form.branch" required placeholder="main" /></label>
+        <label>保留提交历史（选填）<input class="input mono" v-model.trim="form.history_depth" type="number" min="1" max="2000" placeholder="50" /><small>同步时往回多留几个提交，决定 Agent 用 <code>git log</code> / <code>diff</code> 能看到多久以前。留空按全局配置（默认 50）。快照始终只是最新版本，这里只影响对象缓存；<strong>调大后需要再同步一次才生效</strong>。</small></label>
         <label>访问令牌（私有仓库填写）
           <input class="input mono" type="password" v-model="form.token" autocomplete="new-password" :placeholder="tokenSaved ? '已保存，留空则不修改' : '粘贴 Git 平台的访问令牌'" />
           <small class="token-note">

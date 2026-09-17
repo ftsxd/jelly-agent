@@ -406,6 +406,13 @@ type CodeProjects struct {
 	MaxSnapshotMB int `mapstructure:"max_snapshot_mb" yaml:"max_snapshot_mb,omitempty"`
 	// MaxSnapshotFiles caps the file count. Default 200000.
 	MaxSnapshotFiles int `mapstructure:"max_snapshot_files" yaml:"max_snapshot_files,omitempty"`
+	// HistoryDepth is how many commits each sync keeps, and therefore how far
+	// back the history tools can look. Default 50, ceiling 2000. It buys
+	// log/show/diff for roughly the deltas of that many commits on top of a
+	// snapshot already downloaded; set it to 1 to keep the old behaviour of
+	// fetching the tip and nothing else, at the cost of those tools having
+	// nothing to read.
+	HistoryDepth int `mapstructure:"history_depth" yaml:"history_depth,omitempty"`
 	// NoRemoteCheck stops agents from checking whether a snapshot is still the
 	// branch head. That check is one ls-remote per project per few minutes, but
 	// it does reach the git server from wherever the agent runs; a deployment

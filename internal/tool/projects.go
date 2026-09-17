@@ -330,7 +330,15 @@ func ProjectTools(store *codeproject.Store, agent string) ([]adktool.Tool, error
 	if err != nil {
 		return nil, err
 	}
-	return []adktool.Tool{ls, rd, ld, gp, sd, lt, pr, ck, sy, rq}, nil
+	// History ships with the read tools rather than as an opt-in set: an agent
+	// that can read a file but cannot ask when it last changed answers "最近有
+	// 什么更新" by apologising, which is what these exist to stop. Same identity,
+	// same live grant check, same configured directories.
+	hist, err := ProjectHistoryTools(store, agent)
+	if err != nil {
+		return nil, err
+	}
+	return append([]adktool.Tool{ls, rd, ld, gp, sd, lt, pr, ck, sy, rq}, hist...), nil
 }
 
 // waitForSync blocks until the pull leaves the running states, the budget runs

@@ -252,6 +252,7 @@ type gitSession struct {
 	token   string
 	auth    string
 	work    string
+	safe    []string
 	stderr  boundedBuffer
 	cleanup func()
 }
@@ -268,6 +269,14 @@ func (s *Store) newGitSession(p Project) (*gitSession, error) {
 		return nil, err
 	}
 	g := &gitSession{work: work, cleanup: func() { os.RemoveAll(work) }}
+	// The repositories this session touches are ones this process created, in
+	// its own data directory. Git's dubious-ownership check does not know that,
+	// and in a container it fires constantly: ./data is bind-mounted from the
+	// host, so the uid that owns it is whatever the host says, which is rarely
+	// the uid the container runs as. Declaring these two paths safe is not a
+	// relaxation — hooks and credential helpers are already forced off below,
+	// and neither path ever holds repository-supplied config.
+	g.safe = []string{s.gitCachePath(p.ID), filepath.Join(work, "cache.git")}
 	g.stderr.max = 8 << 10
 	g.env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + work, "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=" + os.DevNull, "GIT_TERMINAL_PROMPT=0", "GIT_LFS_SKIP_SMUDGE=1"}
 	// A token saved from the console wins over the environment variable. In a
@@ -297,7 +306,11 @@ func (s *Store) newGitSession(p Project) (*gitSession, error) {
 // check, which is not a diagnosis. It is scrubbed of the credential before it
 // goes anywhere, because last_error is persisted into projects.json.
 func (g *gitSession) command(ctx context.Context, args ...string) *exec.Cmd {
-	args = append([]string{"-c", "core.hooksPath=" + os.DevNull, "-c", "credential.helper=", "-c", "protocol.allow=never", "-c", "protocol.https.allow=always", "-c", "http.followRedirects=false"}, args...)
+	front := []string{"-c", "core.hooksPath=" + os.DevNull, "-c", "credential.helper=", "-c", "protocol.allow=never", "-c", "protocol.https.allow=always", "-c", "http.followRedirects=false"}
+	for _, dir := range g.safe {
+		front = append(front, "-c", "safe.directory="+dir)
+	}
+	args = append(front, args...)
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Env = g.env
 	cmd.WaitDelay = 2 * time.Second

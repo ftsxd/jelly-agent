@@ -33,7 +33,7 @@ describe('code project management', () => {
     await input('项目名称', '订单服务'); await input('项目标识', 'orders'); await input('Git 仓库地址', project.url)
     host.querySelector('form').dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })); await settle()
     expect(api.saveCodeProject).toHaveBeenCalledWith({
-      id: 'orders', name: '订单服务', url: project.url, branch: 'main', token_env: '', username: '',
+      id: 'orders', name: '订单服务', url: project.url, branch: 'main', history_depth: 0, token_env: '', username: '',
       root_path: '.', reference_paths: [], directory_metadata: {},
     })
     expect(api.grantCodeProject).not.toHaveBeenCalled()
@@ -55,6 +55,17 @@ describe('code project management', () => {
     }))
     expect(api.syncCodeProject).toHaveBeenCalledWith('silkworm-coupon')
   })
+  // How far back git log can look is a property of the repository, not of the
+  // server, so it is set here. Blank has to stay blank: a 0 typed by the form
+  // on every unrelated edit would read as a deliberate depth of zero.
+  it('sends the history depth only as a number the operator actually chose', async () => {
+    await mount([]); await click('新建第一个项目')
+    await input('项目名称', 'silkworm'); await input('项目标识', 'silkworm'); await input('Git 仓库地址', project.url)
+    await input('保留提交历史', '300')
+    host.querySelector('form').dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })); await settle()
+    expect(api.saveCodeProject).toHaveBeenCalledWith(expect.objectContaining({ history_depth: 300 }))
+  })
+
   // Empty means the whole repository, the same as ".". Marking the field
   // required contradicted the backend, which already reads an empty root_path
   // as whole-repo, and blocked the form on a value the user had no reason to

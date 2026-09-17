@@ -11,6 +11,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -46,7 +47,7 @@ func (s *Store) syncSnapshot(ctx context.Context, p Project, limits Limits) (str
 		return "", "", err
 	}
 	defer g.cleanup()
-	cache, revision, err := s.fetchCache(ctx, g, p)
+	cache, revision, err := s.fetchCache(ctx, g, p, limits)
 	if err != nil {
 		if ctx.Err() != nil {
 			return "", "", fmt.Errorf("拉取已取消或超过 %s，请重试或调高 files.code_projects.sync_timeout_sec", limits.SyncTimeout)
@@ -84,7 +85,7 @@ func (s *Store) syncSnapshot(ctx context.Context, p Project, limits Limits) (str
 	return filepath.Base(dest), revision, nil
 }
 
-func (s *Store) fetchCache(ctx context.Context, g *gitSession, p Project) (string, string, error) {
+func (s *Store) fetchCache(ctx context.Context, g *gitSession, p Project, limits Limits) (string, string, error) {
 	cache := s.gitCachePath(p.ID)
 	var state gitCacheState
 	b, err := os.ReadFile(filepath.Join(cache, "codeproject.json"))
@@ -104,7 +105,13 @@ func (s *Store) fetchCache(ctx context.Context, g *gitSession, p Project) (strin
 	// A fixed local ref accepts force-pushes without retaining other branches.
 	// An empty cache fetches the full tip tree; later fetches negotiate against
 	// the objects already present. Never export stale FETCH_HEAD after failure.
-	if _, err := g.run(ctx, "-C", repo, "fetch", "--depth=1", "--no-tags", "--no-recurse-submodules", "--no-auto-gc", "--", p.URL, "+refs/heads/"+p.Branch+":refs/heads/snapshot"); err != nil {
+	//
+	// The depth is what the history tools read: at depth 1 there is a snapshot
+	// and nothing to say about how it got that way, which is the state that
+	// made an agent answer 我没有 git log/diff 能力. Deepening an existing
+	// shallow cache is itself incremental — git asks for the commits it is
+	// missing, not for the tree again.
+	if _, err := g.run(ctx, "-C", repo, "fetch", "--depth="+strconv.Itoa(historyDepth(p, limits)), "--no-tags", "--no-recurse-submodules", "--no-auto-gc", "--", p.URL, "+refs/heads/"+p.Branch+":refs/heads/snapshot"); err != nil {
 		return "", "", errors.New(diagnose(g.stderr.b.String(), g.token, g.auth, p, err))
 	}
 	revision, err := g.run(ctx, "-C", repo, "rev-parse", "--verify", "refs/heads/snapshot^{commit}")
@@ -124,7 +131,10 @@ func (s *Store) fetchCache(ctx context.Context, g *gitSession, p Project) (strin
 	// project reservation, so pruning here cannot race an export or fetch.
 	if state.Fetches >= 32 {
 		gcCtx, cancel := context.WithTimeout(ctx, gcBudget)
+		lock := s.cacheLock(p.ID)
+		lock.Lock()
 		_, gcErr := g.run(gcCtx, "-C", repo, "gc", "--prune=now")
+		lock.Unlock()
 		cancel()
 		// The counter resets whether or not that worked. A gc that cannot
 		// finish inside the budget will not finish inside it next time either,
@@ -146,6 +156,9 @@ func (s *Store) fetchCache(ctx context.Context, g *gitSession, p Project) (strin
 		return "", "", err
 	}
 	if repo != cache {
+		lock := s.cacheLock(p.ID)
+		lock.Lock()
+		defer lock.Unlock()
 		if err := os.RemoveAll(cache); err != nil {
 			return "", "", err
 		}

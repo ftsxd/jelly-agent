@@ -142,6 +142,11 @@ sandbox:
 #     sync_timeout_sec: 1800      # 一次同步的上限，默认 1800（30 分钟）
 #     max_snapshot_mb: 2048       # 单个快照体积上限，默认 2048
 #     max_snapshot_files: 200000  # 单个快照文件数上限，默认 200000
+#     history_depth: 50           # 同步保留多少个提交的历史，默认 50，上限 2000。
+#                                 # 项目表单里的「保留提交历史」填了就以项目为准。
+#                                 # 提交历史工具（log/show/diff）能看多远由它决定；
+#                                 # 它只影响对象缓存，快照仍只是最新版本的完整代码树。
+#                                 # 填 1 即退回「只拉最新提交」，那三个工具将无历史可读。
 
 # 多 Agent（可选）。整段省略即用默认单 Agent。给协调者填 sub_agents 即开启
 # ADK 的 transfer_to_agent 转交：协调者按子 Agent 的 description 判断委派给谁。
