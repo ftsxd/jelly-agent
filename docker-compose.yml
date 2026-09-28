@@ -19,6 +19,10 @@
 services:
   jelly-agent:
     image: jelly-agent:local
+    build:
+      context: .
+      args:
+        BUILD_REVISION: ${JELLY_BUILD_REVISION:-unknown}
     user: "0:0"
     ports:
       - "6185:6185"
@@ -91,8 +95,12 @@ services:
       - postgres-data:/var/lib/postgresql/data
       # 首次启动时，这个目录里的 *.sql 会按文件名顺序自动跑一遍。
       #
-      # 只在数据目录为空时执行。改了 schema 要重来：
-      #     docker compose --profile db down -v
+      # 只在数据目录为空时执行；已有卷不会因重建容器再次运行。
+      # 升级执行审批/恢复表，保留原数据：
+      #     docker compose --profile db exec -T postgres sh -c \
+      #       'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=1' \
+      #       < migrations/postgres/0003_execution_runtime_upgrade.sql
+      # 仅在应用实际连接此 postgres 服务时使用；其他库见 migrations/README.md。
       - ./migrations/postgres:/docker-entrypoint-initdb.d:ro
     healthcheck:
       # pg_isready 只说进程在听，所以顺带查一下建表脚本真的跑完了 ——

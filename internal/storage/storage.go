@@ -266,6 +266,9 @@ func ApplySchema(db *DB, ddl string, tables ...string) error {
 			return fmt.Errorf("storage: inspect %s: %w", t, err)
 		}
 		if !has {
+			if t == "execution_approvals" || t == "execution_runs" {
+				return fmt.Errorf("storage: 表 %s 不存在。已有 PostgreSQL 部署请在应用使用的数据库/schema 执行 migrations/postgres/0003_execution_runtime_upgrade.sql，再重启服务；该增量会补齐审批和执行恢复表，保留已有数据", t)
+			}
 			return fmt.Errorf("storage: 表 %s 不存在。"+
 				"PostgreSQL 的 schema 由迁移文件建，不由进程自己建 —— "+
 				"先跑 migrations/postgres/0001_init.sql", t)

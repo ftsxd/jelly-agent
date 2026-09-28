@@ -3,10 +3,37 @@
 ```
 migrations/postgres/0001_init.sql    七张表 + 索引 + pg_trgm
 migrations/postgres/0002_execution_runs.sql    已有 PG 部署的执行恢复记录增量
+migrations/postgres/0003_execution_runtime_upgrade.sql    旧库补齐审批和执行恢复表
 ```
 
-升级到 Docker 持久化回收版本时，SQLite 会自动建表。已有 PostgreSQL 部署先应用
-`0002_execution_runs.sql`；新部署的 `0001_init.sql` 已包含该表。恢复身份随数据迁移
+升级到执行审批/持久化回收版本时，SQLite 会自动建表。已有 PostgreSQL 部署应用
+`0003_execution_runtime_upgrade.sql`，同时补齐 `execution_approvals` 和
+`execution_runs`，包括已经跑过只创建恢复表的 `0002_execution_runs.sql` 的旧库。
+这个增量在一个事务里运行，只建缺失表/索引，不删除已有审批、恢复记录或聊天数据，
+可以重复执行。新部署的 `0001_init.sql` 已包含这两张表；旧库不要重跑整份初始化
+文件，其中原有表的 CREATE 不是幂等的。
+
+使用应用 `storage.dsn` 对应的数据库和同一 schema/search_path，执行：
+
+```sh
+psql "$JELLY_DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/postgres/0003_execution_runtime_upgrade.sql
+```
+
+`JELLY_DATABASE_URL` 在部署环境中配置，不要把含密码的连接串贴进聊天或命令日志。
+建表后重启应用并重新加载审批。应用本身不会自动给 PostgreSQL 建这些表，也不要
+使用测试专用 `JELLY_PG_DSN` 或运行会清库的 PG 回归测试来升级部署。
+
+若用仓库 Compose 自带的 `postgres` 服务，且应用确实连接这个库：
+
+```sh
+docker compose --profile db exec -T postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=1' < migrations/postgres/0003_execution_runtime_upgrade.sql
+docker compose restart jelly-agent
+```
+
+PostgreSQL 镜像的初始化目录只在空卷首次启动时执行。更新代码、重建/重启容器不会
+为已有卷补表；升级不需要删除数据卷。
+
+恢复身份随数据迁移
 保留，但本机私有目录与原 Docker 服务不会随数据库移动，不能在新主机上把旧资源
 当作已清理。旧主机可使用原配置启动独立回收器。
 

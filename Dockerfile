@@ -23,6 +23,8 @@ RUN mkdir -p /out/data/.jelly-agent && touch /out/data/.jelly-agent/.keep
 # skills.allow_scripts 关掉，再把这层换回 gcr.io/distroless/base-debian12:nonroot。
 # 镜像本身不是隔离边界——边界由 internal/sandbox 的 os 后端（Landlock）提供。
 FROM python:3.12-slim-bookworm
+ARG BUILD_REVISION=unknown
+LABEL org.opencontainers.image.revision="${BUILD_REVISION}"
 # git 不是可选的：平台自己拉代码项目、以及 log/show/diff 三个提交历史工具都直接
 # 调它，代码同步技能也靠它；而 python:slim 里既没有 git 也没有 curl（实测确认）。
 # 少了它，周期同步任务和「这个服务最近改了什么」在容器里都会以「command not

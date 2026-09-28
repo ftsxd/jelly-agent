@@ -2,6 +2,27 @@
 
 执行生命周期可用并不意味着每个 Agent 自动获得执行器。查询 Agent 必须获明确分配、拥有变量映射，并能在隔离环境中加载 CLI。仅向演示 Agent 分配执行器，无法使 TencentQuery 实际调用腾讯云。
 
+## 换环境部署
+
+拉取代码不会迁移数据库、启用执行配置、复制 Agent 私有变量或安装 tccli。本地体验的 `data/runtime-preview` 没有提交；另一台机器要按下节重新配置。
+
+如果工具页整块“通用诊断执行器”卡片没有出现，先检查运行镜像/前端版本。当前源码无条件渲染这块卡片，即使未启用或接口报错也会显示标题。此前 Compose 只有 `image: jelly-agent:local`，拉取源码再重启会继续运行旧镜像；现已加入源码构建配置。`web/dist` 不提交，Go 二进制内嵌的是编译时的前端；Dockerfile 会重新构建前端后再编译服务。
+
+在已更新源码的仓库根目录执行：
+
+```sh
+JELLY_BUILD_REVISION=$(git rev-parse HEAD) docker compose up -d --build jelly-agent
+docker image inspect jelly-agent:local --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}'
+```
+
+镜像标签应该与本次源码提交一致。然后强制刷新浏览器，再打开工具页。`.dockerignore` 排除了本地配置、数据、密钥环境文件和旧前端产物，避免把本地体验状态带进构建镜像。使用独立前端/反向代理部署时，还需同步其前端产物；不能仅更新后端镜像。
+
+已有 PostgreSQL 库先应用 `migrations/postgres/0003_execution_runtime_upgrade.sql`，补齐审批和执行恢复表后重启服务。不要在旧库重跑整份 `0001_init.sql`。具体命令和数据库/schema 选择见 [迁移说明](../migrations/README.md)。
+
+如果仍然只返回脚本，在工具页确认执行器已启用且 profile 分配给实际接收任务的 TencentQuery；查看该次工具调用是否包含 `shell_exec`。没有调用记录时，不能把脚本当成执行结果。还需确认变量名称映射，以及隔离环境能加载的 CLI 安装。Linux 容器部署建议使用预装 CLI 的诊断镜像，宿主机安装不会自动进入容器；`tool_dir` 只适用于系统沙箱。
+
+仓库主服务 `Dockerfile` 带 Python/git，但没有 tccli 或 Docker 客户端；`docker-compose.yml` 也未给主服务接入 Docker 服务。`images/sre-runtime/Dockerfile` 是单独的诊断镜像。要让容器中的主服务使用 Docker 执行后端，需由部署方配置 Docker 客户端和服务连接，并让主服务私有工作目录在 Docker 服务所在主机上使用同一绝对路径、访问权限一致。仅挂载 `./data:/data` 不能证明两边路径一致；不能假设应用容器内部的 `/tmp` 是宿主机的 `/tmp`。这些部署条件未满足时不会自动降级执行。
+
 ## 配置腾讯云查询 Agent
 
 1. 在 Agent 变量页保存 `TENCENTCLOUD_SECRET_ID`、`TENCENTCLOUD_SECRET_KEY`、`TENCENTCLOUD_REGION`。值由服务端保存，不进入模型上下文；生产诊断应使用只读 IAM 凭据。

@@ -134,6 +134,14 @@ flowchart TD
 
 故障测试显式开启 `JELLY_TEST_DOCKER=1`，仅使用已有 `python:3.12-slim-bookworm` 镜像，禁止拉取、禁网、无真实云写操作。测试创建的容器均已清理。独立审查补充了启动拒绝和参数完整性测试，并交叉复核事务关联、终态竞态及删除顺序。
 
-最终完整后端、静态检查、execution/sandbox/engine/server 的 race（包含 Docker 故障测试）、前端 178 项测试及构建通过；独立回收 CLI 在私有体验配置中正常退出。SQLite 自动建表；已有 PostgreSQL 部署需要先应用 `migrations/postgres/0002_execution_runs.sql`，本轮没有实际 PostgreSQL 服务验收。
+最终完整后端、静态检查、execution/sandbox/engine/server 的 race（包含 Docker 故障测试）、前端 178 项测试及构建通过；独立回收 CLI 在私有体验配置中正常退出。SQLite 自动建表；已有 PostgreSQL 部署需要先应用 `migrations/postgres/0003_execution_runtime_upgrade.sql`，同时补齐审批与执行恢复表。此前 `0002_execution_runs.sql` 只创建恢复表，不能修复缺失的审批表。本轮没有实际 PostgreSQL 服务验收。
 
 这些保证只覆盖通过 `shell_exec` 注册的 Docker 通用执行器。当前 tccli 本地体验使用系统沙箱；切换 Docker 时，CLI 要预装在镜像中，宿主机 `tool_dir` 不会被挂载。技能脚本、MCP 工具、生产 IAM/RBAC、网络出口和跨实例任务协调需要各自的后续验收。
+
+## PostgreSQL 换环境升级补验
+
+旧库缺失 `execution_approvals` 时，审批接口报错；此前提供的 `0002_execution_runs.sql` 只创建恢复表，不能覆盖这个升级路径。新增 `0003_execution_runtime_upgrade.sql` 在一个事务中补齐两表及索引，允许重复执行，保留原记录；缺表错误改为提示这个增量，避免引导旧库重跑非幂等初始化文件。
+
+独立 PostgreSQL 16 临时容器（已有镜像、禁网、无端口）验证了两表都缺、仅有审批表、仅有恢复表、两表已有四种旧库。每种情况重复执行增量，两表均存在，聊天数据和已有 unknown 审批/恢复记录保持不变；不同 schema/search_path 也按目标范围创建。临时容器及卷已清理。仓库回归同时检查增量字段与运行时 schema 一致、重复执行保留数据；storage/execution 测试通过。
+
+Compose 已增加源码构建入口与镜像提交标记，构建上下文验证确认包含当前前端源码及升级文件，排除私有数据、配置、环境文件和旧前端产物。本次没有操作另一环境或完成整个 Linux Docker 执行部署；Agent 未调用工具仍需核对实际执行开关、Agent/profile 分配、CLI/后端可用性和模型工具调用记录。
