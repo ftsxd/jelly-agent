@@ -50,6 +50,7 @@ type runRegistry struct {
 	// the failure mode that looks like a finished answer.
 	running  map[string]*taskRuns
 	outcomes map[string]runOutcome // task id → how the last one ended
+	claimed  map[string]bool
 }
 
 // taskRuns is one task's in-flight runs, by the invocation each is.
@@ -75,7 +76,39 @@ type liveRun struct {
 }
 
 func newRunRegistry() *runRegistry {
-	return &runRegistry{running: map[string]*taskRuns{}, outcomes: map[string]runOutcome{}}
+	return &runRegistry{running: map[string]*taskRuns{}, outcomes: map[string]runOutcome{}, claimed: map[string]bool{}}
+}
+
+// Claim before the first event exists: otherwise two approval resumes could
+// interleave their user responses before either appears in running.
+func (r *runRegistry) claimSession(session string) (func(), bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.claimed[session] {
+		return nil, false
+	}
+	for id, e := range r.running {
+		if s, _ := task.Split(id); s == session && len(e.started) > 0 {
+			return nil, false
+		}
+	}
+	r.claimed[session] = true
+	var once sync.Once
+	return func() { once.Do(func() { r.mu.Lock(); defer r.mu.Unlock(); delete(r.claimed, session) }) }, true
+}
+
+func (r *runRegistry) sessionActive(session string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.claimed[session] {
+		return true
+	}
+	for id, e := range r.running {
+		if s, _ := task.Split(id); s == session && len(e.started) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // start marks a run in flight and returns the function that ends it.

@@ -4,6 +4,7 @@ import { useRoute, useRouter } from 'vue-router'
 import Icon from '../components/Icon.vue'
 import SessionPicker from '../components/SessionPicker.vue'
 import ChatTranscript from '../components/ChatTranscript.vue'
+import ExecutionApprovals from '../components/ExecutionApprovals.vue'
 import { api, streamChat } from '../api'
 import { applyFrame, emptyTimeline, summarize } from '../timeline'
 import { replayMessages } from '../replay'
@@ -28,6 +29,7 @@ const messages = ref([]) // {role, text, timeline, usage, provider, model}
 const input = ref('')
 const sessionId = ref('')
 const busy = ref(false)
+const approvalVersion = ref(0)
 // What the server says the open session is doing, as of the last replay.
 // Empty when it says nothing — see the endpoint's note on why "nothing known"
 // is not the same as "not running".
@@ -273,15 +275,15 @@ function newChat() {
   router.replace({ query: {} })
 }
 
-async function send() {
-  const text = input.value.trim()
-  if (!text || locked.value) return
+async function send(choice = null) {
+  const approval = choice && typeof choice.id === 'string' ? choice : null
+  const text = approval ? '' : input.value.trim()
+  if ((!text && !approval) || locked.value) return
   error.value = ''
   // This page is driving the turn now, so what a replay said about the
   // previous one stops being the answer.
   remoteStatus.value = ''
-  input.value = ''
-  messages.value.push({ role: 'user', text })
+  if (!approval) { input.value = ''; messages.value.push({ role: 'user', text }) }
   const agentMsg = {
     role: 'agent',
     text: '',
@@ -311,6 +313,7 @@ async function send() {
         // and silently attaching everything after would let one task swallow
         // the rest of the conversation.
         taskId: activeTask.value,
+        ...(approval ? { approvalId: approval.id, approve: approval.approve } : {}),
       },
       (ev) => handleFrame(live, ev),
       abort.signal,
@@ -329,6 +332,8 @@ async function send() {
     continuingTask.value = ''
     busy.value = false
     abort = null
+    approvalVersion.value += 1
+    if (approval) await refreshOpen()
     scrollDown()
   }
 }
@@ -366,7 +371,7 @@ function handleFrame(live, ev) {
       remoteStatus.value = 'failed'
       break
     case 'done':
-      remoteStatus.value = 'completed'
+      remoteStatus.value = ev.status || 'completed'
       break
     default:
       break
@@ -437,6 +442,7 @@ function handleFrame(live, ev) {
       </div>
 
       <ChatTranscript :messages="messages" :show-provider="showProviderTag" :pending="locked" />
+      <ExecutionApprovals v-if="sessionId" :session="sessionId" :refresh-key="approvalVersion" :disabled="locked" actionable @resolve="send" />
 
       <!-- Below the transcript, not above it. A run is watched from the bottom
            of a long page, and a notice at the top is a notice nobody sees.

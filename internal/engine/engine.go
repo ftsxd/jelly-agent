@@ -23,6 +23,7 @@ import (
 	"google.golang.org/genai"
 
 	"github.com/jelly-agent/jelly-agent/internal/config"
+	"github.com/jelly-agent/jelly-agent/internal/execution"
 	"github.com/jelly-agent/jelly-agent/internal/gateway"
 	"github.com/jelly-agent/jelly-agent/internal/history"
 	jellymcp "github.com/jelly-agent/jelly-agent/internal/mcp"
@@ -607,6 +608,10 @@ func (e *Engine) SystemPrompt(provider, agent string) (parts []PromptPart, err e
 		}
 	}
 	full := e.systemInstruction(core, instruction, allowScripts, allowSkills)
+	if ex := e.executionInstruction(agent); ex != "" {
+		parts = append(parts, PromptPart{Name: "通用执行器", Text: ex})
+		full += "\n\n" + ex
+	}
 	parts = append(parts, PromptPart{Name: "完整拼装", Text: full, Assembled: true})
 	return parts, nil
 }
@@ -786,7 +791,7 @@ func (e *Engine) maxTools() int {
 // would refuse one — which is the difference between a permission check and a
 // formality.
 func (e *Engine) sideEffectCeiling() ops.SideEffectLevel {
-	if e.cfg.Skills.AllowScripts {
+	if e.cfg.Skills.AllowScripts || e.cfg.Execution.Enabled {
 		return ops.SideEffectRisky
 	}
 	return ops.SideEffectMutating
@@ -899,6 +904,7 @@ func (e *Engine) StateDB() (*storage.DB, error) {
 			toolreg.EnsureSchema,
 			schedule.EnsureSchema,
 			memory.EnsureSchema,
+			execution.EnsureApprovalSchema,
 		} {
 			if err := ensure(db); err != nil {
 				db.Close()
@@ -1266,6 +1272,35 @@ func (e *Engine) Tools(core *memory.Core, withSearch bool) ([]adktool.Tool, erro
 	return tools, nil
 }
 
+// ShellExecToolFor constructs only tools explicitly assigned to this node.
+func (e *Engine) ShellExecToolFor(agent string) (adktool.Tool, error) {
+	if len(e.cfg.Execution.ProfilesFor(agent)) == 0 {
+		return nil, nil
+	}
+	if err := e.cfg.Execution.Validate(); err != nil {
+		return nil, err
+	}
+	runtime := execution.Runtime{Config: e.cfg.Execution}
+	for _, p := range e.cfg.Execution.ProfilesFor(agent) {
+		if p.WriteApproval {
+			db, err := e.StateDB()
+			if err != nil {
+				return nil, err
+			}
+			runtime.Approvals = &execution.Approvals{DB: db}
+			break
+		}
+	}
+	return jellytool.NewShellExecTool(runtime, agent)
+}
+
+func (e *Engine) executionInstruction(agent string) string {
+	if agent == "" {
+		agent = "root"
+	}
+	return e.cfg.Execution.Instruction(agent)
+}
+
 // FileRoots resolves the configured code directories once per call. Resolution
 // is deliberately not cached: a root that did not exist at boot appears the
 // first time the sync task runs, and an agent built after that should see it
@@ -1572,6 +1607,11 @@ func (e *Engine) buildNode(name, description, provider, instruction string, tool
 	}
 	tools = append(tools, projectTools...)
 	tools = append(tools, e.extraTools...)
+	if ex, err := e.ShellExecToolFor(name); err != nil {
+		return nil, prov, fmt.Errorf("build shell_exec: %w", err)
+	} else if ex != nil {
+		tools = append(tools, ex)
+	}
 
 	// Agent Skills: when any skill is enabled, add the use_skill tool so the
 	// agent can pull a skill's full body on demand. The catalog itself is
@@ -1654,7 +1694,11 @@ func (e *Engine) buildNode(name, description, provider, instruction string, tool
 		// skill catalog) are read fresh each turn. Note: ADK then skips {}
 		// session-state substitution.
 		InstructionProvider: func(agent.ReadonlyContext) (string, error) {
-			return e.systemInstruction(core, instruction, allowScripts, allowSkills), nil
+			full := e.systemInstruction(core, instruction, allowScripts, allowSkills)
+			if ex := e.executionInstruction(name); ex != "" {
+				full += "\n\n" + ex
+			}
+			return full, nil
 		},
 		// Tools is left empty on purpose: a static list is expanded once and
 		// never revisited, so anything in it would escape selection.

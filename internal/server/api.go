@@ -90,6 +90,11 @@ func (s *Server) handleTools(w http.ResponseWriter, r *http.Request) {
 	for _, t := range tools {
 		out = append(out, toolDTO{Name: t.Name(), Description: t.Description()})
 	}
+	if cfg := s.engineFor(r).Config().Execution; cfg.Enabled {
+		out = append(out, toolDTO{Name: jellytool.ShellExecName,
+			Description: "在规则和沙箱约束下执行通用诊断命令，支持 CLI 帮助与查询。",
+			Scope:       "execution", Note: "只有已分配执行配置的 Agent 获得此工具；需审批的命令当前不执行"})
+	}
 	// Built with a placeholder identity: only the names and descriptions are
 	// read here, and what each agent may actually reach is decided per call
 	// against the live project assignment, not by this listing.
@@ -303,6 +308,9 @@ func (s *Server) handleSessionTimeline(w http.ResponseWriter, r *http.Request) {
 	// idea" are different answers and only one of them is true.
 	if st, known := s.runs().sessionStatus(resp.Session.ID()); known {
 		out["status"] = st
+	}
+	if out["status"] != TaskRunning && sessionHasPendingApprovals(r.Context(), s.engineFor(r), resp.Session.ID()) {
+		out["status"] = TaskWaitingInput
 	}
 	writeJSON(w, http.StatusOK, out)
 }

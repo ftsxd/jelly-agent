@@ -2,6 +2,9 @@ package sandbox
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
@@ -57,11 +60,23 @@ func dockerArgs(p Policy, s Spec) []string {
 	if !p.Mode.CanNetwork() {
 		args = append(args, "--network", "none")
 	}
+	if p.Strict {
+		args = append(args, "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--pull", "never")
+	}
 	args = append(args, dockerUser()...)
 	for k, v := range s.Env {
-		args = append(args, "--env", k+"="+v)
+		if p.Strict {
+			// Docker reads the value from its CLI environment; never publish
+			// injected credentials in process arguments visible to host tools.
+			args = append(args, "--env", k)
+		} else {
+			args = append(args, "--env", k+"="+v)
+		}
 	}
 	args = append(args, p.Image)
+	if len(s.Argv) > 0 {
+		return append(args, s.Argv...)
+	}
 
 	rel := "/work/" + filepath.ToSlash(s.RelFile)
 	if s.Interp != "" {
@@ -81,25 +96,48 @@ func dockerArgs(p Policy, s Spec) []string {
 // policy.
 func runDocker(ctx context.Context, p Policy, s Spec) (Result, error) {
 	args := dockerArgs(p, s)
+	var container string
+	if p.Strict {
+		var id [16]byte
+		if _, err := rand.Read(id[:]); err != nil {
+			return Result{ExitCode: -1}, err
+		}
+		container = "jelly-exec-" + hex.EncodeToString(id[:])
+		args = append([]string{"run", "--name", container}, args[1:]...)
+		// Also clean up after the CLI has stopped: cancellation can race
+		// container creation, before the first removal sees the name.
+		defer removeContainer(container)
+	}
 
 	ctx, cancel := context.WithTimeout(ctx, p.Timeout)
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, "docker", args...)
+	if p.Strict {
+		cmd.Env = os.Environ()
+		for k, v := range s.Env {
+			cmd.Env = append(cmd.Env, k+"="+v)
+		}
+	}
 	cmd.Cancel = func() error {
+		if container != "" {
+			removeContainer(container)
+		}
 		if cmd.Process != nil {
-			return cmd.Process.Kill() // --rm reaps the container when the CLI dies
+			return cmd.Process.Kill() // removal above terminates the container
 		}
 		return nil
 	}
 	cmd.WaitDelay = 3 * time.Second
 
-	out, truncated, code, startErr := capture(cmd, p.MaxOutput)
-	res := Result{
-		Output:    out,
-		ExitCode:  code,
-		Truncated: truncated,
-		TimedOut:  ctx.Err() == context.DeadlineExceeded,
-	}
+	res, startErr := capture(cmd, p.MaxOutput)
+	res.TimedOut = ctx.Err() == context.DeadlineExceeded
+	res.Cancelled = ctx.Err() == context.Canceled
 	return res, startErr
+}
+
+func removeContainer(name string) {
+	cleanup, done := context.WithTimeout(context.Background(), 3*time.Second)
+	defer done()
+	_ = exec.CommandContext(cleanup, "docker", "rm", "-f", name).Run()
 }

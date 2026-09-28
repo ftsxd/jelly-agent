@@ -27,6 +27,8 @@ func seatbelt() string {
 
 func osAvailable() bool { return seatbelt() != "" }
 
+func osStrictError(Policy) error { return nil }
+
 func osUnavailable() string {
 	if osAvailable() {
 		return ""
@@ -81,7 +83,10 @@ func seatbeltProfile(p Policy, dir string) string {
 	// Reads: the system allowlist, the workspace, and whatever the operator
 	// added. Metadata (stat) is already allowed globally above — too much
 	// breaks without it, and it discloses no content.
-	reads := append(append([]string{}, systemReadPaths...), dir)
+	reads := append(append([]string{}, systemPaths(p)...), dir)
+	for i, r := range reads {
+		reads[i] = canonical(r)
+	}
 	for _, extra := range p.ReadPaths {
 		if c := canonical(extra); c != "" {
 			reads = append(reads, c)

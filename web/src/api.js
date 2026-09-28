@@ -140,6 +140,10 @@ export const api = {
   files: () => jget('/api/files'),
   setFiles: (roots) => jpost('/api/files', { roots }),
   sandbox: () => jget('/api/sandbox'),
+  execution: () => jget('/api/execution'),
+  setExecution: (p) => jput('/api/execution', p),
+  checkExecution: (p) => jpost('/api/execution/check', p),
+  executionApprovals: (session, signal) => jget(`/api/sessions/${encodeURIComponent(session)}/approvals`, signal),
   setSandbox: (p) => jpost('/api/sandbox', p),
   agents: () => jget('/api/agents'),
   saveAgent: (a) => jpost('/api/agents', a),
@@ -178,7 +182,7 @@ export const api = {
 // streamChat POSTs a message and parses the SSE response. onEvent receives each
 // decoded event ({type, ...}). Returns a promise that resolves when the stream
 // closes. Pass an AbortSignal to cancel mid-stream.
-export async function streamChat({ message, sessionId, provider, agent, taskId }, onEvent, signal) {
+export async function streamChat({ message, sessionId, provider, agent, taskId, approvalId, approve }, onEvent, signal) {
   const res = await fetch('/api/chat/stream', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -187,6 +191,7 @@ export async function streamChat({ message, sessionId, provider, agent, taskId }
       // Carried so a follow-up joins the task it continues instead of opening
       // a second one that tells half the story.
       task_id: taskId || '',
+      ...(approvalId ? { approval_id: approvalId, approve } : {}),
     }),
     signal,
   })

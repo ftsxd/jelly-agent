@@ -241,6 +241,14 @@ func TestShaperReducesRatherThanTruncates(t *testing.T) {
 func TestErrorInsideThePayloadIsAFailure(t *testing.T) {
 	rec := &recorder{result: map[string]any{"error": "dial tcp 10.0.0.1:6443: connection refused"}}
 	g := newGW(t, k8sMeta(), rec, Policy{})
+	var stored map[string]any
+	g.results = KeeperFunc(func(ctx context.Context, _ CallMeta, _ string, raw map[string]any) (string, error) {
+		if ctx.Err() != nil {
+			t.Fatal("failure observation was stored with a cancelled context")
+		}
+		stored = raw
+		return "e-failure", nil
+	})
 
 	res, err := g.Execute(context.Background(), prodContext(), ops.OriginModel, "k8s_get_pods", nil)
 	if err == nil {
@@ -252,8 +260,11 @@ func TestErrorInsideThePayloadIsAFailure(t *testing.T) {
 	if res.Call.ErrKind != "tool_error" {
 		t.Errorf("ErrKind = %q", res.Call.ErrKind)
 	}
-	if res.Evidence != nil {
-		t.Error("a failed call produced evidence; there is no observation to cite")
+	if res.Evidence == nil || !strings.Contains(string(res.Evidence.Data), "connection refused") {
+		t.Error("the structured failure observation was discarded")
+	}
+	if stored["error"] == nil || !res.Call.Retrievable || res.Evidence == nil || res.Evidence.ID != "e-failure" {
+		t.Error("structured failure lacks a durable evidence reference")
 	}
 }
 

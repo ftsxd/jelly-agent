@@ -5,6 +5,7 @@ import Icon from '../components/Icon.vue'
 import { api } from '../api'
 import { absTime, relTime } from '../time'
 import ChatTranscript from '../components/ChatTranscript.vue'
+import ExecutionApprovals from '../components/ExecutionApprovals.vue'
 import { replayMessages } from '../replay'
 import { latestOnly } from '../latest'
 
@@ -283,6 +284,7 @@ function continueChat(id) { router.push({ path: '/chat', query: { session: id } 
           <div v-if="!detail.messages.length" class="empty"><span class="muted">（空会话）</span></div>
           <div v-else class="transcript">
             <ChatTranscript :messages="detail.messages" />
+            <ExecutionApprovals :session="detail.id" />
           </div>
         </template>
       </section>

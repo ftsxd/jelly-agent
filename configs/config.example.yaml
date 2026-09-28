@@ -6,6 +6,36 @@
 
 default_provider: deepseek
 
+# 通用诊断执行器（与 skills.allow_scripts 独立，默认关闭）。
+# Web 工具页可编辑。显式按 Agent 分配；只读能力由资源侧 IAM/RBAC 保证。
+# network:true 当前只是联网开关，生产出口白名单须由部署环境配置。
+# execution:
+#   enabled: true
+#   backend: os               # os / docker；不可降级，Linux 离线须用 docker
+#   image: jelly-sre-runtime:local  # docker 时使用；须预先构建
+#   timeout_sec: 30
+#   max_output_kb: 64
+#   profiles:
+#     - name: cls-readonly
+#       agents: [root]        # 或已定义的领域 Agent 名称
+#       network: true
+#       env:                  # 服务端变量名称，不填密钥值或 ${ENV}
+#         TENCENTCLOUD_SECRET_ID: TENCENT_RO_SECRET_ID
+#         TENCENTCLOUD_SECRET_KEY: TENCENT_RO_SECRET_KEY
+#         TENCENTCLOUD_TOKEN: TENCENT_RO_TOKEN
+#     - name: k8s-readonly
+#       agents: [root]
+#       network: true
+#       kubeconfig_env: SRE_READONLY_KUBECONFIG  # 内嵌 kubeconfig 正文
+#       write_approval: true   # 单独启用逐次人工审批，默认 false
+#       write_kubeconfig_env: SRE_WRITE_KUBECONFIG # 仅获批执行注入，限制资源权限
+#       # 云写操作可配置 write_env 覆盖同名只读变量；只填写服务端变量名。
+#       # write_env:
+#       #   TENCENTCLOUD_SECRET_ID: TENCENT_WRITE_SECRET_ID
+#       #   TENCENTCLOUD_SECRET_KEY: TENCENT_WRITE_SECRET_KEY
+#       #   TENCENTCLOUD_TOKEN: TENCENT_WRITE_TOKEN
+#       # 审批十分钟失效，仅执行一次；失败重试需要新的审批，不自动签发 STS。
+
 # Web 控制台管理员。首次执行 jelly serve 时会自动创建 admin、输出一次性
 # 初始密码，并在此处写入 bcrypt 哈希。首次登录后必须修改密码；不要手填明文。
 # web:

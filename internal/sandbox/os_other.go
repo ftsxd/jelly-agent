@@ -16,6 +16,8 @@ var systemReadPaths []string
 
 func osAvailable() bool { return false }
 
+func osStrictError(Policy) error { return errors.New(osUnavailable()) }
+
 func osUnavailable() string {
 	return "本平台没有系统级沙箱，os 后端只支持 macOS（Seatbelt）与 Linux（Landlock）"
 }

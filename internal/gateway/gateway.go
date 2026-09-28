@@ -353,9 +353,9 @@ func (g *Gateway) executor(server string) (Executor, bool) {
 
 // Result is one completed call: the audit record, and the evidence it produced.
 //
-// Evidence is nil when the call failed — there is no observation to cite. The
-// ToolCall is present either way, because a success rate computed only over
-// successes is not a success rate.
+// Evidence is present when a tool returned a structured observation, including
+// failure details. Transport/policy failures may have none. ToolCall records
+// success independently, so a stored failure never counts as a successful call.
 type Result struct {
 	Call     ops.ToolCall
 	Evidence *ops.Evidence
@@ -457,15 +457,16 @@ func (g *Gateway) ExecuteWith(ctx context.Context, meta CallMeta, ic *ops.Incide
 		call.ErrKind = classifyExecError(err)
 		return Result{Call: call}, err
 	}
+	var observationErr error
 	if msg := payloadError(raw); msg != "" {
 		// A tool reporting its failure inside an otherwise-successful payload
 		// is still a failure. Missing this is how a success rate reads 100%.
 		call.Err = msg
 		call.ErrKind = "tool_error"
-		return Result{Call: call}, errors.New(msg)
+		observationErr = errors.New(msg)
 	}
 
-	call.OK = true
+	call.OK = observationErr == nil
 	call.ResultBytes = payloadSize(raw)
 
 	// Committed before anything is shaped or bounded, and before the evidence
@@ -483,7 +484,12 @@ func (g *Gateway) ExecuteWith(ctx context.Context, meta CallMeta, ic *ops.Incide
 	label := ""
 	if g.results != nil {
 		var err error
-		if label, err = g.results.Keep(ctx, meta, m.Name, raw); err != nil {
+		// Cancellation may follow a completed side effect. Preserve its last
+		// observation with a bounded cleanup context before exposing the result.
+		keepCtx, cancelKeep := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
+		label, err = g.results.Keep(keepCtx, meta, m.Name, raw)
+		cancelKeep()
+		if err != nil {
 			slog.Error("工具返回未能落库，本次结果无法事后重读",
 				"tool", m.Name, "call_id", meta.CallID, logging.Err(err))
 			label = ""
@@ -568,7 +574,7 @@ func (g *Gateway) ExecuteWith(ctx context.Context, meta CallMeta, ic *ops.Incide
 	// say whether e3's full payload can still be read.
 	ev.Retrievable = call.Retrievable
 	call.EvidenceIDs = []string{ev.ID}
-	return Result{Call: call, Evidence: ev}, nil
+	return Result{Call: call, Evidence: ev}, observationErr
 }
 
 // Metadata is what the gateway believes a tool to be, right now.

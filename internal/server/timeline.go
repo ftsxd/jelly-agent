@@ -341,8 +341,8 @@ func projectCall(ev *adksession.Event, fc *genai.FunctionCall, out sink, st *tur
 		// tools" would stop being true.
 		return
 	case fc.Name == toolconfirmation.FunctionCallName:
-		// Approval requests are their own thing; batch three gives them a
-		// frame. Until then they are not a tool call.
+		// Approval cards read the durable approval API. The protocol wrapper
+		// does not count as an extra tool execution.
 		return
 	}
 
@@ -353,7 +353,23 @@ func projectCall(ev *adksession.Event, fc *genai.FunctionCall, out sink, st *tur
 }
 
 func projectResponse(ev *adksession.Event, fr *genai.FunctionResponse, out sink, st *turnState, ts int64) {
-	if fr.Name == transferToAgentTool || fr.Name == toolconfirmation.FunctionCallName {
+	if fr.Name == toolconfirmation.FunctionCallName {
+		// ADK emits only a result when resuming. The server's stored user
+		// decision carries the exact original call so replay can pair it in
+		// the new invocation and expose its result/evidence in the same task.
+		if ev.Author == "user" {
+			orig, err := toolconfirmation.OriginalCallFrom(&genai.FunctionCall{Args: fr.Response})
+			author, _ := fr.Response["original_agent"].(string)
+			if err == nil && orig.Name == "shell_exec" && author != "" {
+				copy := *ev
+				copy.Author = author
+				copy.Branch, _ = fr.Response["original_branch"].(string)
+				projectCall(&copy, orig, out, st, ts)
+			}
+		}
+		return
+	}
+	if fr.Name == transferToAgentTool {
 		return
 	}
 
@@ -397,10 +413,9 @@ func projectAll(events []*adksession.Event) ([]map[string]any, map[string]any) {
 // answer yet.
 //
 // Derived from the event stream rather than tracked in a table because the
-// stream is the only authoritative record: an approval that was granted is a
-// FunctionResponse sitting next to its request, and a second store would only
-// be able to disagree with it. Unused until batch three; defined here because
-// it is the same projection.
+// stream identifies which ADK wrapper can resume. Execution authority is
+// separately checked by execution_approvals (single use, expiry and config),
+// so finding an unanswered wrapper here alone never authorizes a command.
 func pendingApprovals(events []*adksession.Event) []string {
 	var requested []string
 	answered := map[string]bool{}

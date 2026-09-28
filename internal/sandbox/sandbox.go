@@ -46,9 +46,12 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
+	"io"
 	"os/exec"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -147,6 +150,8 @@ var Interpreters = map[string]string{
 // Policy is the security/resource envelope for a run. The zero value is valid
 // and yields the documented defaults via withDefaults.
 type Policy struct {
+	// Strict refuses unavailable/weaker isolation before the command starts.
+	Strict      bool
 	Mode        Mode          // confinement intent ("" ⇒ derived from Network, else DefaultMode)
 	Backend     string        // "", "native", "os", or "docker"
 	AllowDocker bool          // permit auto-selecting the docker backend
@@ -205,21 +210,28 @@ func (p Policy) EffectiveMode() Mode { return p.withDefaults().Mode }
 // Interp, with Args appended and Env injected on top of a scrubbed base
 // environment. An empty Interp executes RelFile directly (+x/shebang).
 type Spec struct {
+	// Argv executes literal arguments instead of a script when set.
+	Argv    []string
 	Dir     string            // confinement root: the child's cwd / the writable path / the docker mount
 	Interp  string            // interpreter command, or "" to exec the file directly
 	RelFile string            // script path relative to Dir (caller must confine it)
 	Args    []string          // extra command-line arguments for the script
 	Env     map[string]string // variables injected into the (scrubbed) child env
+	Secrets map[string]string // redact-only values (e.g. inline kubeconfig tokens)
 }
 
 // Result is the outcome of a run. A non-zero ExitCode or TimedOut is NOT an
-// error from Run's perspective — Run returns a non-nil error only when the
-// command could not be started at all (missing interpreter, missing docker, …).
+// error from Run's perspective. Run returns an error on start or I/O collection
+// failure; Started distinguishes those cases so a write is never blindly retried.
 type Result struct {
+	Started   bool // child was started, even if waiting/output collection failed
 	Output    string
+	Stdout    string
+	Stderr    string
 	ExitCode  int
 	Duration  time.Duration
 	TimedOut  bool
+	Cancelled bool
 	Truncated bool
 	Backend   string // backend actually used ("native", "os", or "docker")
 	Mode      Mode   // mode actually applied
@@ -228,17 +240,18 @@ type Result struct {
 
 // AuditEvent is one structured record of a sandbox run, handed to Audit.
 type AuditEvent struct {
-	Backend  string
-	Mode     Mode
-	Degraded string
-	Dir      string
-	Interp   string
-	File     string
-	Args     []string
-	Duration time.Duration
-	ExitCode int
-	TimedOut bool
-	Err      string
+	Backend   string
+	Mode      Mode
+	Degraded  string
+	Dir       string
+	Interp    string
+	File      string
+	Args      []string
+	Duration  time.Duration
+	ExitCode  int
+	TimedOut  bool
+	Cancelled bool
+	Err       string
 }
 
 // Audit, when non-nil, receives one event per Run (success or failure). The app
@@ -303,6 +316,11 @@ func OSSandboxDetail() string {
 func Run(ctx context.Context, p Policy, s Spec) (Result, error) {
 	p = p.withDefaults()
 	backend, degraded := selectBackend(p)
+	if p.Strict {
+		if err := strictBackend(p, backend, degraded); err != nil {
+			return Result{ExitCode: -1}, err
+		}
+	}
 
 	start := time.Now()
 	var res Result
@@ -323,20 +341,33 @@ func Run(ctx context.Context, p Policy, s Spec) (Result, error) {
 	// it goes into the model's context, the session record and the console, so a
 	// script that echoes a credential — deliberately, via `set -x`, or in an
 	// error message — would put it in the conversation for good.
-	res.Output = redactInjected(res.Output, s.Env, res.Truncated)
+	redactions := make(map[string]string, len(s.Env)+len(s.Secrets))
+	for k, v := range s.Env {
+		redactions[k] = v
+	}
+	for k, v := range s.Secrets {
+		redactions[k] = v
+	}
+	res.Output = redactInjected(res.Output, redactions, res.Truncated)
+	res.Stdout = redactInjected(res.Stdout, redactions, res.Truncated)
+	res.Stderr = redactInjected(res.Stderr, redactions, res.Truncated)
+	if res.Truncated {
+		res.Output += "\n…（输出已截断）"
+	}
 
 	if Audit != nil {
 		ev := AuditEvent{
-			Backend:  res.Backend,
-			Mode:     res.Mode,
-			Degraded: res.Degraded,
-			Dir:      s.Dir,
-			Interp:   s.Interp,
-			File:     s.RelFile,
-			Args:     s.Args,
-			Duration: res.Duration,
-			ExitCode: res.ExitCode,
-			TimedOut: res.TimedOut,
+			Backend:   res.Backend,
+			Mode:      res.Mode,
+			Degraded:  res.Degraded,
+			Dir:       s.Dir,
+			Interp:    s.Interp,
+			File:      s.RelFile,
+			Args:      s.Args,
+			Duration:  res.Duration,
+			ExitCode:  res.ExitCode,
+			TimedOut:  res.TimedOut,
+			Cancelled: res.Cancelled,
 		}
 		if err != nil {
 			ev.Err = err.Error()
@@ -346,10 +377,44 @@ func Run(ctx context.Context, p Policy, s Spec) (Result, error) {
 	return res, err
 }
 
+// CheckStrict checks the same envelope as Run without starting a process.
+func CheckStrict(p Policy) error {
+	p = p.withDefaults()
+	backend, degraded := selectBackend(p)
+	return strictBackend(p, backend, degraded)
+}
+
+func strictBackend(p Policy, backend, degraded string) error {
+	if backend == "native" || degraded != "" || !p.Mode.Confines() {
+		return fmt.Errorf("通用执行器要求完整沙箱，拒绝降级：%s", degraded)
+	}
+	if backend == "os" {
+		return osStrictError(p)
+	}
+	return nil
+}
+
+// The generic executor must not inherit broad /etc, /proc or device reads from
+// the legacy skill envelope. Keep interpreters, trust roots and resolver files.
+func systemPaths(p Policy) []string {
+	if !p.Strict {
+		return systemReadPaths
+	}
+	return []string{"/usr", "/bin", "/sbin", "/lib", "/lib64", "/opt", "/System", "/Library/Developer", "/Library/Apple",
+		"/private/var/db/dyld", "/private/var/select", "/etc/ssl", "/etc/pki", "/etc/hosts", "/etc/resolv.conf",
+		"/etc/nsswitch.conf", "/etc/passwd", "/etc/ld.so.cache", "/proc/self", "/proc/meminfo", "/proc/cpuinfo",
+		"/sys/devices/system/cpu", "/dev/null", "/dev/zero", "/dev/random", "/dev/urandom", "/dev/fd", "/dev/stdout", "/dev/stderr"}
+}
+
 // minRedactLen is the shortest injected value worth masking. A value of three
 // characters or fewer cannot be a credential, and masking one would wreck every
 // output that happens to contain it — "1" or "ok" appears in most of them.
 const minRedactLen = 4
+
+// Redact applies the same injected-value masking to ancillary execution data.
+func Redact(out string, env map[string]string, truncated bool) string {
+	return redactInjected(out, env, truncated)
+}
 
 // redactInjected replaces each injected value in out with a reference to the
 // variable it came from, so the reader still sees the shape of the output
@@ -424,23 +489,48 @@ func joinNotes(notes ...string) string {
 // It returns the (possibly truncated) output, whether truncation happened, the
 // process exit code, and — only when the command failed to start (not merely a
 // non-zero exit) — a start error.
-func capture(cmd *exec.Cmd, max int) (out string, truncated bool, code int, startErr error) {
-	var buf bytes.Buffer
-	cmd.Stdout = &buf
-	cmd.Stderr = &buf
+func capture(cmd *exec.Cmd, max int) (res Result, startErr error) {
+	// Drain both pipes, bounding memory while the process runs.
+	var mu sync.Mutex
+	combined := &boundedOutput{max: max, mu: &mu}
+	stdout := &boundedOutput{max: max, mu: &mu}
+	stderr := &boundedOutput{max: max, mu: &mu}
+	cmd.Stdout = io.MultiWriter(stdout, combined)
+	cmd.Stderr = io.MultiWriter(stderr, combined)
 	runErr := cmd.Run()
-
-	out = buf.String()
-	if max > 0 && len(out) > max {
-		out = out[:max] + "\n…（输出已截断）"
-		truncated = true
-	}
+	res.Started = cmd.Process != nil
+	res.Output, res.Stdout, res.Stderr = combined.buf.String(), stdout.buf.String(), stderr.buf.String()
+	res.Truncated = combined.truncated || stdout.truncated || stderr.truncated
 	if runErr != nil {
+		if errors.Is(runErr, exec.ErrWaitDelay) {
+			res.Truncated = true // inherited output pipes were forcibly closed
+		}
 		var ee *exec.ExitError
 		if errors.As(runErr, &ee) {
-			return out, truncated, ee.ExitCode(), nil
+			res.ExitCode = ee.ExitCode()
+			return res, nil
 		}
-		return out, truncated, -1, runErr
+		res.ExitCode = -1
+		return res, runErr
 	}
-	return out, truncated, 0, nil
+	return res, nil
+}
+
+type boundedOutput struct {
+	buf       bytes.Buffer
+	max       int
+	mu        *sync.Mutex
+	truncated bool
+}
+
+func (b *boundedOutput) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	n := len(p)
+	if b.max > 0 && b.buf.Len()+len(p) > b.max {
+		p = p[:b.max-b.buf.Len()]
+		b.truncated = true
+	}
+	b.buf.Write(p)
+	return n, nil
 }

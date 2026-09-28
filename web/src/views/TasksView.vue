@@ -16,6 +16,7 @@
   MCP server returned, which is the same reason AgentTimeline never uses v-html.
 -->
 <script setup>
+import ExecutionApprovals from '../components/ExecutionApprovals.vue'
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import Icon from '../components/Icon.vue'
@@ -401,6 +402,7 @@ function continueChat(id) {
           <div v-if="detail.error" class="error-bar">
             <Icon name="alert" :size="14" /> {{ detail.error }}
           </div>
+          <ExecutionApprovals :key="detail.session_id" :session="detail.session_id" />
 
           <!-- 执行流程 -->
           <div class="block">

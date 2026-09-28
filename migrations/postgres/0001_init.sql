@@ -251,3 +251,14 @@ CREATE TABLE tool_decl_log (
 );
 
 CREATE INDEX idx_tool_decl_log_tool ON tool_decl_log (server, name, id);
+-- One-use shell execution approvals. Existing deployments may apply this
+-- CREATE TABLE/INDEX block independently when upgrading.
+CREATE TABLE IF NOT EXISTS execution_approvals (
+ id TEXT PRIMARY KEY, session_id TEXT NOT NULL, agent TEXT NOT NULL,
+ invocation_id TEXT NOT NULL, call_id TEXT NOT NULL, request_json TEXT NOT NULL,
+ config_hash TEXT NOT NULL, origin_json TEXT NOT NULL, reason TEXT NOT NULL,
+ state TEXT NOT NULL, created_ms BIGINT NOT NULL, expires_ms BIGINT NOT NULL,
+ resolved_ms BIGINT NOT NULL DEFAULT 0, resolved_by TEXT NOT NULL DEFAULT '',
+ exec_id TEXT NOT NULL DEFAULT '', outcome TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS execution_approvals_session ON execution_approvals(session_id, created_ms);

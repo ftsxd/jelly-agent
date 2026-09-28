@@ -344,6 +344,13 @@ func (w *Wrapped) Run(ctx agent.ToolContext, args any) (map[string]any, error) {
 	}
 	res, err := w.gw.ExecuteWith(WithToolContext(ctx, ctx), meta, ic, w.origin, w.meta.Name, modelArgs, w.exec)
 	if err != nil {
+		if res.Evidence != nil {
+			// The command may have run before failing. Keep exit/output/evidence
+			// visible to the agent and replay, with an explicit failure marker.
+			out := toolPayload(res.Evidence)
+			out["error"] = err.Error()
+			return out, nil
+		}
 		// Returned as an error, not as a payload: ADK's after-tool callback
 		// receives it either way, and an error keeps the failure legible to
 		// the model instead of hiding it inside a successful-looking result.

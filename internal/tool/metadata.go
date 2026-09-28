@@ -23,6 +23,15 @@ func BuiltinMetadata() toolreg.Source {
 	return toolreg.StaticSource{
 		Label: "builtin",
 		Metas: []ops.ToolMetadata{
+			{
+				Name:        ShellExecName,
+				Description: "缺少专用工具时，在受控沙箱中调用 CLI help、诊断或显式授权的 SDK；写操作需逐次人工审批，禁止规则不可放行。执行策略逐段检查。",
+				Suites:      []string{"sre-execution"}, Tags: []string{"执行", "诊断", "CLI", "kubectl", "tccli", "CLS", "云", "日志"},
+				UseCases: []string{"缺少专用诊断工具", "通过 CLI help 发现参数", "申请人工审批后执行资源变更"},
+				Produces: ops.KindText, Latency: ops.LatencySlow,
+				SideEffect: ops.SideEffectRisky, ParallelSafe: false,
+				Timeout: 320 * time.Second, MaxResultBytes: 16000, Fallback: true,
+			},
 			// Project reads deliberately keep Idempotent false: a live grant or
 			// snapshot may change between calls, so each must reach the handler.
 			{

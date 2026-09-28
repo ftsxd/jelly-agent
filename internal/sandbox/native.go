@@ -52,19 +52,21 @@ func runLocal(ctx context.Context, p Policy, s Spec, prefix []string) (Result, e
 	}
 	cmd.WaitDelay = 2 * time.Second // force-close inherited pipes shortly after a kill
 
-	out, truncated, code, startErr := capture(cmd, p.MaxOutput)
-	res := Result{
-		Output:    out,
-		ExitCode:  code,
-		Truncated: truncated,
-		TimedOut:  ctx.Err() == context.DeadlineExceeded,
-	}
+	res, startErr := capture(cmd, p.MaxOutput)
+	// A successful leader can leave background children alive after closing
+	// its output. End this invocation's process group on every return path.
+	killProc(cmd)
+	res.TimedOut = ctx.Err() == context.DeadlineExceeded
+	res.Cancelled = ctx.Err() == context.Canceled
 	return res, startErr
 }
 
 // targetArgv is the literal command we want to run: the interpreter plus the
 // script, or the script directly when no interpreter is mapped.
 func targetArgv(s Spec) []string {
+	if len(s.Argv) > 0 {
+		return append([]string(nil), s.Argv...)
+	}
 	abs := filepath.Join(s.Dir, filepath.FromSlash(s.RelFile))
 	if s.Interp != "" {
 		return append([]string{s.Interp, abs}, s.Args...)

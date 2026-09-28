@@ -11,6 +11,8 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/jelly-agent/jelly-agent/internal/execution"
+
 	"gopkg.in/yaml.v3"
 )
 
@@ -146,18 +148,19 @@ type Tracing struct {
 
 // Config is the top-level jelly-agent configuration.
 type Config struct {
-	DefaultProvider string     `mapstructure:"default_provider" yaml:"default_provider"`
-	Providers       []Provider `mapstructure:"providers" yaml:"providers"`
-	Memory          Memory     `mapstructure:"memory" yaml:"memory"`
-	History         History    `mapstructure:"history" yaml:"history,omitempty"`
-	Tracing         Tracing    `mapstructure:"tracing" yaml:"tracing,omitempty"`
-	Logging         Logging    `mapstructure:"logging" yaml:"logging,omitempty"`
-	Tools           Tools      `mapstructure:"tools" yaml:"tools,omitempty"`
-	Skills          Skills     `mapstructure:"skills" yaml:"skills,omitempty"`
-	Sandbox         Sandbox    `mapstructure:"sandbox" yaml:"sandbox,omitempty"`
-	Files           Files      `mapstructure:"files" yaml:"files,omitempty"`
-	Web             Web        `mapstructure:"web" yaml:"web,omitempty"`
-	Storage         Storage    `mapstructure:"storage" yaml:"storage,omitempty"`
+	DefaultProvider string           `mapstructure:"default_provider" yaml:"default_provider"`
+	Providers       []Provider       `mapstructure:"providers" yaml:"providers"`
+	Memory          Memory           `mapstructure:"memory" yaml:"memory"`
+	History         History          `mapstructure:"history" yaml:"history,omitempty"`
+	Tracing         Tracing          `mapstructure:"tracing" yaml:"tracing,omitempty"`
+	Logging         Logging          `mapstructure:"logging" yaml:"logging,omitempty"`
+	Tools           Tools            `mapstructure:"tools" yaml:"tools,omitempty"`
+	Skills          Skills           `mapstructure:"skills" yaml:"skills,omitempty"`
+	Sandbox         Sandbox          `mapstructure:"sandbox" yaml:"sandbox,omitempty"`
+	Execution       execution.Config `mapstructure:"execution" yaml:"execution,omitempty"`
+	Files           Files            `mapstructure:"files" yaml:"files,omitempty"`
+	Web             Web              `mapstructure:"web" yaml:"web,omitempty"`
+	Storage         Storage          `mapstructure:"storage" yaml:"storage,omitempty"`
 	// SkillVars holds per-skill variables (skill name → KV), where secret-ish
 	// values are masked by the API and may use ${ENV}. Kept here (config, 0600)
 	// rather than in the skill files so sharing/exporting a skill omits secrets.
@@ -506,6 +509,9 @@ func load(path string, expand bool) (*Config, error) {
 	if err := yaml.Unmarshal(content, &c); err != nil {
 		return nil, fmt.Errorf("parse %s: %w", path, err)
 	}
+	if err := c.Execution.Validate(); err != nil {
+		return nil, fmt.Errorf("parse %s execution: %w", path, err)
+	}
 	c.SourcePath = path
 	return &c, nil
 }
@@ -534,6 +540,7 @@ func Save(c *Config, path string) error {
 		Tools           *Tools                       `yaml:"tools,omitempty"`
 		Skills          *Skills                      `yaml:"skills,omitempty"`
 		Sandbox         *Sandbox                     `yaml:"sandbox,omitempty"`
+		Execution       *execution.Config            `yaml:"execution,omitempty"`
 		Files           *Files                       `yaml:"files,omitempty"`
 		Web             *Web                         `yaml:"web,omitempty"`
 		Storage         *Storage                     `yaml:"storage,omitempty"`
@@ -547,6 +554,10 @@ func Save(c *Config, path string) error {
 		Instruction     string                       `yaml:"instruction,omitempty"`
 	}
 	p := payload{Instruction: c.Instruction, DefaultProvider: c.DefaultProvider, Providers: c.Providers, MCP: c.MCP, Platforms: c.Platforms, Schedules: c.Schedules, SkillVars: c.SkillVars, AgentVars: c.AgentVars, DefaultAgent: c.DefaultAgent, Agents: c.Agents}
+	if !reflect.DeepEqual(c.Execution, execution.Config{}) {
+		ex := c.Execution
+		p.Execution = &ex
+	}
 	if c.Storage != (Storage{}) {
 		// Dropped here once, silently: an operator points the deployment at
 		// PostgreSQL, changes anything in the console, and the next restart

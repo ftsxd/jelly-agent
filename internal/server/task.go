@@ -32,10 +32,8 @@ import (
 
 // Task statuses.
 //
-// The first five are produced. waiting_input and blocked are declared because
-// the frontend renders them and a second, divergent list elsewhere is worse
-// than an unused constant — but nothing produces them yet: no tool can say it
-// is waiting for a person, because the approval machinery is not wired.
+// waiting_input is produced by pending command approvals, blocked by expired
+// or revoked approvals. Running remains a fact about the run registry.
 const (
 	TaskPending      = "pending"
 	TaskRunning      = "running"

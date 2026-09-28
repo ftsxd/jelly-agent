@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -18,6 +19,7 @@ import (
 	"google.golang.org/genai"
 
 	"github.com/jelly-agent/jelly-agent/internal/engine"
+	"github.com/jelly-agent/jelly-agent/internal/execution"
 	"github.com/jelly-agent/jelly-agent/internal/logging"
 	"github.com/jelly-agent/jelly-agent/internal/memory"
 	"github.com/jelly-agent/jelly-agent/internal/task"
@@ -33,7 +35,9 @@ type chatRequest struct {
 	// one. The task centre sends it when the user answers a question, supplies
 	// a threshold or asks for more — the goal did not change, so the work
 	// should not split into two entries that each tell half the story.
-	TaskID string `json:"task_id,omitempty"`
+	TaskID     string `json:"task_id,omitempty"`
+	ApprovalID string `json:"approval_id,omitempty"`
+	Approve    *bool  `json:"approve,omitempty"`
 }
 
 // sessionSeq disambiguates web session ids created within the same nanosecond.
@@ -49,7 +53,11 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if strings.TrimSpace(req.Message) == "" {
+	if (req.ApprovalID == "") != (req.Approve == nil) || (req.ApprovalID != "" && (strings.TrimSpace(req.Message) != "" || req.SessionID == "")) {
+		writeErr(w, http.StatusBadRequest, "审批需要 session_id、approval_id 和 approve，不能同时发送消息")
+		return
+	}
+	if strings.TrimSpace(req.Message) == "" && req.ApprovalID == "" {
 		writeErr(w, http.StatusBadRequest, "message 不能为空")
 		return
 	}
@@ -61,6 +69,27 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 	}
 
 	eng := s.engineFor(r) // the engine pinned for this request; see enginepin.go
+	var approval execution.Approval
+	var approvals execution.Approvals
+	if req.ApprovalID != "" {
+		db, err := eng.StateDB()
+		if err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
+		approvals = execution.Approvals{DB: db}
+		approval, err = approvals.Get(r.Context(), req.ApprovalID)
+		if err != nil || approval.SessionID != req.SessionID || approval.State != "pending" {
+			writeErr(w, http.StatusConflict, execution.ErrApproval.Error())
+			return
+		}
+		// Resume the original agent tree/provider, not selections changed in the browser.
+		req.Agent, req.Provider = approval.Origin.Agent, approval.Origin.Provider
+		req.TaskID = task.ID(approval.SessionID, approval.InvocationID)
+		if links, err := task.OfSession(db, approval.SessionID); err == nil && links[approval.InvocationID] != "" {
+			req.TaskID = links[approval.InvocationID]
+		}
+	}
 	// Pick a named agent tree when one is requested or configured by default;
 	// otherwise fall back to the legacy single agent on the chosen provider.
 	agentName := strings.TrimSpace(req.Agent)
@@ -101,6 +130,41 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	if req.ApprovalID != "" && sessionID != req.SessionID {
+		writeErr(w, http.StatusConflict, "原始会话不存在，审批无法执行")
+		return
+	}
+	releaseSession, claimed := s.runs().claimSession(sessionID)
+	if !claimed {
+		writeErr(w, http.StatusConflict, "此会话仍在运行，请结束后再审批或发送消息")
+		return
+	}
+	defer releaseSession()
+	ctx = execution.WithOrigin(ctx, agentName, req.Provider)
+	ctx = execution.WithConfigGuard(ctx, func(check func(execution.Config) error) error {
+		// reload publishes under the write lock. Grant/consume must observe
+		// that publication even when this request holds an older engine.
+		s.mu.RLock()
+		defer s.mu.RUnlock()
+		return check(s.ref.eng.Config().Execution)
+	})
+	msg := genai.NewContentFromText(req.Message, genai.RoleUser)
+	if req.ApprovalID != "" {
+		msg, err = confirmationMessage(ctx, svc, approval, *req.Approve)
+		if err != nil {
+			writeErr(w, http.StatusConflict, err.Error())
+			return
+		}
+		actor := eng.Config().Web.Admin.Username
+		if actor == "" {
+			actor = engine.UserID
+		}
+		if err := approvals.Resolve(ctx, approval.ID, sessionID, actor, *req.Approve, eng.Config().Execution); err != nil {
+			writeErr(w, http.StatusConflict, err.Error())
+			return
+		}
+		defer approvals.Abandon(approval.ID)
+	}
 
 	// A task id names the conversation that opened it, so one from another
 	// conversation is refused rather than quietly ignored: a client sending it
@@ -127,8 +191,8 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 	// Marking the run in flight, so the task centre can show it as running.
 	//
 	// The invocation id — which is the task's identity — does not exist until
-	// the first event arrives, so registration is deferred to the callback
-	// rather than done up front against an id we would have to invent.
+	// the first event arrives. Approval resumes notify this same callback before
+	// execution, because ADK otherwise emits their first event after the tool.
 	var finish func(string)
 	defer func() {
 		if finish != nil {
@@ -138,10 +202,9 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
-	msg := genai.NewContentFromText(req.Message, genai.RoleUser)
-	st, err := streamTurn(sse, r2.Run(ctx, engine.UserID, sessionID, msg,
-		agent.RunConfig{StreamingMode: agent.StreamingModeSSE}),
-		func(round string) {
+	var started sync.Once
+	onRound := func(round string) {
+		started.Do(func() {
 			// Which task this run's status belongs to. A continuation is
 			// displayed under the task it joined, so registering it under its
 			// own invocation left the running task looking idle — and, once
@@ -168,21 +231,40 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 			}
 			end := s.runs().start(sessionID, round, under, cancelRun)
 			finish = func(status string) { finish = nil; end(status) }
+			if req.ApprovalID != "" {
+				st := newTurnState()
+				st.enter(round)
+				projectResponse(&adksession.Event{Author: "user", InvocationID: round}, msg.Parts[0].FunctionResponse, sse, st, time.Now().UnixMilli())
+			}
 		})
+	}
+	if req.ApprovalID != "" {
+		ctx = execution.WithApproval(ctx, approval.ID, onRound)
+	}
+	st, err := streamTurn(sse, r2.Run(ctx, engine.UserID, sessionID, msg,
+		agent.RunConfig{StreamingMode: agent.StreamingModeSSE}), onRound)
 	if err != nil {
 		if finish != nil {
-			finish(TaskFailed)
+			status := TaskFailed
+			if ctx.Err() != nil {
+				status = TaskCancelled
+			}
+			finish(status)
 		}
 		return // the error frame is already out
 	}
+	status := TaskCompleted
+	if sessionHasPendingApprovals(ctx, eng, sessionID) {
+		status = TaskWaitingInput
+	}
 	if finish != nil {
-		finish(TaskCompleted)
+		finish(status)
 	}
 
 	// Index the just-finished turn into L2 so future searches see it.
 	indexSession(ctx, svc, search, sessionID)
 	sse.frame(frameDone, map[string]any{
-		"session_id": sessionID, "ts": time.Now().UnixMilli(), "usage": st.usage(),
+		"session_id": sessionID, "ts": time.Now().UnixMilli(), "usage": st.usage(), "status": status,
 	})
 }
 

@@ -104,6 +104,65 @@ jelly --help                           # 全部命令
 
 > 实现上有两条硬约束。其一，工具调用必须**成对存在**——`FunctionCall` 会变成带 `tool_calls` 的 assistant 消息，`FunctionResponse` 会变成带 `tool_call_id` 的 tool 消息，只丢一半会被服务端直接 400，因此丢弃以「调用 + 其响应」为最小单位。其二，**绝不改写传入对象**——ADK 会复用这些 content 做会话状态与流式渲染，就地修改会同时污染两者。
 
+## 通用诊断执行器
+
+在 Web **工具**页配置并启用通用执行器后，只有获分配执行配置的 Agent 获得 `shell_exec`。缺少专用工具时，Agent 可以先读 CLI help，再生成查询命令；例如 `tccli cls DescribeTopics --Region ap-shanghai`。配置保存后下一轮生效，默认关闭，与技能脚本开关独立。
+
+每次调用先把命令解析成字面参数，逐段检查 `allow / prompt / forbidden`，多个匹配取最严格结果。这部分参考 [Codex 命令规则](https://learn.chatgpt.com/docs/agent-configuration/rules)，但这里的 `allow` 仍然在沙箱内运行。支持引号、管道、`&&`、`||`、`;`；变量展开、命令替换、重定向、后台执行、通配符和子 shell 会被拒绝。传给 shell 的复合命令由已检查的参数重新构造，管道启用 `pipefail`，不会把前一段失败当成整条成功。
+
+内置允许 Kubernetes 的 `get / describe / logs / top / version / api-resources / api-versions / help`、腾讯云 **CLS** 的 `Describe* / List* / SearchLog` 和 CLI 帮助。未知命令与已知写操作返回 `prompt`，等待逐次人工审批。删除、shell 包装、凭据枚举、身份覆盖和安装软件等返回 `forbidden`，人工审批也不能放行。可在每个执行配置里加 token 前缀规则，例如允许 `jq` 或限定某段 `python3 -c`；附加允许规则不能覆盖已有的禁止或审批要求。
+
+```yaml
+execution:
+  enabled: true
+  backend: os                     # os 或 docker；不允许 native，也不自动降级
+  timeout_sec: 30                  # 最大 300；调用只能收紧
+  max_output_kb: 64                # stdout/stderr 各自上限；最大 1024
+  profiles:
+    - name: cls-readonly
+      agents: [TencentClsAgent]   # 显式分配；单 Agent 模式用 root
+      network: true
+      env:                        # 右侧是服务端变量名称，不是 ${ENV} 或密钥值
+        TENCENTCLOUD_SECRET_ID: TENCENT_RO_SECRET_ID
+        TENCENTCLOUD_SECRET_KEY: TENCENT_RO_SECRET_KEY
+        TENCENTCLOUD_TOKEN: TENCENT_RO_TOKEN
+      rules:
+        - name: jq-output
+          pattern: [jq]
+          decision: allow
+    - name: k8s-readonly
+      agents: [KubernetesAgent]
+      network: true
+      kubeconfig_env: SRE_READONLY_KUBECONFIG  # 变量包含 kubeconfig 正文，不是文件路径
+```
+
+示例中的 Agent 必须先在 Agents 页定义。服务端变量须在启动进程时提供；腾讯云临时凭据变量名遵循 [TCCLI 官方说明](https://github.com/TencentCloud/tencentcloud-cli/blob/master/README.md)。没有凭据时返回配置缺失，不运行查询。Kubeconfig 在每次调用的私有目录以 `0600` 写入，结束后清除；仅支持内嵌凭据，拒绝插件、宿主机文件引用和关闭 TLS 校验。沙箱环境不继承服务端的其他密钥，输出与错误消息会掩码注入值和常见凭据字段。
+
+本版本复用系统沙箱或 Docker。macOS 使用 Seatbelt；Linux 联网配置需要 Landlock ABI v3+，**离线配置需要 Docker**，因为 Landlock 不能完整限制 UDP/QUIC。Docker 镜像必须预先准备，执行不会自动拉镜像；可用 `images/sre-runtime/Dockerfile` 构建含诊断 CLI 的镜像，并在配置中设置 `image`。各次调用使用独立临时工作目录，不挂载宿主机配置、技能或代码目录。输出在采集时即有内存上限，正常结束/超时/取消终止子进程组，Docker 正常收尾会清理其命名容器。OS 子进程主动脱离进程组以及服务被强制杀死后的遗留容器/目录回收，仍是未完成的生命周期边界。
+
+构建诊断镜像前，设置所需的 `TCCLI_VERSION` 和与集群匹配的 `KUBECTL_VERSION`（含 `v` 前缀）：
+
+```bash
+docker build -f images/sre-runtime/Dockerfile \
+  --build-arg TCCLI_VERSION="$TCCLI_VERSION" \
+  --build-arg KUBECTL_VERSION="$KUBECTL_VERSION" \
+  -t jelly-sre-runtime:local .
+```
+
+镜像版本在构建时选择，Agent 执行过程中不安装或更新工具。生产镜像另应固定基础镜像 digest、冻结依赖并按部署流程扫描。
+
+返回包含执行标识、策略与命中规则、`executed`、退出码、stdout/stderr、耗时、超时和截断标记。结果通过现有工具网关保存在状态库，使用网关的 `evidence_id` 引用，并可由 `read_result / search_result` 按会话取回。取回的是**执行器已脱敏且在采集上限内的输出**，超过采集上限的字节不保留。工具页的“检查已保存规则”只评估策略，不解析凭据或启动进程。
+
+**写操作审批**：在工具页为指定执行配置勾选“允许申请写操作审批”，默认不启用。Agent 调用 `prompt` 命令后暂停，会话和任务显示等待审批。对话页展示服务端保存的完整命令、用途、Agent、配置名称和有效期；管理员可“批准并执行一次”或拒绝。任务页与会话页也提供入口。批准会继续原会话与原任务，仍经过工具网关、沙箱、超时和输出脱敏。
+
+审批绑定会话、Agent、原始工具调用、完整命令参数、用途、超时和执行配置/注入身份的摘要，十分钟后失效。配置或凭据来源中的内容改变（包括重启后切换 kubeconfig 集群）会使审批失效；摘要不包含可取回的凭据正文。浏览器只提交审批标识和布尔决定，不能改命令、工具调用或身份；聊天中的自然语言同意不会授权执行。批准和使用都有数据库原子检查，多标签页、请求重放只能执行一次。执行前先消耗审批，启动失败、超时或断线均不自动重试；未记录执行结果时应先核查目标资源，重新执行须重新申请。待审批记录持久化，刷新页面或服务重启后可以继续审批；已经批准/使用的记录不会因重启重新获得执行权。
+
+可配置 `write_env`（子进程变量 → 服务端变量名）和 `write_kubeconfig_env`，只有批准后的那一次执行才覆盖对应的诊断凭据；留空沿用原凭据。写凭据须由部署者按 IAM/RBAC 限定资源权限，不保存到审批记录或提示词中，也不会自动签发 STS。执行标识关联工具证据，审批保留处理人、时间和结果。API：`GET /api/sessions/{id}/approvals` 查询，`POST /api/chat/stream` 发送 `{session_id, approval_id, approve}` 继续审批；不得同时携带消息。
+
+PostgreSQL 现有部署升级时，需先应用 `migrations/postgres/0001_init.sql` 末尾的 `execution_approvals` 建表/索引块；SQLite 自动建表。自动 STS 签发、SSO/资源 ScopePolicy 和域名/IP/端口出口白名单仍属后续阶段。当前自动诊断的只读权限和获批写操作的资源范围，由提供凭据的 IAM/RBAC 保证。
+
+生命周期的逐项验证、已修复问题和剩余验收任务见 [执行生命周期验证报告](docs/execution-lifecycle-verification.md)。单次审批只保证本地授权不会重放，超时/取消/崩溃后须核查外部资源，不能把未记录结果当成“没有产生变更”。
+
 ## 核心记忆（L1）
 
 Agent 维护两份 markdown 长期记忆，每轮对话自动拼进 system prompt（各有 token 预算，超限自动裁剪最旧条目）：

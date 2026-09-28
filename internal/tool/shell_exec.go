@@ -1,0 +1,37 @@
+package tool
+
+import (
+	"github.com/jelly-agent/jelly-agent/internal/execution"
+	adktool "google.golang.org/adk/tool"
+	"google.golang.org/adk/tool/functiontool"
+)
+
+const ShellExecName = "shell_exec"
+
+// The agent identity is captured when building each node, never from model args.
+func NewShellExecTool(runtime execution.Runtime, agent string) (adktool.Tool, error) {
+	return functiontool.New(functiontool.Config{
+		Name:        ShellExecName,
+		Description: "在完整沙箱中执行诊断命令，启用审批的配置可申请逐次写操作。没有专用工具时使用，必须说明目的并选择已分配的执行配置。\n" + runtime.Config.Instruction(agent),
+	}, func(tc adktool.Context, req execution.Request) (execution.Observation, error) {
+		if confirmation := tc.ToolConfirmation(); confirmation != nil {
+			execution.ApprovalStarted(tc, tc.InvocationID())
+			if !confirmation.Confirmed {
+				return execution.Observation{Evaluation: execution.Evaluation{Decision: execution.Forbidden, Reason: "用户已拒绝此命令"}, Profile: req.Profile, ExitCode: -1, Error: "用户已拒绝此命令，未执行"}, nil
+			}
+			return runtime.ExecuteApproved(tc, agent, tc.SessionID(), tc.FunctionCallID(), req), nil
+		}
+		check := runtime.Check(agent, req)
+		if check.Decision == execution.Prompt && runtime.WritesEnabled(agent, req.Profile) && runtime.Approvals != nil {
+			a, err := runtime.Approvals.Create(tc, runtime.Config, agent, tc.SessionID(), tc.InvocationID(), tc.FunctionCallID(), req)
+			if err != nil {
+				return execution.Observation{}, err
+			}
+			if err := tc.RequestConfirmation(check.Reason, map[string]any{"approval_id": a.ID}); err != nil {
+				return execution.Observation{}, err
+			}
+			return execution.Observation{Evaluation: check, Profile: req.Profile, ApprovalRequired: true, ApprovalID: a.ID, ExitCode: -1}, nil
+		}
+		return runtime.Execute(tc, agent, tc.SessionID(), req), nil
+	})
+}

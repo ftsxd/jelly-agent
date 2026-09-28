@@ -18,6 +18,7 @@ import (
 	adksession "google.golang.org/adk/session"
 
 	"github.com/jelly-agent/jelly-agent/internal/engine"
+	"github.com/jelly-agent/jelly-agent/internal/execution"
 	"github.com/jelly-agent/jelly-agent/internal/logging"
 	"github.com/jelly-agent/jelly-agent/internal/ops"
 	"github.com/jelly-agent/jelly-agent/internal/record"
@@ -98,7 +99,7 @@ func (s *Server) tasksOf(r *http.Request, svc adksession.Service, id string, inf
 			links = got
 		}
 	}
-	return s.foldWithStatus(id, frames, infoOf, links), nil
+	return s.foldWithStatus(r.Context(), s.engineFor(r), id, frames, infoOf, links), nil
 }
 
 // sessionVersion is what makes a cached projection safe to reuse.
@@ -197,13 +198,59 @@ func (s *Server) framesOf(r *http.Request, svc adksession.Service, id string, v 
 // task links, and both change without the session changing. Recomputing it is
 // cheap — it walks frames already in memory — so the cache never has to know
 // about a second kind of change.
-func (s *Server) foldWithStatus(id string, frames []map[string]any,
-	infoOf func(string) ToolInfo, links map[string]string,
+func (s *Server) foldWithStatus(ctx context.Context, eng *engine.Engine, id string, frames []map[string]any,
+	infoOf func(string) ToolInfo, links map[string]string, supplied ...[]execution.Approval,
 ) []Task {
 	tasks := foldTasks(id, frames, infoOf, links)
+	var approvals []execution.Approval
+	if len(supplied) > 0 {
+		approvals = supplied[0]
+	} else if db, err := eng.StateDB(); err == nil {
+		states, _ := (execution.Approvals{DB: db}).StatesForSessions(ctx, []string{id}, eng.Config().Execution)
+		approvals = states[id]
+	}
 	for i := range tasks {
-		if st, known := s.runs().status(tasks[i].ID); known {
+		st, known := s.runs().status(tasks[i].ID)
+		if known {
 			tasks[i].Status = st
+		}
+		if tasks[i].Status == TaskRunning {
+			continue
+		}
+		// A call without a result after the process disappears is uncertain,
+		// especially for writes. A restart must not turn it into completion.
+		if !known && len(tasks[i].Runs) > 0 {
+			last := tasks[i].Runs[len(tasks[i].Runs)-1]
+			for _, step := range tasks[i].Steps {
+				for _, tool := range step.Tools {
+					if tool.Pending && tool.Round == last {
+						tasks[i].Status = TaskBlocked
+					}
+				}
+			}
+		}
+		latest := false
+		for _, a := range approvals {
+			if taskIDFor(id, a.InvocationID, links) != tasks[i].ID {
+				continue
+			}
+			if a.State == "pending" {
+				tasks[i].Status = TaskWaitingInput
+				break
+			}
+			// Older failed/expired approvals do not overwrite a newer result.
+			if latest {
+				continue
+			}
+			latest = true
+			if a.State == "expired" || a.State == "invalidated" || a.State == "abandoned" || (a.State == "approved" && !s.runs().sessionActive(id)) || (a.State == "consumed" && a.Outcome == "" && !s.runs().sessionActive(id)) {
+				tasks[i].Status = TaskBlocked
+			}
+		}
+		for j := range tasks[i].Steps {
+			if tasks[i].Steps[j].Status == TaskRunning && tasks[i].Status != TaskCompleted {
+				tasks[i].Steps[j].Status = tasks[i].Status
+			}
 		}
 	}
 	return tasks
@@ -318,12 +365,13 @@ func (s *Server) handleTasks(w http.ResponseWriter, r *http.Request) {
 		// The cache below still helps a warm request, but it is no longer
 		// what keeps the first one from being 600 round trips.
 		batch := s.framesForPage(r, stateDB, metas)
+		approvalStates, _ := (execution.Approvals{DB: stateDB}).StatesForSessions(r.Context(), ids, s.engineFor(r).Config().Execution)
 		for _, m := range metas {
 			frames, ok := batch[m.ID]
 			if !ok {
 				continue // a session that vanished mid-scan is not an error for the list
 			}
-			tasks := s.foldWithStatus(m.ID, frames, infoOf, links[m.ID])
+			tasks := s.foldWithStatus(r.Context(), s.engineFor(r), m.ID, frames, infoOf, links[m.ID], approvalStates[m.ID])
 			runs := recorded[m.ID]
 			for _, t := range tasks {
 				// Conversation is not work. "你好" belongs in the sessions

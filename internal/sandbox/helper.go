@@ -29,8 +29,8 @@ type helperSpec struct {
 // run. The target command is appended by the caller after the "--" terminator.
 func helperArgv(exe string, p Policy, dir string) []string {
 	argv := []string{exe, HelperCommand}
-	for _, r := range systemReadPaths {
-		argv = append(argv, flagReadOnly+r)
+	for _, r := range systemPaths(p) {
+		argv = append(argv, flagReadOnly+canonical(r))
 	}
 	for _, r := range p.ReadPaths {
 		if c := canonical(r); c != "" {

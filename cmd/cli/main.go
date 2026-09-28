@@ -143,5 +143,18 @@ func listBuiltins() ([]adktool.Tool, error) {
 	if err != nil {
 		return nil, err
 	}
-	return eng.Tools(core, eng.SearchEnabled())
+	tools, err := eng.Tools(core, eng.SearchEnabled())
+	if err != nil {
+		return nil, err
+	}
+	name := eng.DefaultAgentName()
+	if name == "" {
+		name = "root"
+	}
+	if ex, err := eng.ShellExecToolFor(name); err != nil {
+		return nil, err
+	} else if ex != nil {
+		tools = append(tools, ex)
+	}
+	return tools, nil
 }

@@ -1,6 +1,7 @@
 <script setup>
 import { onMounted, ref } from 'vue'
 import Icon from '../components/Icon.vue'
+import ExecutionSettings from '../components/ExecutionSettings.vue'
 import { api } from '../api'
 import { sendOnEnter } from '../ime'
 
@@ -103,6 +104,7 @@ async function runFetch() {
 
       <section class="col">
         <h2 class="section-title">测试台</h2>
+        <ExecutionSettings class="execution-settings" @saved="load" />
         <div class="tabs">
           <button class="tab" :class="{ on: tab === 'web_search' }" @click="switchTab('web_search')">web_search</button>
           <button class="tab" :class="{ on: tab === 'fetch_url' }" @click="switchTab('fetch_url')">fetch_url</button>
@@ -263,6 +265,7 @@ async function runFetch() {
   flex-direction: column;
   gap: var(--sp-3);
 }
+.execution-settings { margin-bottom: var(--sp-5); }
 .field {
   display: flex;
   flex-direction: column;

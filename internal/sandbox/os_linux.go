@@ -2,6 +2,7 @@ package sandbox
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"strconv"
 	"sync"
@@ -42,6 +43,18 @@ func probe() {
 func osAvailable() bool {
 	probe()
 	return abiVer >= 1 && selfErr == nil
+}
+
+// Landlock cannot block UDP/QUIC. Offline execution needs a container.
+func osStrictError(p Policy) error {
+	probe()
+	if abiVer < 3 {
+		return fmt.Errorf("通用执行器需要 Landlock ABI v3+ 的完整文件写限制，或 docker 后端")
+	}
+	if !p.Mode.CanNetwork() {
+		return fmt.Errorf("Landlock 无法完全禁止 UDP/QUIC，请为离线执行使用 docker 后端")
+	}
+	return nil
 }
 
 func osUnavailable() string {
