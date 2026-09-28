@@ -24,6 +24,16 @@ services:
       args:
         BUILD_REVISION: ${JELLY_BUILD_REVISION:-unknown}
     user: "0:0"
+    # 让容器里的 bubblewrap 能建命名空间，通用执行器（shell_exec）的每条命令才有
+    # 沙箱可用。Docker 默认 seccomp 拦 unshare/mount，docker-default AppArmor 拦
+    # mount（Debian/Ubuntu 宿主机默认启用 AppArmor），两条都要放开。
+    #
+    # 这是取舍：放宽的是这个容器自身的外层防护，换来的是每条命令一层按调用隔离的
+    # 沙箱（只读系统目录、私有工作目录、可断网）。不用 shell_exec 的话删掉这两行，
+    # 执行器会在启动探测失败后照旧拒绝执行，不会误以为有沙箱。不要改成 privileged。
+    security_opt:
+      - seccomp=unconfined
+      - apparmor=unconfined
     ports:
       - "6185:6185"
     volumes:

@@ -42,10 +42,17 @@ type Observation struct {
 	TimedOut         bool   `json:"timed_out"`
 	Cancelled        bool   `json:"cancelled,omitempty"`
 	Backend          string `json:"backend,omitempty"`
-	OutcomeUnknown   bool   `json:"outcome_unknown,omitempty"`
-	Outcome          string `json:"outcome,omitempty"`
-	CleanupPending   bool   `json:"cleanup_pending,omitempty"`
-	Error            string `json:"error,omitempty"`
+	// Unconfined is true only when AllowUnconfinedWithApproval let an approved
+	// call run with no sandbox at all, because neither docker, bwrap nor
+	// Landlock was available. Degraded carries why (the CheckStrict error, or a
+	// backend's own partial-enforcement note) so it reaches the audit trail
+	// even though the run otherwise succeeded.
+	Unconfined     bool   `json:"unconfined,omitempty"`
+	Degraded       string `json:"degraded,omitempty"`
+	OutcomeUnknown bool   `json:"outcome_unknown,omitempty"`
+	Outcome        string `json:"outcome,omitempty"`
+	CleanupPending bool   `json:"cleanup_pending,omitempty"`
+	Error          string `json:"error,omitempty"`
 }
 
 type Runtime struct {
@@ -55,6 +62,11 @@ type Runtime struct {
 	// run is a package-private seam for asserting that denied calls never run.
 	run func(context.Context, sandbox.Policy, sandbox.Spec) (sandbox.Result, error)
 }
+
+// checkStrict is the matching seam for the sandbox preflight, so the
+// unconfined escape hatch can be exercised on hosts that do have a working
+// sandbox. Package-level because Approvals.Create builds its own Runtime.
+var checkStrict = sandbox.CheckStrict
 
 func (r Runtime) Check(agent string, req Request) Evaluation {
 	if err := r.Config.Validate(); err != nil {
@@ -68,7 +80,18 @@ func (r Runtime) Check(agent string, req Request) Evaluation {
 	}
 	for _, p := range r.Config.ProfilesFor(agent) {
 		if p.Name == req.Profile {
-			return Evaluate(req.Command, p.Rules)
+			ev := Evaluate(req.Command, p.Rules)
+			// A Forbidden command stays forbidden regardless of sandbox
+			// availability; an already-Prompt decision (from a rule) keeps its
+			// own reason — this only escalates the plain Allow case, and only
+			// for a profile that opted in.
+			if p.AllowUnconfinedWithApproval && ev.Decision == Allow {
+				if err := checkStrict(r.policy(p, req)); err != nil {
+					ev.Decision = Prompt
+					ev.Reason = "沙箱隔离不可用，需人工批准后以无隔离方式执行：" + err.Error()
+				}
+			}
+			return ev
 		}
 	}
 	return Evaluation{Decision: Forbidden, Reason: "执行器未启用，或当前 Agent 未获分配此执行配置"}
@@ -86,10 +109,14 @@ func (r Runtime) policy(profile Profile, req Request) sandbox.Policy {
 	if cap == 0 {
 		cap = DefaultMaxOutputKB
 	}
+	// Backend selection belongs to sandbox.selectBackend, not here: an empty
+	// Config.Backend must reach it unmodified so its own docker→os→native ladder
+	// runs. AllowDocker is intentionally never set on this Policy — a ToolDir
+	// profile installs its CLI on a host path, and auto-picking docker would make
+	// that tool invisible inside the container (policy.go already forbids
+	// combining ToolDir with Backend=="docker"; a profile that wants docker must
+	// opt in explicitly via Config.Backend).
 	backend := r.Config.Backend
-	if backend == "" {
-		backend = "os"
-	}
 	mode := sandbox.ModeWorkspace
 	if profile.Network {
 		mode = sandbox.ModeWorkspaceNet
@@ -106,7 +133,7 @@ func (r Runtime) Execute(ctx context.Context, agent, session string, req Request
 // The store checks the context grant, exact args, identity, expiry and config.
 func (r Runtime) ExecuteApproved(ctx context.Context, agent, session, call string, req Request) Observation {
 	ev := r.Check(agent, req)
-	if ev.Decision == Forbidden || !r.WritesEnabled(agent, req.Profile) || r.Approvals == nil {
+	if ev.Decision == Forbidden || !r.ApprovalEnabled(agent, req.Profile) || r.Approvals == nil {
 		reason := "当前执行配置不允许审批执行"
 		if ev.Decision == Forbidden {
 			reason = ev.Reason
@@ -172,7 +199,8 @@ func (r Runtime) execute(ctx context.Context, agent, session string, req Request
 		slog.InfoContext(ctx, "通用命令执行", "exec_id", out.ExecID, "session_id", session, "agent", agent,
 			"approval_id", out.ApprovalID, "approved", out.Approved,
 			"profile", out.Profile, "decision", out.Decision, "executed", out.Executed, "exit_code", out.ExitCode,
-			"duration_ms", out.DurationMS, "truncated", out.Truncated)
+			"duration_ms", out.DurationMS, "truncated", out.Truncated,
+			"backend", out.Backend, "unconfined", out.Unconfined, "degraded", out.Degraded)
 	}()
 	if intent != nil {
 		defer r.finishManaged(&out, *intent)
@@ -244,9 +272,19 @@ func (r Runtime) execute(ctx context.Context, agent, session string, req Request
 			return
 		}
 	}
-	if err := sandbox.CheckStrict(pol); err != nil {
-		out.Error = err.Error()
-		return
+	if err := checkStrict(pol); err != nil {
+		if !profile.AllowUnconfinedWithApproval || approvedID == "" {
+			out.Error = err.Error()
+			return
+		}
+		// A human already approved this exact call (Check escalated it to
+		// Prompt for this same reason); run it with no sandbox at all rather
+		// than refusing outright. Explicit, not a natural degrade, so it stays
+		// predictable and shows up in the audit trail via Unconfined/Degraded.
+		out.Unconfined = true
+		out.Degraded = err.Error()
+		pol.Strict = false
+		pol.Backend = "native"
 	}
 	// Each call gets a private workspace. Neither a model-provided cwd nor a
 	// prior agent's generated file can change what this invocation executes.
@@ -349,6 +387,13 @@ func (r Runtime) execute(ctx context.Context, agent, session string, req Request
 	res, err := run(ctx, pol, sandbox.Spec{Dir: dir, Argv: argv, Env: env, Secrets: secrets, Managed: managed})
 	out.DurationMS = time.Since(start).Milliseconds()
 	out.Backend = res.Backend
+	if res.Degraded != "" {
+		if out.Degraded != "" {
+			out.Degraded += "；" + res.Degraded
+		} else {
+			out.Degraded = res.Degraded
+		}
+	}
 	out.ExitCode = res.ExitCode
 	out.TimedOut = res.TimedOut
 	out.Cancelled = res.Cancelled || ctx.Err() == context.Canceled
@@ -439,10 +484,10 @@ func (c Config) Instruction(agent string) string {
 		return ""
 	}
 	var b strings.Builder
-	b.WriteString("通用执行器：用户要求查询或排查时，要实际调用工具完成任务。优先使用已有结构化工具；缺少专用工具时，用 shell_exec 调用官方 CLI 或经显式规则授权的 SDK。参数不确定先调用 help，拿到帮助后立即继续只读查询；根据真实 stderr 修正参数并重试合法的只读查询，必要时分页直至结果完整。不能仅返回脚本让用户自己运行，也不能在未尝试已分配工具时声称没有执行能力。缺凭据、权限不足或 CLI 不可用时，引用实际失败证据说明阻塞，不虚构资源或绕过限制。不读取/打印凭据，不安装软件，不用额外权限绕过失败。prompt 命令只有启用了写操作审批的配置才能发起审批，系统等待用户在控制台确认原始命令后执行一次；自然语言同意不代表获批，不得改写命令或重复调用规避审批。forbidden 无法审批。每个审批十分钟失效，命令或配置改变必须重新申请。结果包含 exit_code、stdout/stderr 与 executed，executed=false 不是查询结果。结论引用网关返回的 evidence_id；已截断的输出不代表完整数据。凭据由系统注入，不向用户索要。\n")
+	b.WriteString("通用执行器：用户要求查询或排查时，要实际调用工具完成任务。优先使用已有结构化工具；缺少专用工具时，用 shell_exec 调用官方 CLI 或经显式规则授权的 SDK。参数不确定先调用 help，拿到帮助后立即继续只读查询；根据真实 stderr 修正参数并重试合法的只读查询，必要时分页直至结果完整。不能仅返回脚本让用户自己运行，也不能在未尝试已分配工具时声称没有执行能力。缺凭据、权限不足或 CLI 不可用时，引用实际失败证据说明阻塞，不虚构资源或绕过限制。不读取/打印凭据，不安装软件，不用额外权限绕过失败。prompt 命令只有启用了写操作审批或无沙箱审批执行的配置才能发起审批，系统等待用户在控制台确认原始命令后执行一次；自然语言同意不代表获批，不得改写命令或重复调用规避审批。forbidden 无法审批。每个审批十分钟失效，命令或配置改变必须重新申请。结果包含 exit_code、stdout/stderr 与 executed，executed=false 不是查询结果。结论引用网关返回的 evidence_id；已截断的输出不代表完整数据。凭据由系统注入，不向用户索要。\n")
 	b.WriteString("输出被截断时，先查 CLI 顶层帮助寻找原生字段过滤与分页能力，以所需字段和总数精简输出。tccli 支持 --filter（JMESPath，本地过滤返回值），可保留 TotalCount、RequestId 和所需资源字段；避免依赖未获授权的本地脚本或处理器。遇到权限拒绝时，不尝试改变身份或扩大资源范围。\n可用执行配置：\n")
 	for _, p := range profiles {
-		fmt.Fprintf(&b, "- %s（联网：%t；可申请写审批：%t；变量名称：", p.Name, p.Network, p.WriteApproval)
+		fmt.Fprintf(&b, "- %s（联网：%t；可申请写审批：%t；无沙箱时可申请审批执行：%t；变量名称：", p.Name, p.Network, p.WriteApproval, p.AllowUnconfinedWithApproval)
 		// Names, not source names or values. Sorting keeps prompts stable.
 		keys := sortedKeys(mergeEnv(p.Env, p.AgentEnv))
 		b.WriteString(strings.Join(keys, ", "))

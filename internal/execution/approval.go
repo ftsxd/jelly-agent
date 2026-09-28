@@ -143,7 +143,7 @@ func configHash(c Config) string {
 func (s Approvals) Create(ctx context.Context, c Config, agent, session, invocation, call string, req Request) (Approval, error) {
 	r := Runtime{Config: c}
 	ev := r.Check(agent, req)
-	if ev.Decision != Prompt || !r.WritesEnabled(agent, req.Profile) || session == "" || call == "" {
+	if ev.Decision != Prompt || !r.ApprovalEnabled(agent, req.Profile) || session == "" || call == "" {
 		return Approval{}, ErrApproval
 	}
 	var id [16]byte
@@ -353,6 +353,21 @@ func (r Runtime) WritesEnabled(agent, profile string) bool {
 	for _, p := range r.Config.ProfilesFor(agent) {
 		if p.Name == profile {
 			return p.WriteApproval
+		}
+	}
+	return false
+}
+
+// ApprovalEnabled reports whether this profile can ever turn a Prompt
+// decision into a human confirmation at all — either because it grants
+// elevated write credentials (WriteApproval) or because it may run a call
+// unconfined once approved (AllowUnconfinedWithApproval). Both share the same
+// Prompt → RequestConfirmation → ExecuteApproved pipeline; only the reason a
+// Prompt was issued differs.
+func (r Runtime) ApprovalEnabled(agent, profile string) bool {
+	for _, p := range r.Config.ProfilesFor(agent) {
+		if p.Name == profile {
+			return p.WriteApproval || p.AllowUnconfinedWithApproval
 		}
 	}
 	return false

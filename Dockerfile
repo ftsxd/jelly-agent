@@ -21,7 +21,7 @@ RUN mkdir -p /out/data/.jelly-agent && touch /out/data/.jelly-agent/.keep
 # python:slim 是为技能脚本付的代价（镜像 86MB → 254MB，且多了一个 shell），
 # 换来的是沙箱执行这条路在线上真正通。不打算在生产用 run_script 的话，把
 # skills.allow_scripts 关掉，再把这层换回 gcr.io/distroless/base-debian12:nonroot。
-# 镜像本身不是隔离边界——边界由 internal/sandbox 的 os 后端（Landlock）提供。
+# 镜像本身不是隔离边界——边界由 internal/sandbox 的 os 后端（Landlock 或 bubblewrap）提供。
 FROM python:3.12-slim-bookworm
 ARG BUILD_REVISION=unknown
 LABEL org.opencontainers.image.revision="${BUILD_REVISION}"
@@ -33,8 +33,13 @@ LABEL org.opencontainers.image.revision="${BUILD_REVISION}"
 # 挂载卷的属主对不上（./data 来自宿主机，uid 通常不是容器里跑的那个）会让 git 以
 # 「dubious ownership」拒绝打开自己的对象缓存——这一条在代码里按具体路径声明为
 # safe.directory 处理掉了，不需要在镜像里放宽。
+#
+# bubblewrap 是 os 后端在 Linux 上不依赖 lsm=landlock 的那一档：多数云主机内核没开
+# Landlock，没有它通用执行器就只能拒绝执行。光装上不够——Docker 默认 seccomp 不让
+# 容器建命名空间，需要 docker-compose.yml 里的 security_opt 配合；没配时启动探测会
+# 失败，执行器照旧拒绝执行并给出原因，不会误以为有沙箱。
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends git ca-certificates \
+    && apt-get install -y --no-install-recommends git ca-certificates bubblewrap \
     && rm -rf /var/lib/apt/lists/*
 RUN useradd --uid 65532 --user-group --home-dir /data --shell /usr/sbin/nologin nonroot
 COPY --from=build /out/jelly /usr/local/bin/jelly

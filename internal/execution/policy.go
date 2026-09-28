@@ -44,6 +44,13 @@ type Profile struct {
 	WriteEnv           map[string]string `json:"write_env,omitempty" yaml:"write_env,omitempty"`
 	WriteAgentEnv      map[string]string `json:"write_agent_env,omitempty" yaml:"write_agent_env,omitempty"`
 	WriteKubeconfigEnv string            `json:"write_kubeconfig_env,omitempty" yaml:"write_kubeconfig_env,omitempty"`
+	// AllowUnconfinedWithApproval is the last-resort escape hatch for a host
+	// where docker, bwrap and Landlock are all unavailable: an otherwise
+	// Allow-decided call is escalated to Prompt instead of hard-failing, and
+	// only after a human approves it does the call run with no sandbox at all
+	// (Observation.Unconfined records that it happened). Default false — an
+	// unset profile keeps failing closed exactly as before this existed.
+	AllowUnconfinedWithApproval bool `json:"allow_unconfined_with_approval,omitempty" yaml:"allow_unconfined_with_approval,omitempty"`
 }
 
 type Config struct {

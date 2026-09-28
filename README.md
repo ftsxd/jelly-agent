@@ -138,7 +138,7 @@ execution:
 
 示例中的 Agent 必须先在 Agents 页定义。服务端变量须在启动进程时提供；腾讯云临时凭据变量名遵循 [TCCLI 官方说明](https://github.com/TencentCloud/tencentcloud-cli/blob/master/README.md)。没有凭据时返回配置缺失，不运行查询。Kubeconfig 在每次调用的私有目录以 `0600` 写入，结束后清除；仅支持内嵌凭据，拒绝插件、宿主机文件引用和关闭 TLS 校验。沙箱环境不继承服务端的其他密钥，输出与错误消息会掩码注入值和常见凭据字段。
 
-本版本复用系统沙箱或 Docker。macOS 使用 Seatbelt；Linux 联网配置需要 Landlock ABI v3+，**离线配置需要 Docker**，因为 Landlock 不能完整限制 UDP/QUIC。Docker 镜像必须预先准备，执行不会自动拉镜像；可用 `images/sre-runtime/Dockerfile` 构建含诊断 CLI 的镜像，并在配置中设置 `image`。各次调用使用独立临时工作目录，不挂载宿主机配置、技能或代码目录。输出在采集时即有内存上限，正常结束/超时/取消终止子进程组，Docker 正常收尾会清理其命名容器。OS 子进程主动脱离进程组以及服务被强制杀死后的遗留容器/目录回收，仍是未完成的生命周期边界。
+本版本复用系统沙箱或 Docker。macOS 使用 Seatbelt；Linux 使用 Landlock 或 bubblewrap：Landlock 单独能满足时用它（仅联网配置，需要 ABI v3+；它拦不住 UDP/QUIC，所以离线配置一律要 bubblewrap 或 Docker），否则用 bubblewrap（官方镜像已预装，容器内需 `docker-compose.yml` 中的 `security_opt`，见 [docs/sandbox.md](docs/sandbox.md)）。都不可用时默认拒绝执行；profile 可选开启 `allow_unconfined_with_approval`，改为逐次人工审批后以无隔离方式执行一次，结果标记 `unconfined`。Docker 镜像必须预先准备，执行不会自动拉镜像；可用 `images/sre-runtime/Dockerfile` 构建含诊断 CLI 的镜像，并在配置中设置 `image`。各次调用使用独立临时工作目录，不挂载宿主机配置、技能或代码目录。输出在采集时即有内存上限，正常结束/超时/取消终止子进程组，Docker 正常收尾会清理其命名容器。OS 子进程主动脱离进程组以及服务被强制杀死后的遗留容器/目录回收，仍是未完成的生命周期边界。
 
 构建诊断镜像前，设置所需的 `TCCLI_VERSION` 和与集群匹配的 `KUBECTL_VERSION`（含 `v` 前缀）：
 

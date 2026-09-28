@@ -2,6 +2,7 @@ package execution
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
@@ -255,5 +256,56 @@ func TestApprovedRuntimeUsesWriteCredentialsOnlyOnce(t *testing.T) {
 	got, _ := s.Get(t.Context(), a.ID)
 	if got.Outcome != "succeeded" || got.ExecID != out.ExecID {
 		t.Fatal(got)
+	}
+}
+
+// AllowUnconfinedWithApproval must never let a call skip the sandbox on its
+// own — it only turns "no sandbox mechanism available" into a Prompt that a
+// human then has to approve, exactly like a WriteApproval escalation.
+func TestUnconfinedEscapeHatchRequiresApprovalAndRecordsDegradation(t *testing.T) {
+	restore := checkStrict
+	checkStrict = func(sandbox.Policy) error { return fmt.Errorf("no sandbox on this host") }
+	t.Cleanup(func() { checkStrict = restore })
+	s := approvalStore(t)
+	c := testConfig()
+	req := Request{Command: "kubectl get pods", Purpose: "diagnose", Profile: "read"}
+	calls := 0
+	run := func(_ context.Context, p sandbox.Policy, _ sandbox.Spec) (sandbox.Result, error) {
+		calls++
+		if p.Strict || p.Backend != "native" {
+			t.Fatalf("expected explicit unconfined native policy, got %+v", p)
+		}
+		return sandbox.Result{ExitCode: 0, Backend: "native"}, nil
+	}
+
+	// Default off: the flag's absence keeps failing closed exactly as before.
+	r := Runtime{Config: c, Approvals: &s, run: run}
+	if check := r.Check("ops", req); check.Decision != Allow {
+		t.Fatalf("unset flag must not change the decision: %+v", check)
+	}
+	if out := r.Execute(t.Context(), "ops", "s", req); out.Executed || out.Error == "" || calls != 0 {
+		t.Fatalf("unset flag must refuse without a sandbox: %+v", out)
+	}
+
+	c.Profiles[0].AllowUnconfinedWithApproval = true
+	r.Config = c
+	if check := r.Check("ops", req); check.Decision != Prompt || check.Reason == "" {
+		t.Fatalf("expected sandbox-unavailable escalation to prompt, got %+v", check)
+	}
+	if out := r.Execute(t.Context(), "ops", "s", req); out.Executed || !out.ApprovalRequired || calls != 0 {
+		t.Fatalf("unapproved call must not run unconfined: %+v", out)
+	}
+	// Forbidden stays forbidden; the escape hatch never rescues it.
+	if check := r.Check("ops", Request{Command: "kubectl delete pod x", Purpose: "diagnose", Profile: "read"}); check.Decision != Forbidden {
+		t.Fatalf("forbidden command escalated: %+v", check)
+	}
+
+	a := newApproval(t, s, c, req)
+	if err := s.Resolve(t.Context(), a.ID, "s", "admin", true, c); err != nil {
+		t.Fatal(err)
+	}
+	out := r.ExecuteApproved(WithApproval(t.Context(), a.ID), "ops", "s", "call", req)
+	if !out.Executed || !out.Unconfined || out.Degraded == "" || calls != 1 {
+		t.Fatalf("expected an approved unconfined run with degradation recorded: %+v", out)
 	}
 }

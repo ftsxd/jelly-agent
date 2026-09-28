@@ -22,7 +22,7 @@
 | 后端 | 是什么 | 代价 |
 |---|---|---|
 | `native` | 纯 Go 加固：清洗环境、限工作目录、超时杀整进程组、CPU 上限、输出截断 | 零依赖，但**不是安全边界**——文件系统和网络完全不管，mode 在它上面是空话 |
-| `os` | 系统自带的隔离原语，无守护进程、无镜像、一次 exec 的开销 | macOS 用 Seatbelt（`sandbox-exec`），Linux 用 Landlock。**默认走这条** |
+| `os` | 系统自带的隔离原语，无守护进程、无镜像、一次 exec 的开销 | macOS 用 Seatbelt（`sandbox-exec`），Linux 用 Landlock 或 bubblewrap。**默认走这条** |
 | `docker` | 临时容器：无网络、只读 rootfs、内存/PID 限额、只挂工作目录 | 最强也最重；容器化部署里还得挂 docker socket，那等于交出宿主 root，所以要显式 `allow_docker: true` |
 
 留空自动选：`allow_docker` 且有 docker → docker；否则能用 os 就用 os；都不行才退到 native。**降级永远会说出来**（`Result.Degraded`，同时进审计日志）——一次看起来被沙箱包住、实际没有的执行，比压根没有沙箱更糟。
@@ -34,11 +34,12 @@
 | macOS Seatbelt | 白名单 | 工作目录 | 断得掉 |
 | Linux Landlock ABI ≥ v4（内核 6.7+） | 白名单 | 工作目录 | 断 TCP |
 | Linux Landlock v1–v3（含 Debian 12 的 6.1） | 白名单 | 工作目录 | **断不掉**，每次执行都会带降级说明 |
-| Linux 无 Landlock | — | — | — → 退回 native |
+| Linux bubblewrap（Landlock 不够或没有时） | 白名单 | 工作目录 | 断得掉（独立网络命名空间，含 UDP） |
+| Linux 两者都没有 | — | — | — → 退回 native |
 
 ### 已知缺口
 
-- **UDP / QUIC**：Landlock 的网络规则只管 TCP 的 bind/connect，UDP 出网不在它管辖内。真要彻底断网，用 docker 后端。
+- **UDP / QUIC**：Landlock 的网络规则只管 TCP 的 bind/connect，UDP 出网不在它管辖内。要彻底断网，装 bubblewrap 或用 docker 后端。
 - **Debian 12 是常见情况不是边角**：它的 6.1 内核没有 Landlock v4，文件系统限得住、出网限不住。Web 的「脚本沙箱设置」里会直接把本机的实际能力写出来。
 - **读取放得比写宽**：解释器和标准库要能读，所以系统目录整体放开。别把 agent 的配置目录写进 `read_paths`。
 
@@ -53,6 +54,29 @@ jelly __sandbox --ro=/usr --ro=/bin … --rw=<技能目录> --no-net -- python3 
 这个隐藏子命令先把限制加在**自己**身上，再 `exec` 真正的目标，所以目标从第一条指令起就已经被关住，不存在一个「还没上锁」的窗口。单二进制，无需额外安装，无需特权。
 
 父子之间的 argv 约定在 `internal/sandbox/helper.go`，拼装和解析都不带平台标签，因此在 macOS 上也能跑往返测试——Landlock 本身只能在 Linux 上验，但这个接缝不必。
+
+### bubblewrap（`internal/sandbox/bwrap_linux.go`）
+
+多数云主机内核没开 `lsm=landlock`，所以 Linux 上还有第二种机制：bubblewrap，Claude Code 和 Codex CLI 在 Linux 上默认用的也是它。它只需要 `bwrap` 这个程序和非特权 user namespace，不挑内核版本，断网是整个网络命名空间不给，UDP 也断得掉。选择顺序：Landlock 单独就能满足要求时用 Landlock（开销更低），否则用 bubblewrap。
+
+安装：
+
+```bash
+sudo apt-get install -y bubblewrap     # Debian / Ubuntu
+sudo dnf install -y bubblewrap         # RHEL / Rocky / Fedora
+```
+
+**装上不等于能用。** 进程第一次用到时会真跑一次 `bwrap … true` 做探测，失败就当作不可用，并把 bwrap 的原始报错放进不可用原因里（Web 的「脚本沙箱设置」、执行器的错误里都能看到）。常见的失败原因：
+
+- **跑在 Docker 容器里**：默认 seccomp 拦 `unshare`/`mount`，docker-default AppArmor 拦 `mount`。仓库里的 `docker-compose.yml` 已经加了 `seccomp=unconfined` 和 `apparmor=unconfined`（取舍写在注释里），镜像里也已经装了 bubblewrap。
+- **主机禁用了非特权 user namespace**：老版本 Debian 看 `sysctl kernel.unprivileged_userns_clone`，Ubuntu 24.04 看 `kernel.apparmor_restrict_unprivileged_userns`。
+
+手动验证：
+
+```bash
+bwrap --unshare-user --unshare-pid --unshare-net --ro-bind / / --proc /proc --dev /dev true && echo ok
+docker compose exec jelly-agent bwrap --unshare-user --unshare-pid --unshare-net --ro-bind / / --proc /proc --dev /dev true && echo ok
+```
 
 ## 按技能收紧
 
@@ -95,7 +119,7 @@ agents:
 go test ./internal/sandbox/          # macOS 上会真跑 Seatbelt 的强制效果
 ```
 
-Linux 侧的强制效果需要一台开了 Landlock 的内核；Docker Desktop 的 LinuxKit 内核没编 Landlock，在那里 os 后端会如实报告不可用并退回 native。
+Linux 侧的强制效果需要一台开了 Landlock 的内核，或者装了能用的 bubblewrap；Docker Desktop 的 LinuxKit 内核没编 Landlock，两者都没有时 os 后端会如实报告不可用并退回 native。
 
 ## 运行镜像
 

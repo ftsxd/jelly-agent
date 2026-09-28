@@ -22,7 +22,7 @@ func NewShellExecTool(runtime execution.Runtime, agent string) (adktool.Tool, er
 			return runtime.ExecuteApproved(tc, agent, tc.SessionID(), tc.FunctionCallID(), req), nil
 		}
 		check := runtime.Check(agent, req)
-		if check.Decision == execution.Prompt && runtime.WritesEnabled(agent, req.Profile) && runtime.Approvals != nil {
+		if check.Decision == execution.Prompt && runtime.ApprovalEnabled(agent, req.Profile) && runtime.Approvals != nil {
 			a, err := runtime.Approvals.Create(tc, runtime.Config, agent, tc.SessionID(), tc.InvocationID(), tc.FunctionCallID(), req)
 			if err != nil {
 				return execution.Observation{}, err
