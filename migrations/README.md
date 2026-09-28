@@ -2,7 +2,13 @@
 
 ```
 migrations/postgres/0001_init.sql    七张表 + 索引 + pg_trgm
+migrations/postgres/0002_execution_runs.sql    已有 PG 部署的执行恢复记录增量
 ```
+
+升级到 Docker 持久化回收版本时，SQLite 会自动建表。已有 PostgreSQL 部署先应用
+`0002_execution_runs.sql`；新部署的 `0001_init.sql` 已包含该表。恢复身份随数据迁移
+保留，但本机私有目录与原 Docker 服务不会随数据库移动，不能在新主机上把旧资源
+当作已清理。旧主机可使用原配置启动独立回收器。
 
 一套 PG 解决全部：关系数据、中文检索、以后的向量。**不引 MySQL，也不引
 Elasticsearch。**

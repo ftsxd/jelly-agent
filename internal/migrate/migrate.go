@@ -57,6 +57,7 @@ var Tables = []string{
 	"tool_decls",
 	"tool_decl_log",
 	"execution_approvals",
+	"execution_runs",
 }
 
 // Report is what one run copied, per table.

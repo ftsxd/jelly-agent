@@ -910,6 +910,7 @@ func (e *Engine) StateDB() (*storage.DB, error) {
 			schedule.EnsureSchema,
 			memory.EnsureSchema,
 			execution.EnsureApprovalSchema,
+			execution.EnsureJournalSchema,
 		} {
 			if err := ensure(db); err != nil {
 				db.Close()
@@ -1291,6 +1292,13 @@ func (e *Engine) ShellExecToolFor(agent string) (adktool.Tool, error) {
 		return nil, err
 	}
 	runtime := execution.Runtime{Config: e.ExecutionConfig()}
+	if e.cfg.Execution.Backend == "docker" {
+		journal, err := e.ExecutionJournal()
+		if err != nil {
+			return nil, err
+		}
+		runtime.Journal = journal
+	}
 	for _, p := range e.cfg.Execution.ProfilesFor(agent) {
 		if p.WriteApproval {
 			db, err := e.StateDB()
@@ -1302,6 +1310,22 @@ func (e *Engine) ShellExecToolFor(agent string) (adktool.Tool, error) {
 		}
 	}
 	return jellytool.NewShellExecTool(runtime, agent)
+}
+
+func (e *Engine) ExecutionJournal() (*execution.Journal, error) {
+	db, err := e.StateDB()
+	if err != nil {
+		return nil, err
+	}
+	ref, err := e.stateReference()
+	if err != nil {
+		return nil, err
+	}
+	root, err := execution.RootForState(ref, e.configDir())
+	if err != nil {
+		return nil, err
+	}
+	return &execution.Journal{DB: db, Root: root}, nil
 }
 
 func (e *Engine) executionInstruction(agent string) string {

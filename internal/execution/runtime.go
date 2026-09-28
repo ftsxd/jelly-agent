@@ -42,12 +42,16 @@ type Observation struct {
 	TimedOut         bool   `json:"timed_out"`
 	Cancelled        bool   `json:"cancelled,omitempty"`
 	Backend          string `json:"backend,omitempty"`
+	OutcomeUnknown   bool   `json:"outcome_unknown,omitempty"`
+	Outcome          string `json:"outcome,omitempty"`
+	CleanupPending   bool   `json:"cleanup_pending,omitempty"`
 	Error            string `json:"error,omitempty"`
 }
 
 type Runtime struct {
 	Config    Config
 	Approvals *Approvals
+	Journal   *Journal
 	// run is a package-private seam for asserting that denied calls never run.
 	run func(context.Context, sandbox.Policy, sandbox.Spec) (sandbox.Result, error)
 }
@@ -95,7 +99,7 @@ func (r Runtime) policy(profile Profile, req Request) sandbox.Policy {
 }
 
 func (r Runtime) Execute(ctx context.Context, agent, session string, req Request) (out Observation) {
-	return r.execute(ctx, agent, session, req, "")
+	return r.execute(ctx, agent, session, req, "", nil)
 }
 
 // ExecuteApproved is called only on an authenticated confirmation resume.
@@ -109,11 +113,38 @@ func (r Runtime) ExecuteApproved(ctx context.Context, agent, session, call strin
 		}
 		return Observation{Evaluation: Evaluation{Decision: Forbidden, Reason: reason}, Profile: req.Profile, ExitCode: -1, Error: reason}
 	}
-	id, err := r.Approvals.consume(ctx, r.Config, agent, session, call, req)
+	var intent *RunRecord
+	if r.Config.Backend == "docker" {
+		if r.Journal == nil || r.Journal.DB != r.Approvals.DB {
+			return Observation{Profile: req.Profile, ExitCode: -1, Error: "审批和执行恢复必须使用同一状态库，未消费审批"}
+		}
+		daemon, err := sandbox.DockerDaemonID(ctx)
+		if err != nil {
+			return Observation{Profile: req.Profile, ExitCode: -1, Error: err.Error()}
+		}
+		n, err := nonce()
+		if err != nil {
+			return Observation{Profile: req.Profile, ExitCode: -1, Error: "生成执行身份失败"}
+		}
+		var p Profile
+		for _, candidate := range r.Config.ProfilesFor(agent) {
+			if candidate.Name == req.Profile {
+				p = candidate
+				break
+			}
+		}
+		authority, _ := ctx.Value(approvalKey{}).(approvalAuthority)
+		record, err := r.Journal.Prepare("exec_"+n, agent, session, req.Profile, authority.id, daemon, r.policy(p, req).Timeout)
+		if err != nil {
+			return Observation{Profile: req.Profile, ExitCode: -1, Error: "无法准备持久化执行身份，未消费审批"}
+		}
+		intent = &record
+	}
+	id, err := r.Approvals.consumeIntent(ctx, r.Config, agent, session, call, req, intent)
 	if err != nil {
 		return Observation{Evaluation: Evaluation{Decision: Forbidden, Reason: approvalError(err)}, Profile: req.Profile, ExitCode: -1, Error: approvalError(err)}
 	}
-	out := r.execute(ctx, agent, session, req, id)
+	out := r.execute(ctx, agent, session, req, id, intent)
 	finishCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	if err := r.Approvals.Finish(finishCtx, id, out); err != nil {
@@ -122,7 +153,7 @@ func (r Runtime) ExecuteApproved(ctx context.Context, agent, session, call strin
 	return out
 }
 
-func (r Runtime) execute(ctx context.Context, agent, session string, req Request, approvedID string) (out Observation) {
+func (r Runtime) execute(ctx context.Context, agent, session string, req Request, approvedID string, intent *RunRecord) (out Observation) {
 	out = Observation{Evaluation: r.Check(agent, req), Profile: req.Profile, ExitCode: -1}
 	out.ApprovalID, out.Approved = approvedID, approvedID != ""
 	var id [16]byte
@@ -131,12 +162,21 @@ func (r Runtime) execute(ctx context.Context, agent, session string, req Request
 		return
 	}
 	out.ExecID = "exec_" + hex.EncodeToString(id[:])
+	if intent != nil {
+		out.ExecID = intent.ExecID
+	}
 	defer func() {
+		if out.Outcome == "" {
+			out.Outcome = observationOutcome(out)
+		}
 		slog.InfoContext(ctx, "通用命令执行", "exec_id", out.ExecID, "session_id", session, "agent", agent,
 			"approval_id", out.ApprovalID, "approved", out.Approved,
 			"profile", out.Profile, "decision", out.Decision, "executed", out.Executed, "exit_code", out.ExitCode,
 			"duration_ms", out.DurationMS, "truncated", out.Truncated)
 	}()
+	if intent != nil {
+		defer r.finishManaged(&out, *intent)
+	}
 	if out.Decision == Forbidden || (out.Decision != Allow && approvedID == "") {
 		out.ApprovalRequired = out.Decision == Prompt
 		return
@@ -210,19 +250,62 @@ func (r Runtime) execute(ctx context.Context, agent, session string, req Request
 	}
 	// Each call gets a private workspace. Neither a model-provided cwd nor a
 	// prior agent's generated file can change what this invocation executes.
-	dir, err := os.MkdirTemp("", "jelly-exec-")
+	var dir string
+	var err error
+	var managed *sandbox.ManagedContainer
+	if pol.Backend == "docker" {
+		if r.Journal == nil {
+			out.Error = "容器执行需要持久化恢复记录，未启动命令"
+			return
+		}
+		daemon, e := sandbox.DockerDaemonID(ctx)
+		if e != nil {
+			out.Error = e.Error()
+			return
+		}
+		var record RunRecord
+		var workspace string
+		if intent != nil {
+			record = *intent
+			if record.Daemon != daemon {
+				out.Error = "Docker 服务身份已改变，命令未启动"
+				return
+			}
+			workspace, e = r.Journal.Workspace(ctx, record)
+		} else {
+			record, workspace, e = r.Journal.Begin(ctx, out.ExecID, agent, session, req.Profile, approvedID, daemon, pol.Timeout)
+			if record.ExecID != "" {
+				defer r.finishManaged(&out, record)
+			}
+		}
+		if e != nil {
+			out.Error = "无法持久化执行身份或创建私有目录，未启动命令"
+			return
+		}
+		dir = workspace
+		managed = &sandbox.ManagedContainer{Identity: identity(record),
+			Created:  func(cid string) error { return r.Journal.Created(ctx, record, cid) },
+			Starting: func() error { return r.Journal.Starting(ctx, record, pol.Timeout) }}
+	} else {
+		dir, err = os.MkdirTemp("", "jelly-exec-")
+	}
 	if err != nil {
 		out.Error = "创建执行工作目录失败"
 		return
 	}
 	root, err := os.OpenRoot(dir)
 	if err != nil {
-		os.RemoveAll(dir)
+		if managed == nil {
+			os.RemoveAll(dir)
+		}
 		out.Error = "无法保护执行工作目录"
 		return
 	}
 	defer func() {
 		defer root.Close()
+		if managed != nil {
+			return
+		} // Container termination must precede credentials removal.
 		if err := cleanupWorkspace(root, dir); err != nil {
 			slog.Error("执行凭据目录清理失败", "exec_id", out.ExecID, "error", err)
 			if out.Error != "" {
@@ -263,7 +346,7 @@ func (r Runtime) execute(ctx context.Context, agent, session string, req Request
 		run = sandbox.Run
 	}
 	start := time.Now()
-	res, err := run(ctx, pol, sandbox.Spec{Dir: dir, Argv: argv, Env: env, Secrets: secrets})
+	res, err := run(ctx, pol, sandbox.Spec{Dir: dir, Argv: argv, Env: env, Secrets: secrets, Managed: managed})
 	out.DurationMS = time.Since(start).Milliseconds()
 	out.Backend = res.Backend
 	out.ExitCode = res.ExitCode
@@ -272,6 +355,10 @@ func (r Runtime) execute(ctx context.Context, agent, session string, req Request
 	out.Truncated = res.Truncated
 	// Executed distinguishes a policy/start failure from a child exiting 1.
 	out.Executed = res.Started || err == nil
+	if managed != nil {
+		out.Executed = res.Started
+	}
+	out.OutcomeUnknown = err != nil && res.Started
 	for k, v := range secrets {
 		env[k] = v
 	} // redact-only after the child has ended
@@ -290,7 +377,50 @@ func (r Runtime) execute(ctx context.Context, agent, session string, req Request
 	} else if out.ExitCode != 0 {
 		out.Error = fmt.Sprintf("命令退出码为 %d；请根据输出核查执行结果", out.ExitCode)
 	}
+	out.Outcome = observationOutcome(out)
 	return
+}
+
+func observationOutcome(out Observation) string {
+	if out.Outcome != "" {
+		return out.Outcome
+	}
+	switch {
+	case out.OutcomeUnknown:
+		return "unknown"
+	case out.TimedOut:
+		return "timed_out"
+	case out.Cancelled:
+		return "cancelled"
+	case out.Error != "" || !out.Executed || out.ExitCode != 0:
+		return "failed"
+	default:
+		return "succeeded"
+	}
+}
+
+func (r Runtime) finishManaged(out *Observation, record RunRecord) {
+	out.Outcome = observationOutcome(*out)
+	finish, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	finishErr := r.Journal.Finish(finish, record, *out)
+	if finishErr != nil {
+		if saved, err := r.Journal.Get(finish, record.ExecID); err == nil && saved.State == "unknown" {
+			out.OutcomeUnknown = true
+			out.Outcome = "unknown"
+		}
+		out.Error += "；执行终态未按本次调用确认，请核查资源；禁止自动重试"
+	}
+	cancel()
+	cleanup, done := context.WithTimeout(context.Background(), 15*time.Second)
+	cleanupErr := r.Journal.Cleanup(cleanup, record.ExecID)
+	done()
+	if cleanupErr != nil {
+		out.CleanupPending = true
+		out.Error += "；资源回收未确认，已保留恢复记录；禁止自动重试"
+	}
+	if finishErr != nil || cleanupErr != nil {
+		slog.Error("执行资源收尾失败", "exec_id", record.ExecID)
+	}
 }
 
 var secretField = regexp.MustCompile(`(?i)(["']?(?:secret[_-]?key|secret[_-]?id|access[_-]?token|refresh[_-]?token|api[_-]?key|password|authorization|token)["']?\s*[:=]\s*)("[^"\r\n]*"|'[^'\r\n]*'|(?:Bearer\s+)?[^\s,}\r\n]+)`)

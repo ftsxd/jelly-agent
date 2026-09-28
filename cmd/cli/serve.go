@@ -55,6 +55,7 @@ func newServeCmd() *cobra.Command {
 			go srv.Watch(ctx)  // hot-reload on external config file edits
 			srv.StartBots(ctx) // launch enabled messaging-platform bots (DingTalk, …)
 			srv.StartSchedules(ctx)
+			srv.StartExecutionRecovery(ctx)
 
 			errc := make(chan error, 1)
 			go func() {

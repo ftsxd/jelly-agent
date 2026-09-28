@@ -95,6 +95,9 @@ func dockerArgs(p Policy, s Spec) []string {
 // workspace mount itself is read-only too. Memory and PID caps come from the
 // policy.
 func runDocker(ctx context.Context, p Policy, s Spec) (Result, error) {
+	if s.Managed != nil {
+		return runManagedDocker(ctx, p, s)
+	}
 	args := dockerArgs(p, s)
 	var container string
 	if p.Strict {

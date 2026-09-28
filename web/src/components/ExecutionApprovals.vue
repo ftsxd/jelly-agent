@@ -30,6 +30,7 @@ function decision(a, approve) {
 function outcome(a) {
   if (a.outcome === 'succeeded') return '执行成功'
   if (a.outcome === 'failed') return '执行失败，请查看工具结果'
+  if (a.outcome === 'unknown') return '执行结果未知，请先核查目标资源；不会自动重试'
   return labels[a.state] || a.state
 }
 </script>

@@ -218,6 +218,8 @@ type Spec struct {
 	Args    []string          // extra command-line arguments for the script
 	Env     map[string]string // variables injected into the (scrubbed) child env
 	Secrets map[string]string // redact-only values (e.g. inline kubeconfig tokens)
+	// Managed is server-owned lifecycle authority, never a model argument.
+	Managed *ManagedContainer
 }
 
 // Result is the outcome of a run. A non-zero ExitCode or TimedOut is NOT an

@@ -85,6 +85,7 @@ async function check() {
         <p class="muted detail">{{ info.os_detail }}。沙箱不可用时停止执行。</p>
         <label v-if="config.backend === 'docker'">诊断工具镜像<input v-model="config.image" class="input mono" placeholder="已预装所需 CLI 的本地镜像" /></label>
         <p v-if="config.backend === 'docker' && !info.docker_available" class="warning">服务端尚未检测到 Docker，执行时不会降级到宿主机。</p>
+        <p v-if="config.backend === 'os'" class="hint">需要崩溃后的资源回收和完整子进程终止保障时，请使用 Docker。系统沙箱无法保证终止脱离进程组的子进程。</p>
 
         <div v-for="(p, i) in config.profiles" :key="i" class="profile">
           <div class="heading"><h3>执行配置 {{ i + 1 }}</h3><button class="btn" type="button" @click="config.profiles.splice(i, 1)">移除配置</button></div>

@@ -283,6 +283,9 @@ func (s Approvals) resolve(ctx context.Context, id, session, actor string, appro
 	return nil
 }
 func (s Approvals) consume(ctx context.Context, c Config, agent, session, call string, req Request) (string, error) {
+	return s.consumeIntent(ctx, c, agent, session, call, req, nil)
+}
+func (s Approvals) consumeIntent(ctx context.Context, c Config, agent, session, call string, req Request, intent *RunRecord) (string, error) {
 	authority, _ := ctx.Value(approvalKey{}).(approvalAuthority)
 	id := authority.id
 	if id == "" {
@@ -296,18 +299,29 @@ func (s Approvals) consume(ctx context.Context, c Config, agent, session, call s
 		if configHash(current) != configHash(c) {
 			return ErrApproval
 		}
-		res, err := s.DB.ExecContext(ctx, `UPDATE execution_approvals SET state='consumed' WHERE id=? AND state='approved' AND config_hash=? AND expires_ms>?`, id, configHash(current), time.Now().UnixMilli())
-		if err != nil {
+		return s.DB.InTx(ctx, func(tx *storage.Tx) error {
+			res, err := tx.ExecContext(ctx, `UPDATE execution_approvals SET state='consumed' WHERE id=? AND state='approved' AND config_hash=? AND expires_ms>?`, id, configHash(current), time.Now().UnixMilli())
+			if err != nil {
+				return err
+			}
+			n, err := res.RowsAffected()
+			if err != nil {
+				return err
+			}
+			if n != 1 {
+				return ErrApproval
+			}
+			if intent != nil {
+				if intent.ApprovalID != id || intent.Agent != agent || intent.SessionID != session || intent.Profile != req.Profile {
+					return ErrApproval
+				}
+				if err = insertIntent(ctx, tx, *intent); err != nil {
+					return err
+				}
+				_, err = tx.ExecContext(ctx, `UPDATE execution_approvals SET exec_id=? WHERE id=?`, intent.ExecID, id)
+			}
 			return err
-		}
-		n, err := res.RowsAffected()
-		if err != nil {
-			return err
-		}
-		if n != 1 {
-			return ErrApproval
-		}
-		return nil
+		})
 	})
 	if err != nil {
 		return "", err
@@ -316,10 +330,16 @@ func (s Approvals) consume(ctx context.Context, c Config, agent, session, call s
 }
 func (s Approvals) Finish(ctx context.Context, id string, out Observation) error {
 	result := "failed"
-	if out.Executed && out.ExitCode == 0 && !out.TimedOut && !out.Cancelled && out.Error == "" {
+	if observationOutcome(out) == "unknown" {
+		result = "unknown"
+	}
+	if observationOutcome(out) == "succeeded" {
 		result = "succeeded"
 	}
-	_, err := s.DB.ExecContext(ctx, `UPDATE execution_approvals SET exec_id=?,outcome=? WHERE id=? AND state='consumed'`, out.ExecID, result, id)
+	// A janitor's unknown terminal outcome cannot be overwritten by a late
+	// worker that wakes after its lease expired. Filling an empty outcome is
+	// idempotent, including after the journal already saved a known result.
+	_, err := s.DB.ExecContext(ctx, `UPDATE execution_approvals SET exec_id=?,outcome=? WHERE id=? AND state='consumed' AND outcome='' AND (exec_id='' OR exec_id=?)`, out.ExecID, result, id, out.ExecID)
 	return err
 }
 

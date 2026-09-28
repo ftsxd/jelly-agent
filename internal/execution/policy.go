@@ -96,6 +96,9 @@ func (c Config) Validate() error {
 	}
 	seen := map[string]bool{}
 	for _, p := range c.Profiles {
+		if c.Backend == "docker" && p.ToolDir != "" {
+			return fmt.Errorf("Docker 的 CLI 必须预装在镜像中；工具运行目录仅适用于系统沙箱")
+		}
 		if !identifier.MatchString(p.Name) || seen[p.Name] {
 			return fmt.Errorf("执行配置名称无效或重复：%s", p.Name)
 		}
