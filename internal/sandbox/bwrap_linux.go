@@ -70,7 +70,7 @@ func bwrapUnavailable() string {
 	if bwrapErr == "" {
 		return "未安装 bubblewrap"
 	}
-	return "bubblewrap 已安装但无法创建命名空间（容器内需放宽 seccomp/AppArmor，或主机禁用了非特权 user namespace）：" + bwrapErr
+	return "bubblewrap 已安装但无法创建沙箱（容器内需放宽 seccomp/AppArmor/systempaths，或主机禁用了非特权 user namespace）：" + bwrapErr
 }
 
 // bwrapArgv renders the `bwrap …` prefix for one run: new user/PID/IPC/UTS

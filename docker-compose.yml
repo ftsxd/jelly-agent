@@ -23,17 +23,25 @@ services:
       context: .
       args:
         BUILD_REVISION: ${JELLY_BUILD_REVISION:-unknown}
-    user: "0:0"
-    # 让容器里的 bubblewrap 能建命名空间，通用执行器（shell_exec）的每条命令才有
-    # 沙箱可用。Docker 默认 seccomp 拦 unshare/mount，docker-default AppArmor 拦
-    # mount（Debian/Ubuntu 宿主机默认启用 AppArmor），两条都要放开。
+    # 以镜像里的 nonroot（uid 65532）运行，首次部署前先
+    #     chown -R 65532:65532 ./data
+    # 不能图省事改回 user: "0:0"：下面的 systempaths=unconfined 取消了 Docker 对
+    # /proc/sysrq-trigger 等路径的只读保护，容器里是 root 就能直接让宿主机重启。
+    #
+    # 让容器里的 bubblewrap 能给每条命令建沙箱，通用执行器（shell_exec）才有隔离可用：
+    #   seccomp    Docker 默认规则拦 unshare/mount
+    #   apparmor   docker-default 拦 mount（Debian/Ubuntu 宿主机默认启用 AppArmor）
+    #   systempaths Docker 遮住/只读了 /proc 下的敏感路径，内核因此不允许在新的
+    #              user namespace 里重新挂 /proc（bwrap 报 Can't mount proc）
+    # 宿主机还必须允许非特权 user namespace，CentOS 7 默认不允许（见 docs/sandbox.md）。
     #
     # 这是取舍：放宽的是这个容器自身的外层防护，换来的是每条命令一层按调用隔离的
-    # 沙箱（只读系统目录、私有工作目录、可断网）。不用 shell_exec 的话删掉这两行，
+    # 沙箱（只读系统目录、私有工作目录、可断网）。不用 shell_exec 的话删掉这三行，
     # 执行器会在启动探测失败后照旧拒绝执行，不会误以为有沙箱。不要改成 privileged。
     security_opt:
       - seccomp=unconfined
       - apparmor=unconfined
+      - systempaths=unconfined
     ports:
       - "6185:6185"
     volumes:

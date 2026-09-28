@@ -346,7 +346,7 @@ go vet ./...
 
 本地构建可使用 `make check`、`make build`；Docker 镜像先通过 `make docker` 构建一次，之后使用 `docker compose up -d` 启动，无需每次重新构建。首次容器启动会生成管理员初始密码，请从容器日志获取并立即修改。Compose 会把默认配置与状态写入项目目录下的 `./data/.jelly-agent/`；如需显式设置 `JELLY_CONFIG`，请先创建对应配置文件。Compose 默认将控制台发布在宿主机的 `6185` 端口；公网部署应置于 HTTPS 反向代理之后。
 
-持久化目录是项目下的 `./data/.jelly-agent/`；其中包含配置、会话、记忆与周期任务记录。生产部署应将该目录纳入备份策略；恢复时停止服务后还原目录内容再启动。Compose 为兼容宿主机绑定目录，以 root 运行容器；若要保持非 root 运行，请自行将 `./data` 的属主设为 UID/GID `65532` 并移除 Compose 的 `user` 配置。
+持久化目录是项目下的 `./data/.jelly-agent/`；其中包含配置、会话、记忆与周期任务记录。生产部署应将该目录纳入备份策略；恢复时停止服务后还原目录内容再启动。容器以镜像内的非 root 用户（UID/GID `65532`）运行，首次启动前先执行 `chown -R 65532:65532 ./data`。不要改回 root：Compose 为通用执行器的沙箱放开了 `systempaths`，容器内的 root 可以借此让宿主机重启（见 [docs/sandbox.md](docs/sandbox.md)）。
 
 ### 换成 PostgreSQL
 

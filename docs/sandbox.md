@@ -68,8 +68,16 @@ sudo dnf install -y bubblewrap         # RHEL / Rocky / Fedora
 
 **装上不等于能用。** 进程第一次用到时会真跑一次 `bwrap … true` 做探测，失败就当作不可用，并把 bwrap 的原始报错放进不可用原因里（Web 的「脚本沙箱设置」、执行器的错误里都能看到）。常见的失败原因：
 
-- **跑在 Docker 容器里**：默认 seccomp 拦 `unshare`/`mount`，docker-default AppArmor 拦 `mount`。仓库里的 `docker-compose.yml` 已经加了 `seccomp=unconfined` 和 `apparmor=unconfined`（取舍写在注释里），镜像里也已经装了 bubblewrap。
-- **主机禁用了非特权 user namespace**：老版本 Debian 看 `sysctl kernel.unprivileged_userns_clone`，Ubuntu 24.04 看 `kernel.apparmor_restrict_unprivileged_userns`。
+- **跑在 Docker 容器里**：要放开三样，仓库里的 `docker-compose.yml` 都已经加了（取舍写在注释里），镜像里也已经装了 bubblewrap。
+  - 默认 seccomp 拦 `unshare`/`mount` → `seccomp=unconfined`。
+  - docker-default AppArmor 拦 `mount` → `apparmor=unconfined`。
+  - Docker 遮住/只读了 `/proc` 下的敏感路径，内核因此不允许在新 user namespace 里重新挂 `/proc`，bwrap 报 `Can't mount proc on /newroot/proc: Operation not permitted` → `systempaths=unconfined`（Docker 20.10+）。这一项同时取消了 `/proc/sysrq-trigger` 的只读保护，所以容器**必须以非 root 运行**，否则容器里就能让宿主机重启。
+- **主机禁用了非特权 user namespace**，bwrap 报 `Creating new namespace failed, likely because the kernel does not support user namespaces`：
+  - CentOS/RHEL 7（7.4+）：`user.max_user_namespaces` 默认是 0。`sysctl -w user.max_user_namespaces=15000`，并写进 `/etc/sysctl.d/` 持久化。这是整台主机的设置，3.10 内核在 user namespace 上出过不少漏洞，而 CentOS 7 已停止维护，改之前要评估。
+  - 老版本 Debian：`sysctl kernel.unprivileged_userns_clone`。
+  - Ubuntu 24.04：`kernel.apparmor_restrict_unprivileged_userns`。
+
+bwrap 的可用性每个进程只探测一次。修好主机或容器配置后要重启服务，否则进程还记着之前「不可用」的结果。
 
 手动验证：
 

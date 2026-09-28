@@ -35,9 +35,10 @@ LABEL org.opencontainers.image.revision="${BUILD_REVISION}"
 # safe.directory 处理掉了，不需要在镜像里放宽。
 #
 # bubblewrap 是 os 后端在 Linux 上不依赖 lsm=landlock 的那一档：多数云主机内核没开
-# Landlock，没有它通用执行器就只能拒绝执行。光装上不够——Docker 默认 seccomp 不让
-# 容器建命名空间，需要 docker-compose.yml 里的 security_opt 配合；没配时启动探测会
-# 失败，执行器照旧拒绝执行并给出原因，不会误以为有沙箱。
+# Landlock，没有它通用执行器就只能拒绝执行。光装上不够——Docker 默认不让容器建
+# 命名空间、重新挂 /proc，需要 docker-compose.yml 里的 security_opt 配合（宿主机也
+# 得允许非特权 user namespace）；没配时启动探测会失败，执行器照旧拒绝执行并给出
+# 原因，不会误以为有沙箱。
 RUN apt-get update \
     && apt-get install -y --no-install-recommends git ca-certificates bubblewrap \
     && rm -rf /var/lib/apt/lists/*
