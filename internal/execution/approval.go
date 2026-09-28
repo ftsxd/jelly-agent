@@ -129,6 +129,14 @@ func configHash(c Config) string {
 			h.Write([]byte(value))
 		}
 	}
+	for _, agent := range sortedKeys(c.agentVars) {
+		for _, source := range sortedKeys(c.agentVars[agent]) {
+			h.Write([]byte{0})
+			h.Write([]byte("agent:" + agent + ":" + source))
+			h.Write([]byte{0})
+			h.Write([]byte(c.agentVars[agent][source]))
+		}
+	}
 	return hex.EncodeToString(h.Sum(nil))
 }
 

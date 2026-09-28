@@ -3,6 +3,7 @@ package execution
 
 import (
 	"fmt"
+	"path/filepath"
 	"regexp"
 	"strings"
 )
@@ -27,6 +28,12 @@ type Profile struct {
 	Agents []string `json:"agents" yaml:"agents"`
 	// Env maps a child variable to a server environment variable NAME, not a value.
 	Env map[string]string `json:"env,omitempty" yaml:"env,omitempty"`
+	// AgentEnv maps child variables to this agent's saved variable NAMES.
+	// Values are resolved by the server, never supplied by a model argument.
+	AgentEnv map[string]string `json:"agent_env,omitempty" yaml:"agent_env,omitempty"`
+	// ToolDir is an administrator-installed runtime. Only its bin/lib/lib64
+	// and pyvenv.cfg are readable; it never grants access to the host HOME.
+	ToolDir string `json:"tool_dir,omitempty" yaml:"tool_dir,omitempty"`
 	// KubeconfigEnv names a server variable containing an inline read-only
 	// kubeconfig. It is materialized privately, never a host path mount.
 	KubeconfigEnv string `json:"kubeconfig_env,omitempty" yaml:"kubeconfig_env,omitempty"`
@@ -35,6 +42,7 @@ type Profile struct {
 	// Writes stay opt-in. Elevated sources are injected only after one-use approval.
 	WriteApproval      bool              `json:"write_approval,omitempty" yaml:"write_approval,omitempty"`
 	WriteEnv           map[string]string `json:"write_env,omitempty" yaml:"write_env,omitempty"`
+	WriteAgentEnv      map[string]string `json:"write_agent_env,omitempty" yaml:"write_agent_env,omitempty"`
 	WriteKubeconfigEnv string            `json:"write_kubeconfig_env,omitempty" yaml:"write_kubeconfig_env,omitempty"`
 }
 
@@ -45,6 +53,29 @@ type Config struct {
 	TimeoutSec  int       `json:"timeout_sec" yaml:"timeout_sec,omitempty"`
 	MaxOutputKB int       `json:"max_output_kb" yaml:"max_output_kb,omitempty"`
 	Profiles    []Profile `json:"profiles" yaml:"profiles,omitempty"`
+	agentVars   map[string]map[string]string
+}
+
+// WithAgentVars takes a private snapshot; JSON/YAML and tool schemas expose
+// only mappings, never these values. Snapshotting also binds pending approval
+// to the identity used when the agent was built.
+func (c Config) WithAgentVars(vars map[string]map[string]string) Config {
+	c.agentVars = make(map[string]map[string]string)
+	for _, p := range c.Profiles {
+		for _, agent := range p.Agents {
+			if c.agentVars[agent] == nil {
+				c.agentVars[agent] = make(map[string]string)
+			}
+			for _, mapping := range []map[string]string{p.AgentEnv, p.WriteAgentEnv} {
+				for _, source := range mapping {
+					if value, ok := vars[agent][source]; ok {
+						c.agentVars[agent][source] = value
+					}
+				}
+			}
+		}
+	}
+	return c
 }
 
 var identifier = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_-]*$`)
@@ -77,17 +108,27 @@ func (c Config) Validate() error {
 				return fmt.Errorf("Agent 名称无效：%s", a)
 			}
 		}
-		for _, variables := range []map[string]string{p.Env, p.WriteEnv} {
+		for _, variables := range []map[string]string{p.Env, p.WriteEnv, p.AgentEnv, p.WriteAgentEnv} {
 			for k, source := range variables {
 				if !envName.MatchString(k) || !envName.MatchString(source) || dangerousEnv(k) {
 					return fmt.Errorf("环境变量映射无效或会改变执行环境：%s", k)
 				}
 			}
 		}
+		for _, pair := range [][2]map[string]string{{p.Env, p.AgentEnv}, {p.WriteEnv, p.WriteAgentEnv}} {
+			for key := range pair[0] {
+				if _, ok := pair[1][key]; ok {
+					return fmt.Errorf("%s 的变量 %s 同时引用服务端和 Agent 来源", p.Name, key)
+				}
+			}
+		}
+		if p.ToolDir != "" && (!filepath.IsAbs(p.ToolDir) || filepath.Clean(p.ToolDir) != p.ToolDir || p.ToolDir == string(filepath.Separator) || strings.ContainsAny(p.ToolDir, "\x00\r\n") || c.Backend == "docker") {
+			return fmt.Errorf("%s 的工具运行目录必须为系统沙箱中的独立绝对目录", p.Name)
+		}
 		if (p.KubeconfigEnv != "" && !envName.MatchString(p.KubeconfigEnv)) || (p.WriteKubeconfigEnv != "" && !envName.MatchString(p.WriteKubeconfigEnv)) {
 			return fmt.Errorf("kubeconfig 必须引用服务端环境变量名称")
 		}
-		if !p.WriteApproval && (len(p.WriteEnv) > 0 || p.WriteKubeconfigEnv != "") {
+		if !p.WriteApproval && (len(p.WriteEnv) > 0 || len(p.WriteAgentEnv) > 0 || p.WriteKubeconfigEnv != "") {
 			return fmt.Errorf("%s 的写凭据需要先启用写操作审批", p.Name)
 		}
 		rules := map[string]bool{}
@@ -109,7 +150,34 @@ func (c Config) Validate() error {
 			}
 		}
 	}
+	for _, p := range c.Profiles {
+		for _, agent := range p.Agents {
+			reserved := c.ApprovalVarsFor(agent)
+			for _, source := range p.AgentEnv {
+				if reserved[source] {
+					return fmt.Errorf("%s 的 Agent 变量 %s 已保留给审批执行，不能同时用于自动诊断", agent, source)
+				}
+			}
+		}
+	}
 	return nil
+}
+
+// ApprovalVarsFor reserves sources even while the executor is disabled.
+// Disabling execution must not expose elevated variables to skill scripts.
+func (c Config) ApprovalVarsFor(agent string) map[string]bool {
+	out := map[string]bool{}
+	for _, p := range c.Profiles {
+		for _, assigned := range p.Agents {
+			if assigned == agent {
+				for _, source := range p.WriteAgentEnv {
+					out[source] = true
+				}
+				break
+			}
+		}
+	}
+	return out
 }
 
 func dangerousEnv(k string) bool {
@@ -214,6 +282,9 @@ func prefix(argv, pattern []string) bool {
 
 func builtinDecision(a []string) (Decision, string) {
 	cmd := a[0]
+	if cmd == "jq" && len(a) == 2 && (a[1] == "--version" || a[1] == "--help") {
+		return Allow, "本地工具版本与帮助探测"
+	}
 	for _, v := range []string{"rm", "sudo", "su", "doas", "chmod", "chown", "mkfs", "dd", "shutdown", "reboot", "env", "printenv", "sh", "bash", "zsh", "fish", "dash", "busybox", "pip", "pip3", "apt", "apt-get", "brew", "npm"} {
 		if cmd == v {
 			return Forbidden, "禁止破坏性命令、凭据枚举、shell 包装和软件安装"
@@ -273,13 +344,13 @@ func builtinDecision(a []string) (Decision, string) {
 				}
 			}
 		}
+		if tccliHelp(a) {
+			return Allow, "CLI 帮助自发现"
+		}
 		if len(a) < 3 {
 			return "", ""
 		}
 		action := a[2]
-		if (len(a) == 3 && action == "help") || (len(a) == 4 && (a[3] == "help" || a[3] == "--help")) {
-			return Allow, "CLI 帮助自发现"
-		}
 		if a[1] == "cls" && (strings.HasPrefix(action, "Describe") || strings.HasPrefix(action, "List") || action == "SearchLog") {
 			return Allow, "只读云查询；资源权限由配置的只读凭据限制"
 		}
@@ -289,6 +360,23 @@ func builtinDecision(a []string) (Decision, string) {
 		return Prompt, "云操作不在默认只读范围内，需要逐次审批"
 	}
 	return "", ""
+}
+
+// Help occupies a command slot, never an arbitrary argument value. Only the
+// documented detail modifier is accepted; identity/endpoint bans run first.
+func tccliHelp(a []string) bool {
+	for _, pos := range []int{1, 2, 3} {
+		if len(a) <= pos || (a[pos] != "help" && a[pos] != "--help") {
+			continue
+		}
+		for _, v := range a[1:pos] {
+			if !identifier.MatchString(v) {
+				return false
+			}
+		}
+		return len(a) == pos+1 || (len(a) == pos+2 && a[pos+1] == "--detail")
+	}
+	return false
 }
 
 func mergeEnv(base, extra map[string]string) map[string]string {

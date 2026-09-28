@@ -33,3 +33,16 @@ func TestShellExecIsGrantedPerAgentAndDisabledByDefault(t *testing.T) {
 		t.Fatal("disabled executor registered")
 	}
 }
+
+func TestApprovalOnlyAgentVariablesNeverReachSkillScripts(t *testing.T) {
+	cfg := &config.Config{AgentVars: map[string]map[string]string{"expert": {"READ": "read-value", "WRITE": "write-value"}}, SkillVars: map[string]map[string]string{"skill": {"WRITE": "also-reserved"}}, Execution: execution.Config{Enabled: true, Profiles: []execution.Profile{{Name: "cloud", Agents: []string{"expert"}, WriteApproval: true, WriteAgentEnv: map[string]string{"TOKEN": "WRITE"}}}}}
+	e := New(cfg)
+	t.Cleanup(e.Close)
+	for _, enabled := range []bool{true, false} {
+		cfg.Execution.Enabled = enabled
+		vars := e.VarsFor("expert", "skill")
+		if vars["READ"] != "read-value" || vars["WRITE"] != "" {
+			t.Fatal("write source reached script", enabled)
+		}
+	}
+}

@@ -22,7 +22,15 @@ default_provider: deepseek
 #       env:                  # 服务端变量名称，不填密钥值或 ${ENV}
 #         TENCENTCLOUD_SECRET_ID: TENCENT_RO_SECRET_ID
 #         TENCENTCLOUD_SECRET_KEY: TENCENT_RO_SECRET_KEY
-#         TENCENTCLOUD_TOKEN: TENCENT_RO_TOKEN
+#         TENCENTCLOUD_REGION: TENCENT_RO_REGION
+#         # TENCENTCLOUD_TOKEN: TENCENT_RO_TOKEN  # 使用 STS 时才需要
+#       # 如果凭据保存在 Agent 变量页，以 agent_env 代替上面的 env：
+#       # agent_env:
+#       #   TENCENTCLOUD_SECRET_ID: TENCENTCLOUD_SECRET_ID
+#       #   TENCENTCLOUD_SECRET_KEY: TENCENTCLOUD_SECRET_KEY
+#       #   TENCENTCLOUD_REGION: TENCENTCLOUD_REGION
+#       # 用户级 Python CLI 不能靠真实 HOME 加载依赖。系统沙箱可指定独立目录：
+#       # tool_dir: /opt/sre-tools/tencent-cli  # 预装 bin/lib，不挂载 HOME
 #     - name: k8s-readonly
 #       agents: [root]
 #       network: true

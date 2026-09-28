@@ -42,6 +42,12 @@ describe('execution management', () => {
     host.querySelector('form').dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })); await settle()
     expect(host.querySelector('[role=alert]').textContent).toContain('执行后端无效'); expect(host.querySelector('[role=status]')).toBeNull()
   })
+  it('preserves agent variable references and the installed CLI runtime on save', async () => {
+    await mount({ enabled: true, backend: 'os', profiles: [{ name: 'cloud', agents: ['expert'], network: true,
+      tool_dir: '/opt/sre-tools', agent_env: { TOKEN: 'CLOUD_READ_KEY' }, write_approval: true, write_agent_env: { TOKEN: 'CLOUD_WRITE_KEY' } }] })
+    host.querySelector('form').dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })); await settle()
+    expect(api.setExecution.mock.calls[0][0].profiles[0]).toMatchObject({ tool_dir: '/opt/sre-tools', agent_env: { TOKEN: 'CLOUD_READ_KEY' }, write_agent_env: { TOKEN: 'CLOUD_WRITE_KEY' } })
+  })
   it('preserves separate write credential references and can revoke write approval', async () => {
     await mount({ enabled: true, profiles: [{ name: 'write', agents: ['expert'], network: true, write_approval: true, env: { TOKEN: 'READ_SOURCE' }, write_env: { TOKEN: 'WRITE_SOURCE' }, write_kubeconfig_env: 'WRITE_KUBE' }] })
     host.querySelector('form').dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })); await settle()

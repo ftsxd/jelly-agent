@@ -25,19 +25,21 @@ async function load() {
       profiles: (c.profiles || []).map(p => ({ ...p, agents: [...p.agents], network: !!p.network,
         variables: Object.entries(p.env || {}).map(([key, source]) => ({ key, source })),
         writeVariables: Object.entries(p.write_env || {}).map(([key, source]) => ({ key, source })),
+        agentVariables: Object.entries(p.agent_env || {}).map(([key, source]) => ({ key, source })),
+        writeAgentVariables: Object.entries(p.write_agent_env || {}).map(([key, source]) => ({ key, source })),
         rules: (p.rules || []).map(r => ({ ...r, pattern: [...r.pattern] })) })),
     }
     probe.value.profile = config.value.profiles[0]?.name || ''
   } catch (e) { error.value = e.message } finally { loading.value = false }
 }
 function addProfile() {
-  config.value.profiles.push({ name: '', agents: [], network: false, variables: [], writeVariables: [], rules: [] })
+  config.value.profiles.push({ name: '', agents: [], network: false, variables: [], writeVariables: [], agentVariables: [], writeAgentVariables: [], rules: [] })
 }
 function sources(variables) {
   const env = {}
   for (const v of variables) {
     const key = v.key.trim(), source = v.source.trim()
-    if (!key || !source || key in env) throw new Error('变量名和服务端变量名必须填写，变量名不能重复')
+    if (!key || !source || key in env) throw new Error('变量名和来源名称必须填写，变量名不能重复')
     env[key] = source
   }
   return env
@@ -48,8 +50,10 @@ async function save() {
   try {
     const profiles = config.value.profiles.map(p => {
       const env = sources(p.variables)
-      return { name: p.name.trim(), agents: p.agents, network: p.network, env, ...(p.kubeconfig_env ? { kubeconfig_env: p.kubeconfig_env.trim() } : {}),
-        ...(p.write_approval ? { write_approval: true, write_env: sources(p.writeVariables), ...(p.write_kubeconfig_env ? { write_kubeconfig_env: p.write_kubeconfig_env.trim() } : {}) } : {}),
+      return { name: p.name.trim(), agents: p.agents, network: p.network, env,
+        ...(p.agentVariables.length ? { agent_env: sources(p.agentVariables) } : {}),
+        ...(config.value.backend === 'os' && p.tool_dir ? { tool_dir: p.tool_dir.trim() } : {}), ...(p.kubeconfig_env ? { kubeconfig_env: p.kubeconfig_env.trim() } : {}),
+        ...(p.write_approval ? { write_approval: true, write_env: sources(p.writeVariables), ...(p.writeAgentVariables.length ? { write_agent_env: sources(p.writeAgentVariables) } : {}), ...(p.write_kubeconfig_env ? { write_kubeconfig_env: p.write_kubeconfig_env.trim() } : {}) } : {}),
         rules: p.rules.map(r => ({ name: r.name.trim(), pattern: r.pattern, decision: r.decision, reason: r.reason || '' })) }
     })
     await api.setExecution({ ...config.value, profiles, timeout_sec: Number(config.value.timeout_sec), max_output_kb: Number(config.value.max_output_kb) })
@@ -88,23 +92,30 @@ async function check() {
           <fieldset><legend>分配给 Agent</legend><div class="assignments">
             <label v-for="agent in agents" :key="agent" class="check"><input v-model="p.agents" :value="agent" type="checkbox" /> {{ agent === 'root' ? 'root（单 Agent）' : agent }}</label>
           </div></fieldset>
+          <label v-if="config.backend === 'os'">独立 CLI 运行目录<input v-model="p.tool_dir" class="input mono" placeholder="管理员预装 CLI 的目录，包含 bin 和 lib（可选）" /></label>
           <label class="check"><input v-model="p.network" type="checkbox" /> 允许此配置访问网络</label>
           <p v-if="p.network" class="warning">当前版本不限制目标域名。自动诊断使用只读凭据；生产出口白名单需由部署环境配置。</p>
           <label class="check"><input v-model="p.write_approval" type="checkbox" /> 允许申请写操作审批（每条命令批准一次）</label>
           <div v-if="p.write_approval" class="write-credentials">
             <p class="warning">用户将在对话中看到完整命令并确认。审批十分钟失效；命令、执行配置改变后需重新申请。禁止规则无法通过审批放行。</p>
             <label>审批执行 Kubeconfig 变量名称<input v-model="p.write_kubeconfig_env" class="input mono" placeholder="SRE_WRITE_KUBECONFIG（可选）" /></label>
-            <p class="muted detail">可引用权限限定到目标资源的写凭据。获批后覆盖同名诊断变量，执行结束后清理；留空沿用诊断凭据。当前未自动签发临时凭据。</p>
+            <p class="muted detail">可引用权限限定到目标资源的独立写凭据。审批专用 Agent 来源不会注入技能脚本。获批后覆盖同名诊断变量，执行结束后清理；留空沿用诊断凭据。当前未自动签发临时凭据。</p>
             <div v-for="(v, j) in p.writeVariables" :key="j" class="variable-row">
               <label>审批子进程变量<input v-model="v.key" class="input mono" placeholder="TENCENTCLOUD_SECRET_KEY" required /></label>
               <label>审批服务端变量名称<input v-model="v.source" class="input mono" placeholder="TENCENT_WRITE_SECRET_KEY" required /></label>
               <button class="btn" type="button" @click="p.writeVariables.splice(j, 1)">移除审批变量</button>
             </div>
             <button class="btn" type="button" @click="p.writeVariables.push({ key: '', source: '' })">添加审批变量映射</button>
+            <div v-for="(v, j) in p.writeAgentVariables" :key="'wa' + j" class="variable-row">
+              <label>审批子进程变量<input v-model="v.key" class="input mono" required /></label>
+              <label>该 Agent 保存的写变量名称<input v-model="v.source" class="input mono" required /></label>
+              <button class="btn" type="button" @click="p.writeAgentVariables.splice(j, 1)">移除审批 Agent 变量</button>
+            </div>
+            <button class="btn" type="button" @click="p.writeAgentVariables.push({ key: '', source: '' })">引用 Agent 写变量</button>
           </div>
           <details>
             <summary>凭据与附加命令规则</summary>
-            <p class="muted detail">凭据通过变量映射注入，只填写服务端环境变量名称。不要在命令或此处填写密钥值。</p>
+            <p class="muted detail">凭据通过变量映射注入，可引用服务端环境变量或当前 Agent 已保存的变量名称。不要在命令或此处填写密钥值。</p>
             <label>Kubeconfig 服务端变量名称<input v-model="p.kubeconfig_env" class="input mono" placeholder="SRE_READONLY_KUBECONFIG（可选）" /></label>
             <p class="muted detail">此变量应包含只读 kubeconfig 正文。执行时写入私有目录并在结束后删除，不挂载宿主机凭据文件。</p>
             <div v-for="(v, j) in p.variables" :key="j" class="variable-row">
@@ -113,6 +124,13 @@ async function check() {
               <button class="btn" type="button" @click="p.variables.splice(j, 1)">移除变量</button>
             </div>
             <button class="btn" type="button" @click="p.variables.push({ key: '', source: '' })">添加变量映射</button>
+            <p class="muted detail">引用 Agent 变量后，执行器从当前 Agent 的变量设置中取值；每个分配的 Agent 都需要保存对应来源。密钥值不会发送给模型。</p>
+            <div v-for="(v, j) in p.agentVariables" :key="'av' + j" class="variable-row">
+              <label>子进程变量<input v-model="v.key" class="input mono" placeholder="TENCENTCLOUD_SECRET_KEY" required /></label>
+              <label>该 Agent 保存的变量名称<input v-model="v.source" class="input mono" placeholder="TENCENTCLOUD_SECRET_KEY" required /></label>
+              <button class="btn" type="button" @click="p.agentVariables.splice(j, 1)">移除 Agent 变量</button>
+            </div>
+            <button class="btn" type="button" @click="p.agentVariables.push({ key: '', source: '' })">引用 Agent 变量</button>
             <p class="muted detail">内置只读规则包括 kubectl get / describe / logs / top、tccli CLS Describe* / List* / SearchLog 和 CLI help。未知命令需要审批。附加规则按 token 前缀匹配，匹配结果取最严格的一项。</p>
             <div v-for="(rule, j) in p.rules" :key="j" class="rule">
               <div class="variable-row">

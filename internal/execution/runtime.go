@@ -155,20 +155,55 @@ func (r Runtime) execute(ctx context.Context, agent, session string, req Request
 	}
 	if approvedID != "" {
 		profile.Env = mergeEnv(profile.Env, profile.WriteEnv)
+		profile.AgentEnv = mergeEnv(profile.AgentEnv, profile.WriteAgentEnv)
+		for key := range profile.WriteEnv {
+			delete(profile.AgentEnv, key)
+		}
+		for key := range profile.WriteAgentEnv {
+			delete(profile.Env, key)
+		}
 		if profile.WriteKubeconfigEnv != "" {
 			profile.KubeconfigEnv = profile.WriteKubeconfigEnv
 		}
 	}
 	env := map[string]string{}
-	for key, source := range profile.Env {
-		value, ok := os.LookupEnv(source)
-		if !ok || value == "" {
-			out.Error = "服务端未配置环境变量：" + source
+	// Resolve the read identity, then overlay approved write sources across
+	// both source types. No other agent's variables or ambient secrets enter.
+	inject := func(mapping map[string]string, values map[string]string, agentSource bool) bool {
+		for key, source := range mapping {
+			value, ok := os.LookupEnv(source)
+			if agentSource {
+				value, ok = values[source]
+			}
+			if !ok || value == "" {
+				out.Error = "未配置执行变量来源：" + source
+				return false
+			}
+			env[key] = value
+		}
+		return true
+	}
+	if !inject(profile.Env, nil, false) || !inject(profile.AgentEnv, r.Config.agentVars[agent], true) {
+		return
+	}
+	if profile.ToolDir != "" {
+		if st, err := os.Stat(filepath.Join(profile.ToolDir, "bin")); err != nil || !st.IsDir() {
+			out.Error = "工具运行目录不可用，请管理员安装所需 CLI"
 			return
 		}
-		env[key] = value
+		// PATH is administrator-controlled runtime wiring, never a profile
+		// variable or model argument. HOME remains the private workspace.
+		env["PATH"] = filepath.Join(profile.ToolDir, "bin") + string(os.PathListSeparator) + os.Getenv("PATH")
 	}
 	pol := r.policy(profile, req)
+	if profile.ToolDir != "" {
+		var err error
+		pol.ReadPaths, err = trustedToolPaths(profile.ToolDir)
+		if err != nil {
+			out.Error = err.Error()
+			return
+		}
+	}
 	if err := sandbox.CheckStrict(pol); err != nil {
 		out.Error = err.Error()
 		return
@@ -214,6 +249,12 @@ func (r Runtime) execute(ctx context.Context, agent, session string, req Request
 		return
 	}
 	argv := parsed.Segments[0]
+	if profile.ToolDir != "" {
+		candidate := filepath.Join(profile.ToolDir, "bin", argv[0])
+		if st, err := os.Stat(candidate); err == nil && !st.IsDir() && st.Mode()&0111 != 0 {
+			argv = append([]string{candidate}, argv[1:]...)
+		}
+	}
 	if len(parsed.Segments) > 1 {
 		argv = []string{"bash", "--noprofile", "--norc", "-o", "pipefail", "-c", parsed.Script()}
 	}
@@ -268,18 +309,43 @@ func (c Config) Instruction(agent string) string {
 		return ""
 	}
 	var b strings.Builder
-	b.WriteString("通用执行器：优先使用已有结构化工具；缺少专用工具时可用 shell_exec 调用官方 CLI 或经显式规则授权的 SDK。先用 help 发现参数。不读取/打印凭据，不安装软件，不用额外权限绕过失败。prompt 命令只有启用了写操作审批的配置才能发起审批，系统等待用户在控制台确认原始命令后执行一次；自然语言同意不代表获批，不得改写命令或重复调用规避审批。forbidden 无法审批。每个审批十分钟失效，命令或配置改变必须重新申请。结果包含 exit_code、stdout/stderr 与 executed，executed=false 不是查询结果。结论引用网关返回的 evidence_id；已截断的输出不代表完整数据。凭据由系统注入，不向用户索要。\n可用执行配置：\n")
+	b.WriteString("通用执行器：用户要求查询或排查时，要实际调用工具完成任务。优先使用已有结构化工具；缺少专用工具时，用 shell_exec 调用官方 CLI 或经显式规则授权的 SDK。参数不确定先调用 help，拿到帮助后立即继续只读查询；根据真实 stderr 修正参数并重试合法的只读查询，必要时分页直至结果完整。不能仅返回脚本让用户自己运行，也不能在未尝试已分配工具时声称没有执行能力。缺凭据、权限不足或 CLI 不可用时，引用实际失败证据说明阻塞，不虚构资源或绕过限制。不读取/打印凭据，不安装软件，不用额外权限绕过失败。prompt 命令只有启用了写操作审批的配置才能发起审批，系统等待用户在控制台确认原始命令后执行一次；自然语言同意不代表获批，不得改写命令或重复调用规避审批。forbidden 无法审批。每个审批十分钟失效，命令或配置改变必须重新申请。结果包含 exit_code、stdout/stderr 与 executed，executed=false 不是查询结果。结论引用网关返回的 evidence_id；已截断的输出不代表完整数据。凭据由系统注入，不向用户索要。\n")
+	b.WriteString("输出被截断时，先查 CLI 顶层帮助寻找原生字段过滤与分页能力，以所需字段和总数精简输出。tccli 支持 --filter（JMESPath，本地过滤返回值），可保留 TotalCount、RequestId 和所需资源字段；避免依赖未获授权的本地脚本或处理器。遇到权限拒绝时，不尝试改变身份或扩大资源范围。\n可用执行配置：\n")
 	for _, p := range profiles {
 		fmt.Fprintf(&b, "- %s（联网：%t；可申请写审批：%t；变量名称：", p.Name, p.Network, p.WriteApproval)
 		// Names, not source names or values. Sorting keeps prompts stable.
-		keys := sortedKeys(p.Env)
+		keys := sortedKeys(mergeEnv(p.Env, p.AgentEnv))
 		b.WriteString(strings.Join(keys, ", "))
 		b.WriteString("）\n")
 	}
 	return b.String()
 }
 
-func sortedKeys(m map[string]string) []string {
+func trustedToolPaths(dir string) ([]string, error) {
+	root, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		return nil, fmt.Errorf("工具运行目录不可用")
+	}
+	var reads []string
+	for _, part := range []string{"bin", "lib", "lib64", "pyvenv.cfg"} {
+		path := filepath.Join(root, part)
+		resolved, err := filepath.EvalSymlinks(path)
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("无法核验工具运行目录")
+		}
+		rel, err := filepath.Rel(root, resolved)
+		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return nil, fmt.Errorf("工具运行目录的 %s 链接指向目录外，不能扩大读取范围", part)
+		}
+		reads = append(reads, resolved)
+	}
+	return reads, nil
+}
+
+func sortedKeys[V any](m map[string]V) []string {
 	keys := make([]string, 0, len(m))
 	for k := range m {
 		keys = append(keys, k)

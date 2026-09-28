@@ -20,7 +20,7 @@ func (s *Server) handleExecutionApprovals(w http.ResponseWriter, r *http.Request
 		writeErr(w, 500, err.Error())
 		return
 	}
-	list, err := (execution.Approvals{DB: db}).List(r.Context(), r.PathValue("id"), eng.Config().Execution)
+	list, err := (execution.Approvals{DB: db}).List(r.Context(), r.PathValue("id"), eng.ExecutionConfig())
 	if err != nil {
 		writeErr(w, 500, err.Error())
 		return
@@ -39,7 +39,7 @@ func sessionHasPendingApprovals(ctx context.Context, eng *engine.Engine, session
 	if err != nil {
 		return false
 	}
-	states, err := (execution.Approvals{DB: db}).StatesForSessions(ctx, []string{session}, eng.Config().Execution)
+	states, err := (execution.Approvals{DB: db}).StatesForSessions(ctx, []string{session}, eng.ExecutionConfig())
 	if err != nil {
 		return false
 	}

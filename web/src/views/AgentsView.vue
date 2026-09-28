@@ -10,6 +10,7 @@ const mcpServers = ref([])
 const allSkills = ref([])
 // agent name → variable KEY names. Values never leave the server.
 const agentVarKeys = ref({})
+const executionProfiles = ref({})
 const loading = ref(true)
 const error = ref('')
 const notice = ref('')
@@ -51,6 +52,7 @@ async function load() {
     agents.value = ag.agents || []
     defaultAgent.value = ag.default_agent || ''
     agentVarKeys.value = ag.var_keys || {}
+    executionProfiles.value = ag.execution_profiles || {}
     providers.value = pv.providers || []
     mcpServers.value = mc.servers || []
     allSkills.value = sk.skills || []
@@ -342,7 +344,7 @@ async function remove(a) {
 
         <!-- variables (existing agents only; saved separately from the form) -->
         <div v-if="editing !== 'new'" class="vars-box">
-          <div class="vars-head">变量（密钥脱敏，注入该 Agent 运行技能脚本时的环境；值不显示、不进对话）</div>
+          <div class="vars-head">变量（密钥脱敏，供技能脚本和已明确映射的执行配置使用；值不显示、不进对话）</div>
           <div class="vars-note">脚本输出里出现的值会被替换成 <code>${变量名}</code> 再返回，所以脚本打印了也不会进对话；4 个字符以内的值不做替换（太短，会误伤正常输出）。</div>
           <div v-if="form.varKeys.length" class="var-chips">
             <span v-for="k in form.varKeys" :key="k" class="badge mono var-chip">
@@ -393,6 +395,11 @@ async function remove(a) {
                 <span class="badge" :class="a.enabled ? 'badge-accent' : ''">{{ a.enabled ? '已启用' : '已停用' }}</span>
               </div>
               <div class="srv-meta dim">{{ a.description || '（无描述）' }}</div>
+              <div class="srv-meta dim">
+                <span v-if="executionProfiles[a.name]?.length">已分配执行器 · {{ executionProfiles[a.name].join('、') }}</span>
+                <span v-else>未分配通用执行器</span>
+                <RouterLink to="/tools">配置执行能力</RouterLink>
+              </div>
               <div v-if="(a.sub_agents || []).length || (a.mcp || []).length || (a.skills || []).length || a.skills || (a.required_tools || []).length || (a.required_suites || []).length || (agentVarKeys[a.name] || []).length" class="srv-secrets">
                 <span v-for="n in a.sub_agents" :key="'s' + n" class="badge" title="子 Agent（转交目标）">↪ {{ n }}</span>
                 <span v-for="n in a.mcp" :key="'m' + n" class="badge mono" title="MCP">{{ n }}</span>

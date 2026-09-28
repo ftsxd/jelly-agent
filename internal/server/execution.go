@@ -9,7 +9,7 @@ import (
 
 func (s *Server) handleExecution(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
-		"config":        s.engineFor(r).Config().Execution,
+		"config":        s.engineFor(r).ExecutionConfig(),
 		"default_rules": execution.DefaultRules(),
 		"defaults":      map[string]any{"timeout_sec": execution.DefaultTimeoutSec, "max_output_kb": execution.DefaultMaxOutputKB},
 		"os_available":  sandbox.OSSandboxAvailable(), "os_detail": sandbox.OSSandboxDetail(),
@@ -66,6 +66,6 @@ func (s *Server) handleCheckExecution(w http.ResponseWriter, r *http.Request) {
 	if in.Agent == "" {
 		in.Agent = "root"
 	}
-	runtime := execution.Runtime{Config: s.engineFor(r).Config().Execution}
+	runtime := execution.Runtime{Config: s.engineFor(r).ExecutionConfig()}
 	writeJSON(w, http.StatusOK, runtime.Check(in.Agent, in.Request))
 }

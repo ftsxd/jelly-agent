@@ -146,7 +146,7 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 		// that publication even when this request holds an older engine.
 		s.mu.RLock()
 		defer s.mu.RUnlock()
-		return check(s.ref.eng.Config().Execution)
+		return check(s.ref.eng.ExecutionConfig())
 	})
 	msg := genai.NewContentFromText(req.Message, genai.RoleUser)
 	if req.ApprovalID != "" {
@@ -159,7 +159,7 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 		if actor == "" {
 			actor = engine.UserID
 		}
-		if err := approvals.Resolve(ctx, approval.ID, sessionID, actor, *req.Approve, eng.Config().Execution); err != nil {
+		if err := approvals.Resolve(ctx, approval.ID, sessionID, actor, *req.Approve, eng.ExecutionConfig()); err != nil {
 			writeErr(w, http.StatusConflict, err.Error())
 			return
 		}

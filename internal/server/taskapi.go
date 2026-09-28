@@ -206,7 +206,7 @@ func (s *Server) foldWithStatus(ctx context.Context, eng *engine.Engine, id stri
 	if len(supplied) > 0 {
 		approvals = supplied[0]
 	} else if db, err := eng.StateDB(); err == nil {
-		states, _ := (execution.Approvals{DB: db}).StatesForSessions(ctx, []string{id}, eng.Config().Execution)
+		states, _ := (execution.Approvals{DB: db}).StatesForSessions(ctx, []string{id}, eng.ExecutionConfig())
 		approvals = states[id]
 	}
 	for i := range tasks {
@@ -365,7 +365,7 @@ func (s *Server) handleTasks(w http.ResponseWriter, r *http.Request) {
 		// The cache below still helps a warm request, but it is no longer
 		// what keeps the first one from being 600 round trips.
 		batch := s.framesForPage(r, stateDB, metas)
-		approvalStates, _ := (execution.Approvals{DB: stateDB}).StatesForSessions(r.Context(), ids, s.engineFor(r).Config().Execution)
+		approvalStates, _ := (execution.Approvals{DB: stateDB}).StatesForSessions(r.Context(), ids, s.engineFor(r).ExecutionConfig())
 		for _, m := range metas {
 			frames, ok := batch[m.ID]
 			if !ok {

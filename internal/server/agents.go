@@ -24,15 +24,20 @@ func (s *Server) handleListAgents(w http.ResponseWriter, r *http.Request) {
 	// the list marshals AgentDef verbatim, so a value stored there would be on
 	// its way to the browser before anyone noticed.
 	varKeys := map[string][]string{}
+	executionProfiles := map[string][]string{}
 	for _, a := range agents {
 		if keys := sortedKeys(cfg.AgentVars[a.Name]); len(keys) > 0 {
 			varKeys[a.Name] = keys
 		}
+		for _, p := range cfg.Execution.ProfilesFor(a.Name) {
+			executionProfiles[a.Name] = append(executionProfiles[a.Name], p.Name)
+		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"agents":        agents,
-		"default_agent": cfg.DefaultAgent,
-		"var_keys":      varKeys,
+		"agents":             agents,
+		"default_agent":      cfg.DefaultAgent,
+		"var_keys":           varKeys,
+		"execution_profiles": executionProfiles,
 	})
 }
 

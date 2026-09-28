@@ -5,6 +5,10 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"google.golang.org/adk/agent"
+
+	"github.com/jelly-agent/jelly-agent/internal/config"
+	"github.com/jelly-agent/jelly-agent/internal/memory"
 )
 
 func newAgentCmd() *cobra.Command {
@@ -33,7 +37,25 @@ func newAgentRunCmd() *cobra.Command {
 			setupLogging(eng.Config())
 			defer startTracing(eng.Config())()
 
-			a, prov, _, search, err := eng.BuildAgent(provider)
+			defer eng.Close()
+			name := eng.DefaultAgentName()
+			if provider != "" {
+				name = "" // Preserve the legacy provider-only invocation.
+			}
+			if len(args) > 0 {
+				name = args[0]
+			}
+			var a agent.Agent
+			var prov config.Provider
+			var search *memory.Search
+			if name != "" && name != "root" {
+				if provider != "" {
+					return fmt.Errorf("命名 Agent 使用其配置的 Provider，不能通过 --provider 覆盖")
+				}
+				a, prov, _, search, err = eng.BuildAgentByName(name)
+			} else {
+				a, prov, _, search, err = eng.BuildAgent(provider)
+			}
 			if err != nil {
 				return err
 			}

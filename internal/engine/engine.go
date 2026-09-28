@@ -688,6 +688,11 @@ func (e *Engine) VarsFor(agent, skill string) map[string]string {
 	for k, v := range agentVars {
 		out[k] = v
 	}
+	// Approval-only identities cannot escape through the older run_script
+	// channel. They are reserved even if execution is temporarily disabled.
+	for k := range e.cfg.Execution.ApprovalVarsFor(strings.TrimSpace(agent)) {
+		delete(out, k)
+	}
 	return out
 }
 
@@ -1272,6 +1277,11 @@ func (e *Engine) Tools(core *memory.Core, withSearch bool) ([]adktool.Tool, erro
 	return tools, nil
 }
 
+// ExecutionConfig resolves private agent sources for runtime/approval use.
+func (e *Engine) ExecutionConfig() execution.Config {
+	return e.cfg.Execution.WithAgentVars(e.cfg.AgentVars)
+}
+
 // ShellExecToolFor constructs only tools explicitly assigned to this node.
 func (e *Engine) ShellExecToolFor(agent string) (adktool.Tool, error) {
 	if len(e.cfg.Execution.ProfilesFor(agent)) == 0 {
@@ -1280,7 +1290,7 @@ func (e *Engine) ShellExecToolFor(agent string) (adktool.Tool, error) {
 	if err := e.cfg.Execution.Validate(); err != nil {
 		return nil, err
 	}
-	runtime := execution.Runtime{Config: e.cfg.Execution}
+	runtime := execution.Runtime{Config: e.ExecutionConfig()}
 	for _, p := range e.cfg.Execution.ProfilesFor(agent) {
 		if p.WriteApproval {
 			db, err := e.StateDB()
@@ -1611,6 +1621,9 @@ func (e *Engine) buildNode(name, description, provider, instruction string, tool
 		return nil, prov, fmt.Errorf("build shell_exec: %w", err)
 	} else if ex != nil {
 		tools = append(tools, ex)
+		// An assigned executor is a capability, not a keyword match. Preserve
+		// it even on short follow-ups and when the scored tool budget is full.
+		requiredTools = append(append([]string(nil), requiredTools...), ex.Name())
 	}
 
 	// Agent Skills: when any skill is enabled, add the use_skill tool so the
