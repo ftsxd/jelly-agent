@@ -42,6 +42,16 @@ LABEL org.opencontainers.image.revision="${BUILD_REVISION}"
 RUN apt-get update \
     && apt-get install -y --no-install-recommends git ca-certificates bubblewrap \
     && rm -rf /var/lib/apt/lists/*
+# 可选：给通用执行器预装腾讯云 CLI。os 后端的命令就跑在这个容器的沙箱里，
+# 沙箱只读挂载 /usr，pip 装进 /usr/local 的 tccli 因此直接可用，不需要 tool_dir。
+# 版本必须显式给定（docker build --build-arg TCCLI_VERSION=3.1.176.1），执行过程中
+# 不安装、不升级工具；不传就不装，镜像和原来一样。
+ARG TCCLI_VERSION=
+ARG PIP_INDEX_URL=https://mirrors.cloud.tencent.com/pypi/simple
+RUN if [ -n "${TCCLI_VERSION}" ]; then \
+        pip install --no-cache-dir --index-url "${PIP_INDEX_URL}" "tccli==${TCCLI_VERSION}" \
+        && tccli --version; \
+    fi
 RUN useradd --uid 65532 --user-group --home-dir /data --shell /usr/sbin/nologin nonroot
 COPY --from=build /out/jelly /usr/local/bin/jelly
 COPY --chown=nonroot:nonroot --from=build /out/data /data

@@ -151,6 +151,12 @@ docker build -f images/sre-runtime/Dockerfile \
 
 镜像版本在构建时选择，Agent 执行过程中不安装或更新工具。生产镜像另应固定基础镜像 digest、冻结依赖并按部署流程扫描。
 
+使用 `os` 后端（容器部署的默认）时，命令跑在 jelly-agent 容器自己的沙箱里，上面的诊断镜像用不上，CLI 要装进 jelly-agent 镜像。构建时传入版本即可预装 tccli（装在 `/usr/local`，沙箱可读，无需 `tool_dir`；不传则不装）：
+
+```bash
+docker build --build-arg TCCLI_VERSION=3.1.176.1 -t jelly-agent:local .
+```
+
 返回包含执行标识、策略与命中规则、`executed`、退出码、stdout/stderr、耗时、超时和截断标记。结果通过现有工具网关保存在状态库，使用网关的 `evidence_id` 引用，并可由 `read_result / search_result` 按会话取回。取回的是**执行器已脱敏且在采集上限内的输出**，超过采集上限的字节不保留。工具页的“检查已保存规则”只评估策略，不解析凭据或启动进程。
 
 **写操作审批**：在工具页为指定执行配置勾选“允许申请写操作审批”，默认不启用。Agent 调用 `prompt` 命令后暂停，会话和任务显示等待审批。对话页展示服务端保存的完整命令、用途、Agent、配置名称和有效期；管理员可“批准并执行一次”或拒绝。任务页与会话页也提供入口。批准会继续原会话与原任务，仍经过工具网关、沙箱、超时和输出脱敏。
