@@ -2,7 +2,9 @@ package sandbox
 
 import (
 	"context"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -35,12 +37,14 @@ var bwrapIsolation = []string{
 	"--tmpfs", "/tmp",
 }
 
-// bwrapAvailable reports whether bwrap is installed AND can create its
-// namespaces here. Presence alone is not enough: Docker's default seccomp
-// profile, a disabled kernel.unprivileged_userns_clone, or Ubuntu's AppArmor
-// userns restriction all leave the binary on PATH yet make every run fail at
-// start — which would slip past the Strict preflight and surface only as a
-// vague start error. One real no-op run settles it for the process lifetime.
+// bwrapAvailable reports whether bwrap is installed AND can run a command in
+// the layout real runs get. Presence alone is not enough: Docker's default
+// seccomp profile, a disabled kernel.unprivileged_userns_clone, or Ubuntu's
+// AppArmor userns restriction all leave the binary on PATH yet make every run
+// fail at start — which would slip past the Strict preflight and surface only as
+// a vague start error. The probe binds the Strict system allowlist rather than
+// the whole root, so a layout that cannot even exec `true` (a missing dynamic
+// loader, say) is caught here too. One run settles it for the process lifetime.
 func bwrapAvailable() bool {
 	bwrapOnce.Do(func() {
 		p, err := exec.LookPath("bwrap")
@@ -49,7 +53,9 @@ func bwrapAvailable() bool {
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		args := append([]string{"--ro-bind", "/", "/"}, bwrapIsolation...)
+		m := newBwrapMounts()
+		m.bindAll(systemPaths(Policy{Strict: true}), "--ro-bind-try")
+		args := append(append([]string{}, bwrapIsolation...), m.argv...)
 		args = append(args, "--unshare-net", "--", "true")
 		out, err := exec.CommandContext(ctx, p, args...).CombinedOutput()
 		if err != nil {
@@ -79,34 +85,15 @@ func bwrapUnavailable() string {
 // read-only, and the network namespace dropped entirely unless the mode allows
 // it. The caller appends the target command after the returned "--".
 func bwrapArgv(p Policy, dir string) []string {
-	argv := append([]string{bwrapPath}, bwrapIsolation...)
-	for _, r := range systemPaths(p) {
-		// /proc and /dev are already synthesised above; a later bind of the real
-		// ones would overlay them and defeat the PID namespace.
-		if r == "/proc" || r == "/dev" {
-			continue
-		}
-		if c := canonical(r); c != "" {
-			argv = append(argv, "--ro-bind-try", c, c)
-		}
+	m := newBwrapMounts()
+	m.bindAll(systemPaths(p), "--ro-bind-try")
+	m.bindAll(p.ReadPaths, "--ro-bind-try")
+	rw := "--ro-bind-try"
+	if p.Mode.CanWrite() {
+		rw = "--bind-try"
 	}
-	for _, r := range p.ReadPaths {
-		if c := canonical(r); c != "" {
-			argv = append(argv, "--ro-bind-try", c, c)
-		}
-	}
-	writable := append([]string{dir}, p.WritePaths...)
-	for _, w := range writable {
-		c := canonical(w)
-		if c == "" {
-			continue
-		}
-		if p.Mode.CanWrite() {
-			argv = append(argv, "--bind-try", c, c)
-		} else {
-			argv = append(argv, "--ro-bind-try", c, c)
-		}
-	}
+	m.bindAll(append([]string{dir}, p.WritePaths...), rw)
+	argv := append(append([]string{bwrapPath}, bwrapIsolation...), m.argv...)
 	argv = append(argv, "--chdir", dir)
 	if !p.Mode.CanNetwork() {
 		// Unconditional: bwrap simply does not give the sandboxed process a
@@ -115,6 +102,88 @@ func bwrapArgv(p Policy, dir string) []string {
 		argv = append(argv, "--unshare-net")
 	}
 	return append(argv, "--")
+}
+
+// bwrapMounts accumulates bind and symlink operations; each symlink is
+// created once.
+type bwrapMounts struct {
+	argv  []string
+	seen  map[string]bool
+	binds []string
+}
+
+func newBwrapMounts() *bwrapMounts { return &bwrapMounts{seen: map[string]bool{}} }
+
+func (m *bwrapMounts) bindAll(paths []string, flag string) {
+	for _, r := range paths {
+		m.bind(r, flag)
+	}
+}
+
+// bind exposes path inside the sandbox at the same place it has outside.
+//
+// Binding only the resolved target is not enough: on merged-/usr systems
+// (Debian 12, the python:slim image, RHEL 7+) /bin, /lib and /lib64 are
+// symlinks into /usr, and the ELF interpreter every binary names is
+// /lib64/ld-linux-x86-64.so.2. Without the symlinks themselves the sandbox has
+// /usr/lib but no /lib64, so every exec fails with ENOENT — reported by bwrap
+// as "execvp sh: No such file or directory", which reads like a missing
+// command. So each symlink hop is recreated with --symlink as well.
+func (m *bwrapMounts) bind(path, flag string) {
+	c := canonical(path)
+	if c == "" || bwrapSynthetic(path) || bwrapSynthetic(c) {
+		return
+	}
+	for hop, n := path, 0; n < 8; n++ {
+		fi, err := os.Lstat(hop)
+		if err != nil || fi.Mode()&os.ModeSymlink == 0 {
+			break
+		}
+		target, err := os.Readlink(hop)
+		if err != nil {
+			break
+		}
+		if !m.seen[hop] && !m.underBind(hop) {
+			m.seen[hop] = true
+			m.argv = append(m.argv, "--symlink", target, hop)
+		}
+		if !filepath.IsAbs(target) {
+			target = filepath.Join(filepath.Dir(hop), target)
+		}
+		hop = target
+	}
+	if !m.seen[c] {
+		m.seen[c] = true
+		m.binds = append(m.binds, c)
+	}
+	// Always emitted, even for a path bound before: a write path that is also a
+	// read path must end up read-write, and the later bind is the one that wins.
+	m.argv = append(m.argv, flag, c, c)
+}
+
+// underBind reports whether path sits inside a directory already bound: the
+// symlink is then in the sandbox as-is, and creating it again would fail on
+// the read-only mount.
+func (m *bwrapMounts) underBind(path string) bool {
+	for _, b := range m.binds {
+		if strings.HasPrefix(path, strings.TrimSuffix(b, "/")+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+// bwrapSynthetic reports whether path lies under /proc or /dev, which bwrap
+// synthesises fresh for the sandbox. Binding anything from the real ones back
+// in would defeat that — and worse than it looks: canonical("/proc/self") is
+// the agent's own /proc/<pid>, whose environ holds the service's secrets.
+func bwrapSynthetic(path string) bool {
+	for _, root := range []string{"/proc", "/dev"} {
+		if path == root || strings.HasPrefix(path, root+"/") {
+			return true
+		}
+	}
+	return false
 }
 
 // runBwrap runs the script inside a bwrap sandbox.

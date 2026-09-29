@@ -79,6 +79,8 @@ sudo dnf install -y bubblewrap         # RHEL / Rocky / Fedora
 
 bwrap 的可用性每个进程只探测一次。修好主机或容器配置后要重启服务，否则进程还记着之前「不可用」的结果。
 
+探测用的是真实执行时的挂载布局（只读绑定系统目录白名单，而不是整个 `/`），所以布局本身的问题也会在探测时暴露。其中一个坑：Debian 12、python:slim 镜像、RHEL 7+ 都是 merged-/usr，`/bin`、`/lib`、`/lib64` 是指向 `/usr` 的符号链接，而每个动态链接程序都写死了 `/lib64/ld-linux-x86-64.so.2` 作为加载器。只绑定链接的目标、不重建链接本身，沙箱里就没有加载器，任何程序都起不来，bwrap 报的是 `execvp sh: No such file or directory`——看上去像命令没装，其实是沙箱里连 `sh` 都执行不了。现在每个是符号链接的路径都会用 `--symlink` 原样重建；`/proc`、`/dev` 下的路径一律不从外面绑定（`/proc/self` 解析出来是 agent 自己的 `/proc/<pid>`，里面有服务的环境变量）。
+
 手动验证：
 
 ```bash
