@@ -315,11 +315,21 @@ func builtinDecision(a []string) (Decision, string) {
 				return Forbidden, "不允许读取或修改 kubeconfig"
 			}
 			if readResources {
-				for _, res := range strings.Split(v, ",") {
+				// kubectl matches resource and kind names case-insensitively, so
+				// "Secret" and "SECRETS" name the same objects as "secrets".
+				for _, res := range strings.Split(strings.ToLower(v), ",") {
 					res = strings.Split(res, "/")[0]
 					if res == "secret" || res == "secrets" || strings.HasPrefix(res, "secret.") || strings.HasPrefix(res, "secrets.") {
 						return Forbidden, "不允许读取 Kubernetes Secret"
 					}
+				}
+				// A manifest (local, URL or kustomization) names its objects
+				// outside argv, where the Secret check above cannot see them.
+				if kubectlManifestFlag(v) {
+					return Forbidden, "读取资源时不允许通过 -f/-k 引用清单，请直接写资源类型与名称"
+				}
+				if strings.Contains(v, "template-file") || strings.Contains(v, "jsonpath-file") {
+					return Forbidden, "不允许从文件加载输出模板"
 				}
 			}
 			if v == "delete" {
@@ -370,6 +380,30 @@ func builtinDecision(a []string) (Decision, string) {
 		return Prompt, "云操作不在默认只读范围内，需要逐次审批"
 	}
 	return "", ""
+}
+
+// kubectlManifestFlag reports whether v selects objects through a manifest:
+// --filename/--kustomize, or -f/-k anywhere in a shorthand group such as
+// "-Af" or "-fhttps://…". A group ends at the first shorthand that takes a
+// value, because the rest of the token is that value ("-ojsonpath={.kind}").
+func kubectlManifestFlag(v string) bool {
+	for _, flag := range []string{"--filename", "--kustomize"} {
+		if v == flag || strings.HasPrefix(v, flag+"=") {
+			return true
+		}
+	}
+	if len(v) < 2 || v[0] != '-' || v[1] == '-' {
+		return false
+	}
+	for _, c := range v[1:] {
+		if c == 'f' || c == 'k' {
+			return true
+		}
+		if strings.ContainsRune("olnLs", c) {
+			return false
+		}
+	}
+	return false
 }
 
 // Help occupies a command slot, never an arbitrary argument value. Only the

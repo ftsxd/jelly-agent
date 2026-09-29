@@ -34,6 +34,9 @@ type Observation struct {
 	ApprovalRequired bool   `json:"approval_required,omitempty"`
 	ApprovalID       string `json:"approval_id,omitempty"`
 	Approved         bool   `json:"approved,omitempty"`
+	// WriteCredentials records that the approved call ran with the profile's
+	// write sources rather than its read identity.
+	WriteCredentials bool   `json:"write_credentials,omitempty"`
 	ExitCode         int    `json:"exit_code"`
 	DurationMS       int64  `json:"duration_ms"`
 	Stdout           string `json:"stdout,omitempty"`
@@ -197,7 +200,7 @@ func (r Runtime) execute(ctx context.Context, agent, session string, req Request
 			out.Outcome = observationOutcome(out)
 		}
 		slog.InfoContext(ctx, "通用命令执行", "exec_id", out.ExecID, "session_id", session, "agent", agent,
-			"approval_id", out.ApprovalID, "approved", out.Approved,
+			"approval_id", out.ApprovalID, "approved", out.Approved, "write_credentials", out.WriteCredentials,
 			"profile", out.Profile, "decision", out.Decision, "executed", out.Executed, "exit_code", out.ExitCode,
 			"duration_ms", out.DurationMS, "truncated", out.Truncated,
 			"backend", out.Backend, "unconfined", out.Unconfined, "degraded", out.Degraded)
@@ -221,7 +224,11 @@ func (r Runtime) execute(ctx context.Context, agent, session string, req Request
 			break
 		}
 	}
-	if approvedID != "" {
+	// An approval authorizes elevated sources only when the command itself
+	// needed one. A read that was escalated solely because no sandbox is
+	// available was approved to run unconfined, not to run with write access.
+	if approvedID != "" && profile.WriteApproval && Evaluate(req.Command, profile.Rules).Decision == Prompt {
+		out.WriteCredentials = true
 		profile.Env = mergeEnv(profile.Env, profile.WriteEnv)
 		profile.AgentEnv = mergeEnv(profile.AgentEnv, profile.WriteAgentEnv)
 		for key := range profile.WriteEnv {

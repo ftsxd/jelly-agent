@@ -309,3 +309,47 @@ func TestUnconfinedEscapeHatchRequiresApprovalAndRecordsDegradation(t *testing.T
 		t.Fatalf("expected an approved unconfined run with degradation recorded: %+v", out)
 	}
 }
+
+// Approving a read to run unconfined is not a write grant: only a command
+// that itself required approval may receive the profile's write sources.
+func TestUnconfinedReadApprovalKeepsReadCredentials(t *testing.T) {
+	restore := checkStrict
+	checkStrict = func(sandbox.Policy) error { return fmt.Errorf("no sandbox on this host") }
+	t.Cleanup(func() { checkStrict = restore })
+	s := approvalStore(t)
+	c := approvalConfig()
+	c.Profiles[0].AllowUnconfinedWithApproval = true
+	c.Profiles[0].Env = map[string]string{"TOKEN": "TEST_UNCONFINED_RO"}
+	c.Profiles[0].WriteEnv = map[string]string{"TOKEN": "TEST_UNCONFINED_RW"}
+	t.Setenv("TEST_UNCONFINED_RO", "readonly-credential")
+	t.Setenv("TEST_UNCONFINED_RW", "write-credential")
+	var got []string
+	r := Runtime{Config: c, Approvals: &s, run: func(_ context.Context, _ sandbox.Policy, spec sandbox.Spec) (sandbox.Result, error) {
+		got = append(got, spec.Env["TOKEN"])
+		return sandbox.Result{ExitCode: 0, Backend: "native", Started: true}, nil
+	}}
+	for i, test := range []struct {
+		command, want string
+		write         bool
+	}{
+		{"kubectl get pods", "readonly-credential", false},
+		{"kubectl scale deployment/web -n app --replicas=2", "write-credential", true},
+	} {
+		req := Request{Command: test.command, Purpose: "diagnose", Profile: "read"}
+		if check := r.Check("ops", req); check.Decision != Prompt {
+			t.Fatalf("%s: expected prompt, got %+v", test.command, check)
+		}
+		call := fmt.Sprintf("call-%d", i)
+		a, err := s.Create(WithOrigin(t.Context(), "coordinator", "test"), c, "ops", "s", "round", call, req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := s.Resolve(t.Context(), a.ID, "s", "admin", true, c); err != nil {
+			t.Fatal(err)
+		}
+		out := r.ExecuteApproved(WithApproval(t.Context(), a.ID), "ops", "s", call, req)
+		if !out.Executed || !out.Unconfined || out.WriteCredentials != test.write || got[i] != test.want {
+			t.Fatalf("%s: credential %q, observation %+v", test.command, got[i], out)
+		}
+	}
+}

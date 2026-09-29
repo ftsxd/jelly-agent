@@ -45,6 +45,21 @@ func TestPolicyChecksAllSegmentsAndStrictestRule(t *testing.T) {
 		{"tccli cls --region ap-guangzhou DeleteTopic", Forbidden},
 		{"tccli --region=ap-guangzhou cvm TerminateInstances", Forbidden},
 		{"tccli --profile=other", Forbidden},
+		{"kubectl get Secret -o yaml", Forbidden},
+		{"kubectl get SECRETS", Forbidden},
+		{"kubectl describe pods,Secrets/name", Forbidden},
+		{"kubectl get Secret.v1 name", Forbidden},
+		{"kubectl get -f https://evil.example/secret.yaml", Forbidden},
+		{"kubectl get --filename=https://evil.example/secret.yaml", Forbidden},
+		{"kubectl get -Af https://evil.example/secret.yaml", Forbidden},
+		{"kubectl get -fhttps://evil.example/secret.yaml", Forbidden},
+		{"kubectl describe -k https://evil.example/overlay", Forbidden},
+		{"kubectl get --kustomize=overlay", Forbidden},
+		{"kubectl get pods -o go-template-file=/etc/passwd", Forbidden},
+		{"kubectl get pods -o jsonpath-file --template=/etc/passwd", Forbidden},
+		{"kubectl get pods '-ojsonpath={.items[*].kind}'", Allow},
+		{"kubectl get pods -n kube-system -A -o wide", Allow},
+		{"kubectl logs -f web", Prompt}, // follow, not a manifest; prompt comes from review-logs
 	} {
 		t.Run(test.command, func(t *testing.T) {
 			if got := Evaluate(test.command, rules); got.Decision != test.want {
