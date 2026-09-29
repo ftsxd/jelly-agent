@@ -50,6 +50,18 @@ describe('write approval controls', () => {
     expect(host.querySelector('img')).toBeNull()
     expect(host.textContent).not.toContain('old-session-command')
   })
+  it('keeps the pending request as a card and folds settled history into rows', async () => {
+    const done = (id, extra) => ({ ...pending, id, state: 'consumed', resolved_by: 'admin', resolved_ms: Date.now(), ...extra, request: { ...pending.request, command: `ls ${id}` } })
+    await mount([pending, done('a', { outcome: 'failed' }), done('b', { outcome: 'succeeded' }), done('c', { state: 'rejected' }), done('d', { outcome: 'unknown' })])
+    const cards = [...host.querySelectorAll('article')]
+    expect(cards.map(c => c.querySelector('pre').textContent)).toEqual([pending.request.command, 'ls d'])
+    const history = host.querySelector('details.history')
+    expect(history.open).toBe(false)
+    expect(history.querySelector('summary').textContent).toContain('3 条')
+    expect([...history.querySelectorAll('.row code')].map(c => c.textContent)).toEqual(['ls a', 'ls b', 'ls c'])
+    expect(button('批准并执行一次')).toBeDefined()
+    expect(host.querySelectorAll('.actions').length).toBe(1)
+  })
   it('reports API failures with a retry', async () => {
     api.executionApprovals.mockRejectedValueOnce(new Error('需要登录'))
     await mount()

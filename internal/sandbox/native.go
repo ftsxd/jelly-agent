@@ -105,6 +105,9 @@ func hasShell() bool {
 	return shellOK
 }
 
+// PathEnv is the PATH a local (native/os) child resolves commands against.
+func PathEnv() string { return pathEnv() }
+
 func pathEnv() string {
 	if p := os.Getenv("PATH"); p != "" {
 		return p // keep the host PATH so interpreters (python3/node) resolve

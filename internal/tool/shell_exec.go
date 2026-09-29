@@ -22,7 +22,9 @@ func NewShellExecTool(runtime execution.Runtime, agent string) (adktool.Tool, er
 			return runtime.ExecuteApproved(tc, agent, tc.SessionID(), tc.FunctionCallID(), req), nil
 		}
 		check := runtime.Check(agent, req)
-		if check.Decision == execution.Prompt && runtime.ApprovalEnabled(agent, req.Profile) && runtime.Approvals != nil {
+		// A command the environment lacks is refused by Execute before it would
+		// run, so asking a person to approve it would only add a dead card.
+		if check.Decision == execution.Prompt && runtime.ApprovalEnabled(agent, req.Profile) && runtime.Approvals != nil && runtime.MissingCommand(agent, req) == "" {
 			a, err := runtime.Approvals.Create(tc, runtime.Config, agent, tc.SessionID(), tc.InvocationID(), tc.FunctionCallID(), req)
 			if err != nil {
 				return execution.Observation{}, err

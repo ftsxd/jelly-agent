@@ -1,5 +1,5 @@
 <script setup>
-import { onUnmounted, ref, watch } from 'vue'
+import { computed, onUnmounted, ref, watch } from 'vue'
 import { api } from '../api'
 import { latestOnly } from '../latest'
 
@@ -33,38 +33,79 @@ function outcome(a) {
   if (a.outcome === 'unknown') return '执行结果未知，请先核查目标资源；不会自动重试'
   return labels[a.state] || a.state
 }
+// Cards are for what still needs a person: a decision, a run in flight, or an
+// outcome nobody can vouch for. Everything settled folds into one line each —
+// a session that probed a dozen commands must not bury the one awaiting you.
+function live(a) {
+  return a.state === 'pending' || a.state === 'approved' || (a.state === 'consumed' && !a.outcome) || a.outcome === 'unknown'
+}
+const current = computed(() => approvals.value.filter(live))
+const settled = computed(() => approvals.value.filter(a => !live(a)))
+function tone(a) {
+  if (a.outcome === 'succeeded') return 'ok'
+  if (a.outcome === 'failed') return 'bad'
+  return 'quiet'
+}
+function when(a) { return new Date(a.resolved_ms || a.created_ms).toLocaleString() }
 </script>
 
 <template>
-  <section v-if="approvals.length || error" class="approvals" aria-label="写操作审批">
-    <h3>写操作审批</h3>
+  <section v-if="approvals.length || error" class="approvals" aria-label="命令审批">
     <p v-if="error" role="alert" class="warning">{{ error }} <button class="btn" @click="load">重新加载审批</button></p>
-    <article v-for="a in approvals" :key="a.id" class="approval">
+    <article v-for="a in current" :key="a.id" class="approval">
       <div class="heading"><strong>{{ outcome(a) }}</strong><span class="mono">{{ a.agent }} · {{ a.request.profile }}</span></div>
       <p>{{ a.request.purpose }}</p>
       <pre>{{ a.request.command }}</pre>
-      <p class="muted">{{ a.reason }}。可能改变目标资源，批准仅对完整命令有效，使用一次即消耗；失败后不会自动重试。</p>
-      <p class="muted">有效期至 {{ new Date(a.expires_ms).toLocaleString() }}<span v-if="a.resolved_by"> · 处理人 {{ a.resolved_by }}</span></p>
-      <div v-if="a.state === 'pending'" class="actions">
-        <template v-if="actionable">
-          <button class="btn btn-primary" :disabled="disabled" @click="decision(a, true)">批准并执行一次</button>
-          <button class="btn" :disabled="disabled" @click="decision(a, false)">拒绝</button>
-        </template>
-        <RouterLink v-else class="btn" :to="{ path: '/chat', query: { session } }">打开对话审批</RouterLink>
-      </div>
-      <p v-if="a.state === 'expired' || a.state === 'invalidated' || a.state === 'abandoned'" class="warning">请在对话中重新发起命令请求。</p>
+      <template v-if="a.state === 'pending'">
+        <p class="muted">{{ a.reason }}。批准仅对完整命令有效，使用一次即消耗；失败后不会自动重试。</p>
+        <p class="muted">有效期至 {{ new Date(a.expires_ms).toLocaleString() }}</p>
+        <div class="actions">
+          <template v-if="actionable">
+            <button class="btn btn-primary" :disabled="disabled" @click="decision(a, true)">批准并执行一次</button>
+            <button class="btn" :disabled="disabled" @click="decision(a, false)">拒绝</button>
+          </template>
+          <RouterLink v-else class="btn" :to="{ path: '/chat', query: { session } }">打开对话审批</RouterLink>
+        </div>
+      </template>
+      <p v-else-if="a.resolved_by" class="muted">处理人 {{ a.resolved_by }} · {{ when(a) }}</p>
       <p v-if="a.exec_id" class="mono muted">{{ a.exec_id }}</p>
     </article>
+    <details v-if="settled.length" class="history">
+      <summary>已处理的命令审批 {{ settled.length }} 条</summary>
+      <details v-for="a in settled" :key="a.id" class="row">
+        <summary>
+          <span class="state" :class="tone(a)">{{ outcome(a) }}</span>
+          <code class="cmd" :title="a.request.command">{{ a.request.command }}</code>
+          <span class="muted time">{{ when(a) }}</span>
+        </summary>
+        <div class="detail">
+          <p>{{ a.request.purpose }}</p>
+          <pre>{{ a.request.command }}</pre>
+          <p class="muted">{{ a.reason }}<span v-if="a.resolved_by"> · 处理人 {{ a.resolved_by }}</span></p>
+          <p v-if="a.state === 'expired' || a.state === 'invalidated' || a.state === 'abandoned'" class="warning">请在对话中重新发起命令请求。</p>
+          <p v-if="a.exec_id" class="mono muted">{{ a.exec_id }}</p>
+        </div>
+      </details>
+    </details>
   </section>
 </template>
 
 <style scoped>
 .approvals { max-width: 820px; width: 100%; margin: 0 auto; display: grid; gap: var(--sp-3); }
-h3 { font-size: 14px; }
 .approval { padding: var(--sp-4); border: 1px solid var(--warning); border-radius: var(--radius); display: grid; gap: var(--sp-2); background: var(--surface-2); }
 .heading, .actions { display: flex; flex-wrap: wrap; justify-content: space-between; gap: var(--sp-2); }
 .actions { justify-content: flex-start; }
 p { margin: 0; font-size: 12px; line-height: 1.7; }
 pre { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; padding: var(--sp-3); background: var(--surface); border-radius: var(--radius-sm); font-size: 12px; }
 .warning { color: var(--warning); }
+.history { font-size: 12px; }
+.history > summary { cursor: pointer; color: var(--text-muted); padding: var(--sp-1) 0; }
+.row { border-top: 1px solid var(--border); }
+.row > summary { cursor: pointer; display: flex; align-items: center; gap: var(--sp-2); padding: var(--sp-2) 0; min-width: 0; }
+.state { flex: none; }
+.state.bad { color: var(--danger); }
+.state.quiet { opacity: 0.7; }
+.cmd { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.time { flex: none; }
+.detail { display: grid; gap: var(--sp-2); padding: 0 0 var(--sp-3); }
 </style>

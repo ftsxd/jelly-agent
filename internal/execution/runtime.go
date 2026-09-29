@@ -50,8 +50,11 @@ type Observation struct {
 	// Landlock was available. Degraded carries why (the CheckStrict error, or a
 	// backend's own partial-enforcement note) so it reaches the audit trail
 	// even though the run otherwise succeeded.
-	Unconfined     bool   `json:"unconfined,omitempty"`
-	Degraded       string `json:"degraded,omitempty"`
+	Unconfined bool   `json:"unconfined,omitempty"`
+	Degraded   string `json:"degraded,omitempty"`
+	// MissingCommand names a command the execution environment does not have;
+	// the call was refused before any approval or process start.
+	MissingCommand string `json:"missing_command,omitempty"`
 	OutcomeUnknown bool   `json:"outcome_unknown,omitempty"`
 	Outcome        string `json:"outcome,omitempty"`
 	CleanupPending bool   `json:"cleanup_pending,omitempty"`
@@ -70,6 +73,73 @@ type Runtime struct {
 // unconfined escape hatch can be exercised on hosts that do have a working
 // sandbox. Package-level because Approvals.Create builds its own Runtime.
 var checkStrict = sandbox.CheckStrict
+
+// commandOnPath is the seam for resolving a command the way the sandboxed child
+// will; tests replace it so fixtures need not install kubectl or tccli.
+var commandOnPath = realCommandOnPath
+
+func realCommandOnPath(path, name string) bool {
+	for _, dir := range filepath.SplitList(path) {
+		if dir == "" {
+			continue
+		}
+		if st, err := os.Stat(filepath.Join(dir, name)); err == nil && !st.IsDir() && st.Mode()&0111 != 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// Only a multi-segment command runs under bash, so only there can a segment
+// name a builtin rather than a file.
+var bashBuiltins = map[string]bool{}
+
+func init() {
+	for _, name := range strings.Fields("alias bg bind break builtin caller cd command compgen complete continue declare dirs disown echo enable eval exec exit export false fc fg getopts hash help history jobs kill let local logout mapfile popd printf pushd pwd read readarray readonly return set shift shopt source suspend test times trap true type typeset ulimit umask unalias unset wait") {
+		bashBuiltins[name] = true
+	}
+}
+
+// MissingCommand names the first command the sandbox would fail to find, or ""
+// when every one resolves. It runs before any approval is requested: a person
+// should not be asked to authorize a command that cannot start, and a model
+// that learns "not installed" early stops instead of probing the filesystem.
+// Docker commands live in the image, so they are only judged by exit status.
+func (r Runtime) MissingCommand(agent string, req Request) string {
+	if r.Config.Backend == "docker" {
+		return ""
+	}
+	parsed, err := Parse(req.Command)
+	if err != nil {
+		return ""
+	}
+	path := sandbox.PathEnv()
+	for _, p := range r.Config.ProfilesFor(agent) {
+		if p.Name == req.Profile && p.ToolDir != "" {
+			path = filepath.Join(p.ToolDir, "bin") + string(os.PathListSeparator) + path
+		}
+	}
+	names := []string{}
+	if len(parsed.Segments) > 1 {
+		names = append(names, "bash")
+	}
+	for _, argv := range parsed.Segments {
+		if len(parsed.Segments) > 1 && bashBuiltins[argv[0]] {
+			continue
+		}
+		names = append(names, argv[0])
+	}
+	for _, name := range names {
+		if !commandOnPath(path, name) {
+			return name
+		}
+	}
+	return ""
+}
+
+func missingCommandError(name string) string {
+	return fmt.Sprintf("执行环境中没有命令 %s（未安装或不在 PATH 中），命令未执行。不要再用 find、ls、which、python 等命令探测文件系统或改用其他调用方式，直接向用户说明缺少该 CLI，需要管理员在执行环境中安装。", name)
+}
 
 func (r Runtime) Check(agent string, req Request) Evaluation {
 	if err := r.Config.Validate(); err != nil {
@@ -207,6 +277,13 @@ func (r Runtime) execute(ctx context.Context, agent, session string, req Request
 	}()
 	if intent != nil {
 		defer r.finishManaged(&out, *intent)
+	}
+	if out.Decision != Forbidden {
+		if name := r.MissingCommand(agent, req); name != "" {
+			out.MissingCommand = name
+			out.Error = missingCommandError(name)
+			return
+		}
 	}
 	if out.Decision == Forbidden || (out.Decision != Allow && approvedID == "") {
 		out.ApprovalRequired = out.Decision == Prompt
@@ -426,6 +503,9 @@ func (r Runtime) execute(ctx context.Context, agent, session string, req Request
 		out.Error = "执行已取消：" + ctx.Err().Error()
 	} else if out.TimedOut {
 		out.Error = "执行超时；请核查目标资源，审批不会自动重试"
+	} else if out.ExitCode == 127 {
+		// sh, bash and docker all report "command not found" as 127.
+		out.Error = "命令退出码为 127，执行环境中很可能没有该命令。不要再用 find、ls、which、python 等命令探测文件系统，直接向用户说明缺少该 CLI，需要管理员在执行环境中安装。"
 	} else if out.ExitCode != 0 {
 		out.Error = fmt.Sprintf("命令退出码为 %d；请根据输出核查执行结果", out.ExitCode)
 	}
@@ -491,7 +571,7 @@ func (c Config) Instruction(agent string) string {
 		return ""
 	}
 	var b strings.Builder
-	b.WriteString("通用执行器：用户要求查询或排查时，要实际调用工具完成任务。优先使用已有结构化工具；缺少专用工具时，用 shell_exec 调用官方 CLI 或经显式规则授权的 SDK。参数不确定先调用 help，拿到帮助后立即继续只读查询；根据真实 stderr 修正参数并重试合法的只读查询，必要时分页直至结果完整。不能仅返回脚本让用户自己运行，也不能在未尝试已分配工具时声称没有执行能力。缺凭据、权限不足或 CLI 不可用时，引用实际失败证据说明阻塞，不虚构资源或绕过限制。不读取/打印凭据，不安装软件，不用额外权限绕过失败。prompt 命令只有启用了写操作审批或无沙箱审批执行的配置才能发起审批，系统等待用户在控制台确认原始命令后执行一次；自然语言同意不代表获批，不得改写命令或重复调用规避审批。forbidden 无法审批。每个审批十分钟失效，命令或配置改变必须重新申请。结果包含 exit_code、stdout/stderr 与 executed，executed=false 不是查询结果。结论引用网关返回的 evidence_id；已截断的输出不代表完整数据。凭据由系统注入，不向用户索要。\n")
+	b.WriteString("通用执行器：用户要求查询或排查时，要实际调用工具完成任务。优先使用已有结构化工具；缺少专用工具时，用 shell_exec 调用官方 CLI 或经显式规则授权的 SDK。参数不确定先调用 help，拿到帮助后立即继续只读查询；根据真实 stderr 修正参数并重试合法的只读查询，必要时分页直至结果完整。不能仅返回脚本让用户自己运行，也不能在未尝试已分配工具时声称没有执行能力。缺凭据、权限不足或 CLI 不可用时，引用实际失败证据说明阻塞，不虚构资源或绕过限制；结果含 missing_command 或退出码 127 表示 CLI 未安装，立即停止并告知用户，不要用 find/ls/which/python 探测文件系统或换路径调用。不读取/打印凭据，不安装软件，不用额外权限绕过失败。prompt 命令只有启用了写操作审批或无沙箱审批执行的配置才能发起审批，系统等待用户在控制台确认原始命令后执行一次；自然语言同意不代表获批，不得改写命令或重复调用规避审批。forbidden 无法审批。每个审批十分钟失效，命令或配置改变必须重新申请。结果包含 exit_code、stdout/stderr 与 executed，executed=false 不是查询结果。结论引用网关返回的 evidence_id；已截断的输出不代表完整数据。凭据由系统注入，不向用户索要。\n")
 	b.WriteString("输出被截断时，先查 CLI 顶层帮助寻找原生字段过滤与分页能力，以所需字段和总数精简输出。tccli 支持 --filter（JMESPath，本地过滤返回值），可保留 TotalCount、RequestId 和所需资源字段；避免依赖未获授权的本地脚本或处理器。遇到权限拒绝时，不尝试改变身份或扩大资源范围。\n可用执行配置：\n")
 	for _, p := range profiles {
 		fmt.Fprintf(&b, "- %s（联网：%t；可申请写审批：%t；无沙箱时可申请审批执行：%t；变量名称：", p.Name, p.Network, p.WriteApproval, p.AllowUnconfinedWithApproval)
