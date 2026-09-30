@@ -1,6 +1,7 @@
 <script setup>
 import { onMounted, reactive, ref } from 'vue'
 import Icon from '../components/Icon.vue'
+import ContextCompaction from '../components/ContextCompaction.vue'
 import { api } from '../api'
 
 const providers = ref([])
@@ -168,6 +169,9 @@ async function remove(p) {
     <div class="body">
       <div v-if="notice" class="notice-bar"><Icon name="check" :size="16" /> {{ notice }}</div>
       <div v-if="error" class="error-bar"><Icon name="alert" :size="16" /> {{ error }}</div>
+
+      <!-- Context budget sits with the models: it is what fits their window. -->
+      <ContextCompaction />
 
       <!-- create / edit form -->
       <div v-if="editing" class="card form">

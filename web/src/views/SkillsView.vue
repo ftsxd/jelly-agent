@@ -209,6 +209,9 @@ async function submit() {
       enabled: form.enabled,
       sandbox: form.sandbox,
     })
+    // A new skill's variables go in with it, instead of save-then-reopen.
+    const vars = editing.value === 'new' ? Object.fromEntries(Object.entries(parseVars(form.varsText)).filter(([, v]) => v)) : {}
+    if (Object.keys(vars).length) await api.setSkillVars(form.name.trim(), vars)
     notice.value = `已保存到 ${res.saved_to}`
     editing.value = false
     await load()
@@ -298,8 +301,8 @@ async function onZipPicked(e) {
         </button>
       </div>
 
-      <!-- sandbox: execution envelope for run_script -->
-      <div class="card sandbox-card">
+      <!-- sandbox: execution envelope for run_script — irrelevant while scripts are off -->
+      <div v-if="allowScripts" class="card sandbox-card">
         <button class="sandbox-head" @click="sandboxOpen = !sandboxOpen">
           <span class="caret" :class="{ open: sandboxOpen }">▸</span>
           <Icon name="settings" :size="16" />
@@ -361,16 +364,16 @@ async function onZipPicked(e) {
               <span class="label">输出上限（KB）</span>
               <input v-model.number="sandbox.max_output_kb" type="number" min="0" class="input" :placeholder="String(sandboxMeta.defaults.max_output_kb || '')" />
             </label>
-            <label class="field">
-              <span class="label">CPU 时长（秒，native）</span>
+            <label class="field" v-if="sandbox.backend !== 'docker'">
+              <span class="label">CPU 时长（秒）</span>
               <input v-model.number="sandbox.cpu_seconds" type="number" min="0" class="input" :placeholder="String(sandboxMeta.defaults.cpu_seconds || '')" />
             </label>
-            <label class="field">
-              <span class="label">进程数上限（docker）</span>
+            <label class="field" v-if="sandbox.backend === 'docker' || (sandbox.backend === '' && sandbox.allow_docker)">
+              <span class="label">进程数上限</span>
               <input v-model.number="sandbox.max_procs" type="number" min="0" class="input" :placeholder="String(sandboxMeta.defaults.max_procs || '')" />
             </label>
-            <label class="field">
-              <span class="label">内存上限（MB，docker）</span>
+            <label class="field" v-if="sandbox.backend === 'docker' || (sandbox.backend === '' && sandbox.allow_docker)">
+              <span class="label">内存上限（MB）</span>
               <input v-model.number="sandbox.memory_mb" type="number" min="0" class="input" :placeholder="String(sandboxMeta.defaults.memory_mb || '')" />
             </label>
           </div>
@@ -411,8 +414,8 @@ async function onZipPicked(e) {
           </label>
         </div>
 
-        <!-- variables + scripts (existing skills only) -->
-        <div v-if="editing !== 'new'" class="vars-box">
+        <!-- variables + scripts; a new skill saves its variables with it -->
+        <div class="vars-box">
           <div class="vars-head">变量（密钥脱敏，作为脚本环境变量；值不显示、不进对话）</div>
           <div class="vars-note">脚本输出里出现的值会被替换成 <code>${变量名}</code> 再返回，所以脚本打印了也不会进对话；4 个字符以内的值不做替换（太短，会误伤正常输出）。</div>
           <div v-if="form.varKeys.length" class="var-chips">
@@ -424,9 +427,10 @@ async function onZipPicked(e) {
           <div class="vars-actions">
             <span v-if="form.scripts.length" class="muted scripts-list mono">脚本：{{ form.scripts.join('、') }}</span>
             <span v-else class="muted scripts-list">（无脚本；ZIP 导入的技能可附带脚本）</span>
-            <button class="btn btn-mini" @click="saveVars" :disabled="form.savingVars">
+            <button v-if="editing !== 'new'" class="btn btn-mini" @click="saveVars" :disabled="form.savingVars">
               <span v-if="form.savingVars" class="spinner" /> 保存变量
             </button>
+            <span v-else class="muted scripts-list">随技能一起保存</span>
           </div>
         </div>
 

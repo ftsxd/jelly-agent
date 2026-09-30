@@ -5,6 +5,8 @@ import { api } from '../api'
 import { declPatch, draftOf, inheritedOf, parseLines } from '../toolmeta'
 
 const servers = ref([])
+const agentsList = ref([])
+const mountedBy = (name) => agentsList.value.filter((a) => (a.mcp || []).includes(name)).map((a) => a.name)
 const loading = ref(true)
 const error = ref('')
 const notice = ref('')
@@ -23,6 +25,9 @@ async function load() {
   error.value = ''
   try {
     servers.value = (await api.mcp()).servers
+    // Which agents mount each server: the choice is made on the Agent page,
+    // so show its result here instead of leaving the server looking unused.
+    api.agents().then((r) => { agentsList.value = r.agents || [] }).catch(() => {})
   } catch (e) {
     error.value = e.message
   } finally {
@@ -415,6 +420,9 @@ async function testForm() {
                 <span class="srv-name">{{ s.name }}</span>
                 <span class="badge">{{ s.transport }}</span>
                 <span class="badge" :class="s.enabled ? 'badge-accent' : ''">{{ s.enabled ? '已启用' : '已停用' }}</span>
+                <RouterLink to="/agents" class="badge" :title="mountedBy(s.name).length ? '在 Agent 页勾选或取消' : '还没有 Agent 挂载它；在 Agent 页勾选'">
+                  {{ mountedBy(s.name).length ? `挂载：${mountedBy(s.name).join('、')}` : '未被 Agent 挂载' }}
+                </RouterLink>
                 <!-- Liveness, so a degraded turn is visible here rather than
                      only in the process log. "未探测" is its own state and not
                      a synonym for healthy: a server nothing has consulted yet
@@ -459,6 +467,8 @@ async function testForm() {
               <!-- 工具用途：MCP 只报名字和描述，不报"这个工具产出什么"。
                    而选择器按它打分、网关按它定上限、任务中心按它归并步骤——
                    不声明就只能显示"执行工具"。这里声明，写进元数据目录。 -->
+              <details class="decls-fold">
+                <summary class="muted tiny">高级：工具声明（产出 / 副作用 / 描述，用于工具选择与结果归并）</summary>
               <table class="decls">
                 <thead>
                   <tr><th>工具</th><th>产出</th><th>副作用</th><th>元数据</th></tr>
@@ -543,6 +553,7 @@ async function testForm() {
                   </template>
                 </tbody>
               </table>
+              </details>
               <div v-if="declError" class="error-bar"><Icon name="alert" :size="14" /> {{ declError }}</div>
               <div v-else-if="declStore" class="muted tiny">
                 保存在数据库的 {{ declStore }} 表，每次改动都记在 tool_decl_log 里；
@@ -771,6 +782,10 @@ async function testForm() {
 }
 .srv-main {
   min-width: 0;
+}
+.decls-fold summary {
+  cursor: pointer;
+  margin-top: var(--sp-2);
 }
 .srv-head {
   display: flex;

@@ -95,6 +95,12 @@ function statusOf(path) {
 
     <div class="body">
       <CodeProjects />
+      <!-- Shared roots are the broader grant — every agent and every skill
+           script can read them — so their existence is not left inside a fold. -->
+      <p v-if="state.roots.length" class="shared-roots-note">
+        <Icon name="alert" :size="14" />
+        {{ state.roots.length }} 个全局共享代码目录对所有 Agent 和技能脚本可读（见下方「高级」）；按 Agent 授权请使用上面的代码项目。
+      </p>
       <details class="legacy-roots">
         <summary>高级：全局共享代码目录（所有 Agent 可读）</summary>
       <div v-if="notice" class="notice-bar"><Icon name="check" :size="16" /> {{ notice }}</div>
@@ -191,6 +197,14 @@ function statusOf(path) {
 </template>
 
 <style scoped>
+.shared-roots-note {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  margin: 0;
+  font-size: 12px;
+  color: var(--warning);
+}
 .view { display: flex; flex-direction: column; height: 100%; min-width: 0; }
 .topbar { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-3); padding: var(--sp-4) var(--sp-5); border-bottom: 1px solid var(--border); }
 .topbar-l { display: flex; align-items: baseline; flex-wrap: wrap; gap: var(--sp-3); }

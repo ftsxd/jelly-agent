@@ -37,41 +37,10 @@ async function load() {
 const agentView = ref(null)
 async function pickAgent(name) {
   agentView.value = name
-  editingInstruction.value = false
   try {
     prompt.value = await api.prompt('', name)
   } catch (e) {
     error.value = e.message
-  }
-}
-
-// Editing the base instruction. Only the base — an agent's own belongs to that
-// agent and is edited on the Agent page, which is what the template says when
-// the shown text is one.
-const editingInstruction = ref(false)
-const instructionDraft = ref('')
-const savingInstruction = ref(false)
-const instructionError = ref('')
-
-function startEditInstruction(text) {
-  instructionDraft.value = text || ''
-  instructionError.value = ''
-  editingInstruction.value = true
-  openPart.value = '指令'
-}
-
-async function saveInstruction() {
-  if (savingInstruction.value) return
-  savingInstruction.value = true
-  instructionError.value = ''
-  try {
-    await api.saveInstruction(instructionDraft.value)
-    editingInstruction.value = false
-    prompt.value = await api.prompt('', agentView.value ?? '')
-  } catch (e) {
-    instructionError.value = e.message
-  } finally {
-    savingInstruction.value = false
   }
 }
 
@@ -350,26 +319,11 @@ function errKinds(t) {
               <div v-for="p in promptParts" :key="p.name" class="pm-part">
                 <button class="pm-head" @click="openPart = openPart === p.name ? '' : p.name">
                   <span class="pm-name">{{ p.name }}</span>
-                  <!-- 只有基础指令能在这页改。某个 agent 自己的指令属于那个
-                       agent，在 Agent 页面改；在这里改会让人以为改的是眼前
-                       这段，其实动的是别的地方。 -->
-                  <button v-if="p.name === '指令' && !prompt.own" class="btn btn-mini"
-                          @click.stop="startEditInstruction(p.text)">编辑</button>
-                  <span v-else-if="p.name === '指令'" class="muted tiny">在 Agent 页面改</span>
                   <span class="mono dim">{{ fmt(p.tokens) }} tok</span>
                 </button>
-                <template v-if="p.name === '指令' && editingInstruction">
-                  <textarea v-model="instructionDraft" class="textarea mono pm-edit" rows="8"
-                            placeholder="留空恢复内置默认" />
-                  <div class="pm-actions">
-                    <button class="btn btn-mini" @click="editingInstruction = false" :disabled="savingInstruction">取消</button>
-                    <button class="btn btn-mini btn-primary" @click="saveInstruction" :disabled="savingInstruction">
-                      <span v-if="savingInstruction" class="spinner" /> 保存
-                    </button>
-                  </div>
-                  <div v-if="instructionError" class="error-bar">{{ instructionError }}</div>
-                </template>
-                <pre v-else-if="openPart === p.name" class="mono pm-text">{{ p.text }}</pre>
+                <!-- 指令在 Agent 页改：基础指令在页面顶部，某个 agent 自己的在它的编辑表单里。 -->
+                <RouterLink v-if="p.name === '指令' && openPart === p.name" to="/agents" class="muted tiny pm-link">在 Agent 页修改指令</RouterLink>
+                <pre v-if="openPart === p.name" class="mono pm-text">{{ p.text }}</pre>
               </div>
               <div v-if="assembled" class="pm-part">
                 <button class="pm-head" @click="openPart = openPart === '__all' ? '' : '__all'">
@@ -404,6 +358,10 @@ function errKinds(t) {
 </template>
 
 <style scoped>
+.pm-link {
+  display: inline-block;
+  margin: var(--sp-1) 0;
+}
 .view {
   display: flex;
   flex-direction: column;

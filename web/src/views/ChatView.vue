@@ -2,7 +2,7 @@
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import Icon from '../components/Icon.vue'
-import SessionPicker from '../components/SessionPicker.vue'
+import SessionList from '../components/SessionList.vue'
 import ChatTranscript from '../components/ChatTranscript.vue'
 import ExecutionApprovals from '../components/ExecutionApprovals.vue'
 import { api, streamChat } from '../api'
@@ -22,6 +22,30 @@ const POLL_MS = 3000 // how often an open session is re-read while it runs
 
 const providers = ref([])
 const historySessions = ref([])
+// The session list beside the conversation. Open state is a per-browser
+// convenience; ?sessions=1 (where /sessions now lands) opens it regardless.
+const SESSIONS_OPEN_KEY = 'jelly.chat.sessionsOpen'
+function readSessionsOpen() {
+  try { return localStorage.getItem(SESSIONS_OPEN_KEY) === '1' } catch { return false }
+}
+const showSessions = ref(readSessionsOpen())  // ?sessions=1 applied once the route exists, below
+const listVersion = ref(0)
+function toggleSessions() {
+  showSessions.value = !showSessions.value
+  try { localStorage.setItem(SESSIONS_OPEN_KEY, showSessions.value ? '1' : '0') } catch { /* storage is optional */ }
+}
+const narrow = () => typeof window !== 'undefined' && window.matchMedia?.('(max-width: 760px)').matches
+// Picking goes through the route, which the session watcher already follows —
+// one way to open a session, whether from the list, a link or a task.
+function pickSession(id) {
+  if (busy.value || id === sessionId.value) return
+  router.push({ query: { session: id } })
+  if (narrow()) showSessions.value = false
+}
+function sessionsDeleted(ids) {
+  if (ids.includes(sessionId.value)) newChat()
+  loadHistorySessions()
+}
 const provider = ref('')
 const agents = ref([]) // enabled named agents (multi-agent); empty = single-agent mode
 const agentName = ref('') // '' = single agent on the chosen provider
@@ -39,6 +63,7 @@ const scroller = ref(null)
 let abort = null
 const route = useRoute()
 const router = useRouter()
+if (route.query.sessions === '1') showSessions.value = true
 
 // Tag agent messages with the model that produced them only when there's a
 // choice to make — a single-provider setup needs no per-message label.
@@ -157,6 +182,7 @@ watch(() => route.query.session, async (id) => {
 
 async function loadHistorySessions() {
   try { historySessions.value = (await api.sessions(100, 0)).sessions || [] } catch { /* history is optional */ }
+  listVersion.value++
 }
 
 // Replay runs through the same reducer as the live stream.
@@ -400,12 +426,9 @@ function handleFrame(live, ev) {
         </span>
       </div>
       <div class="topbar-r">
-        <SessionPicker
-          v-model="sessionId"
-          :sessions="historySessions"
-          :disabled="busy"
-          @pick="openHistorySession"
-        />
+        <button class="btn" :class="{ 'btn-on': showSessions }" :aria-pressed="showSessions" @click="toggleSessions">
+          <Icon name="sessions" :size="16" /> 会话
+        </button>
         <select v-if="agents.length" v-model="agentName" class="input select" :disabled="busy" aria-label="选择 Agent">
           <option value="">单 Agent（默认）</option>
           <option v-for="a in agents" :key="a.name" :value="a.name">
@@ -424,6 +447,10 @@ function handleFrame(live, ev) {
       </div>
     </header>
 
+    <div class="split" :class="{ 'with-side': showSessions }">
+    <SessionList v-if="showSessions" class="side" :selected="sessionId" :disabled="busy" :refresh-key="listVersion"
+      @open="pickSession" @deleted="sessionsDeleted" />
+    <div class="main">
     <div ref="scroller" class="stream">
       <div v-if="!messages.length" class="empty">
         <Icon name="chat" :size="32" />
@@ -488,6 +515,8 @@ function handleFrame(live, ev) {
         <Icon name="send" :size="16" />
       </button>
     </footer>
+    </div>
+    </div>
   </div>
 </template>
 
@@ -522,6 +551,34 @@ function handleFrame(live, ev) {
   height: 36px;
 }
 
+.split {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+.side {
+  width: 300px;
+  flex-shrink: 0;
+}
+.main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+.btn-on {
+  background: var(--primary-tint);
+  color: var(--primary);
+}
+@media (max-width: 760px) {
+  .side {
+    width: 100%;
+    border-right: 0;
+  }
+  .split.with-side .main {
+    display: none;
+  }
+}
 .stream {
   flex: 1;
   overflow-y: auto;

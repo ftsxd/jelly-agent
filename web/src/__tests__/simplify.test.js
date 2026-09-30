@@ -39,7 +39,8 @@ describe('sidebar groups', () => {
     const { navGroups, navItems } = await import('../router')
     expect(navGroups.map(g => g.title)).toEqual(['使用', '能力', '接入', '系统'])
     expect(navGroups.flatMap(g => g.items)).toEqual(navItems)
-    expect(navGroups[0].items.map(i => i.meta.title)).toEqual(['对话', '任务', '会话', '周期任务'])
+    expect(navGroups[0].items.map(i => i.meta.title)).toEqual(['对话', '执行记录', '周期任务'])
+    expect(navItems.some(i => i.path === '/sessions')).toBe(false)
   })
 })
 

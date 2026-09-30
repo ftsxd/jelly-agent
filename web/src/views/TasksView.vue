@@ -18,7 +18,7 @@
 <script setup>
 import ExecutionApprovals from '../components/ExecutionApprovals.vue'
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import Icon from '../components/Icon.vue'
 import { api } from '../api'
 import { sendOnEnter } from '../ime'
@@ -33,6 +33,7 @@ import {
 } from '../tasks'
 
 const router = useRouter()
+const route = useRoute()
 
 const tasks = ref([])
 const total = ref(0)
@@ -275,7 +276,11 @@ function retime() {
   }, 3000)
 }
 watch([tasks, detail], retime, { deep: false })
-onMounted(async () => { await load(); retime() })
+// ?id=<session>/<round> opens one record directly — the schedule history links here.
+onMounted(async () => {
+  await load(); retime()
+  if (typeof route.query.id === 'string' && route.query.id) open(route.query.id)
+})
 onUnmounted(() => timer && clearInterval(timer))
 
 // Continuing a task carries its id, so the follow-up joins this task instead
@@ -289,9 +294,9 @@ function continueChat(id) {
   <div class="view">
     <header class="topbar">
       <div class="topbar-l">
-        <h1>任务</h1>
+        <h1>执行记录</h1>
         <span class="sub muted">
-          {{ totalExact ? '' : '至少 ' }}{{ total }} 个任务 · 查询监控 / 日志分析 / 日常巡检
+          {{ totalExact ? '' : '至少 ' }}{{ total }} 条 · 对话和周期任务里执行过操作的每一轮
           <template v-if="!totalExact">
             · 已回溯 {{ scanned }}/{{ sessionsTotal }} 个会话，更早的请缩小筛选范围
           </template>
@@ -317,16 +322,16 @@ function continueChat(id) {
     </header>
 
     <div class="body" :class="{ picked: !!selectedID }">
-      <aside class="list" aria-label="任务列表">
+      <aside class="list" aria-label="执行记录列表">
         <div v-if="loading" class="empty"><span class="spinner" /></div>
         <div v-else-if="error && !tasks.length" class="error-bar">
           <Icon name="alert" :size="14" /> {{ error }}
         </div>
         <div v-else-if="!tasks.length" class="empty">
           <Icon name="spark" :size="28" />
-          <span class="muted">还没有任务。到「对话」问一句，或让周期任务跑一次。</span>
+          <span class="muted">还没有执行记录。到「对话」问一句，或让周期任务跑一次。</span>
           <span v-if="skippedChat" class="muted tiny">
-            另有 {{ skippedChat }} 次普通对话没有列入——它们没有执行任何操作，在「会话」页查看
+            另有 {{ skippedChat }} 次普通对话没有列入——它们没有执行任何操作，在「对话」页的会话列表里查看
           </span>
         </div>
         <div v-else-if="skippedChat" class="hint-bar muted tiny">

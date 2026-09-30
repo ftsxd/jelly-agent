@@ -1,13 +1,14 @@
 <script setup>
-import { computed, onMounted, ref } from 'vue'
-import { useRouter } from 'vue-router'
-import Icon from '../components/Icon.vue'
+import { computed, onMounted, ref, watch } from 'vue'
+import Icon from './Icon.vue'
 import { api } from '../api'
 import { absTime, relTime } from '../time'
-import ChatTranscript from '../components/ChatTranscript.vue'
-import ExecutionApprovals from '../components/ExecutionApprovals.vue'
-import { replayMessages } from '../replay'
-import { latestOnly } from '../latest'
+
+// The conversation list for the chat page: paging, a filter over what is
+// loaded, and single/batch delete. It only reports picks and deletions — the
+// chat page owns opening a session, so there is one way a session gets shown.
+const props = defineProps({ selected: { type: String, default: '' }, disabled: Boolean, refreshKey: { type: Number, default: 0 } })
+const emit = defineEmits(['open', 'deleted'])
 
 const PAGE = 50 // sessions per page
 
@@ -18,14 +19,9 @@ const loading = ref(true)
 const loadingMore = ref(false)
 const error = ref('')
 
-const selected = ref(null) // session id of the open detail
-const detail = ref(null) // {id, usage, messages} — see open()
-const detailLoading = ref(false)
-
 const q = ref('') // filter over the loaded rows
 const checked = ref([]) // session ids ticked for batch delete
 const deleting = ref(false)
-const router = useRouter()
 
 const filtering = computed(() => q.value.trim() !== '')
 
@@ -49,9 +45,10 @@ const someChecked = computed(() => checked.value.length > 0 && !allLoadedChecked
 const canSelectAll = computed(() => !filtering.value && allLoadedChecked.value && checked.value.length < total.value)
 
 onMounted(load)
+watch(() => props.refreshKey, load)
 
 async function load() {
-  loading.value = true
+  loading.value = !sessions.value.length
   error.value = ''
   try {
     const res = await api.sessions(PAGE, 0)
@@ -61,7 +58,6 @@ async function load() {
     // Drop ticks for sessions that no longer exist after a reload.
     const ids = new Set(sessions.value.map((s) => s.id))
     checked.value = checked.value.filter((id) => ids.has(id))
-    if (sessions.value.length && !selected.value) open(sessions.value[0].id)
   } catch (e) {
     error.value = e.message
   } finally {
@@ -99,6 +95,10 @@ async function selectAllMatching() {
   }
 }
 
+function pick(id) {
+  if (!props.disabled) emit('open', id)
+}
+
 async function removeChecked() {
   if (!checked.value.length || deleting.value) return
   if (!confirm(`确认删除选中的 ${checked.value.length} 个会话？此操作不可恢复。`)) return
@@ -115,54 +115,19 @@ async function removeChecked() {
     // about what could not be cleaned up afterwards — the sessions themselves
     // are already gone — and leaving the list showing them means the error
     // banner sits above rows that 404 when clicked.
-    if (selected.value && ids.includes(selected.value)) {
-      selected.value = null
-      detail.value = null
-    }
+    emit('deleted', ids)
     checked.value = []
     await load()
     // Restored after the refresh, not before it: load() clears the banner on
-    // its way in, so setting it in the catch published the failure and then
-    // wiped it a moment later. The rows going away would have been the only
-    // thing left on screen — which reads as a clean delete, and the whole
-    // point of this message is that it was not one.
+    // its way in, so setting it in the catch would publish the failure and
+    // wipe it a moment later — which reads as a clean delete.
     if (failure) error.value = failure
     deleting.value = false
   }
 }
 
-// The stored run, folded by the same reducer the live stream uses.
-//
-// One endpoint and one projection, shared with the chat view: frames are
-// projected server-side by the function the live path calls, and folded
-// client-side by the function the live path calls.
-//
-// This page used to render the transcript DTO underneath as well — a turn's
-// calls in one block and their results in the next, because that DTO carries
-// them as two arrays and the pairing is gone before it arrives. So the same
-// session was shown twice, once folded and once not, and the unfolded copy was
-// the longer one and the one people scrolled into.
-const openGate = latestOnly()
-
-async function open(id) {
-  selected.value = id
-  detailLoading.value = true
-  detail.value = null
-
-  const r = await openGate.run(async (signal) => {
-    const mine = openGate.current()
-    const d = await api.sessionTimeline(id, signal)
-    if (!openGate.owns(mine)) return null
-    detail.value = { id: d.id, usage: d.usage || {}, messages: replayMessages(d.frames) }
-    return d
-  })
-  if (!r.owned) return
-  if (r.error) error.value = r.error.message
-  detailLoading.value = false
-}
-
 async function remove(s) {
-  if (!confirm(`确认删除会话「${s.id}」？此操作不可恢复。`)) return
+  if (!confirm(`确认删除会话「${s.preview || s.id}」？此操作不可恢复。`)) return
   let failure = ''
   try {
     await api.deleteSession(s.id)
@@ -171,150 +136,78 @@ async function remove(s) {
   } finally {
     // See removeChecked: the session is gone even when the response is not
     // ok, and the refresh that proves it must not take the message with it.
-    if (selected.value === s.id) {
-      selected.value = null
-      detail.value = null
-    }
+    emit('deleted', [s.id])
     checked.value = checked.value.filter((id) => id !== s.id)
     await load()
     if (failure) error.value = failure
   }
 }
-
-function continueChat(id) { router.push({ path: '/chat', query: { session: id } }) }
 </script>
 
 <template>
-  <div class="view">
-    <header class="topbar">
-      <h1>会话</h1>
-      <button class="btn" @click="load" :disabled="loading">
-        <Icon name="refresh" :size="16" /> 刷新
-      </button>
-    </header>
-
-    <div class="body">
-      <aside class="list">
-        <div v-if="sessions.length" class="list-search">
-          <Icon name="search" :size="14" />
-          <input v-model="q" placeholder="搜索标题或会话 ID" @keydown.esc="q = ''" />
-          <button v-if="filtering" class="clear" title="清除" @click="q = ''">×</button>
-        </div>
-        <div v-if="filtering && hasMore" class="hint-bar">
-          仅在已加载的 {{ sessions.length }} 个会话中搜索，共 {{ total }} 个。
-          <button class="link" :disabled="loadingMore" @click="loadMore">加载更多</button>
-        </div>
-        <div v-if="sessions.length" class="list-bar">
-          <label class="selall" title="全选本页 / 取消">
-            <input
-              type="checkbox"
-              :checked="allLoadedChecked"
-              :indeterminate.prop="someChecked"
-              @change="toggleAll"
-            />
-            <span>{{ checked.length ? `已选 ${checked.length}` : '全选' }} / {{ total }}</span>
-          </label>
-          <button
-            v-if="checked.length"
-            class="btn btn-danger btn-sm"
-            :disabled="deleting"
-            @click="removeChecked"
-          >
-            <span v-if="deleting" class="spinner" /><Icon v-else name="trash" :size="14" /> 删除选中
-          </button>
-        </div>
-        <div v-if="canSelectAll" class="selectall-bar">
-          已选本页 {{ checked.length }} 个，
-          <button class="link" @click="selectAllMatching">选择全部 {{ total }} 个会话</button>
-        </div>
-        <div v-if="loading" class="empty"><span class="spinner" /></div>
-        <div v-else-if="error && !sessions.length" class="error-bar"><Icon name="alert" :size="16" /> {{ error }}</div>
-        <div v-else-if="!sessions.length" class="empty">
-          <Icon name="sessions" :size="28" />
-          <span class="muted">暂无持久化会话</span>
-        </div>
-        <div v-if="filtering && !visible.length" class="empty">
-          <Icon name="search" :size="28" />
-          <span class="muted">没有匹配的会话</span>
-        </div>
-        <div
-          v-for="s in visible"
-          :key="s.id"
-          class="sess"
-          :class="{ active: s.id === selected, picked: checked.includes(s.id) }"
-          role="button"
-          tabindex="0"
-          @click="open(s.id)"
-          @keydown.enter="open(s.id)"
-        >
-          <div class="sess-top">
-            <input
-              class="pick"
-              type="checkbox"
-              :value="s.id"
-              v-model="checked"
-              title="选择以批量删除"
-              @click.stop
-            />
-            <span class="sess-title">{{ s.preview || '（空会话）' }}</span>
-            <button class="del" title="删除会话" @click.stop="remove(s)"><Icon name="trash" :size="14" /></button>
-          </div>
-          <span class="mono sess-id">{{ s.id }}</span>
-          <span class="sess-meta">
-            <span class="badge">{{ s.events }} 事件</span>
-            <span class="muted time" :title="absTime(s.last_update)">{{ relTime(s.last_update) }}</span>
-          </span>
-        </div>
-        <button v-if="hasMore" class="loadmore" :disabled="loadingMore" @click="loadMore">
-          <span v-if="loadingMore" class="spinner" /> 加载更多（还有 {{ total - sessions.length }} 个）
-        </button>
-      </aside>
-
-      <section class="detail">
-        <div v-if="detailLoading" class="empty"><span class="spinner" /> 加载会话…</div>
-        <div v-else-if="!detail" class="empty">
-          <Icon name="doc" :size="28" />
-          <span class="muted">选择左侧会话查看记录</span>
-        </div>
-        <template v-else>
-          <div class="detail-head">
-            <span class="mono dim">{{ detail.id }}</span>
-            <div class="detail-actions"><span class="badge mono">total {{ detail.usage.total }} tok</span><button class="btn btn-sm" @click="continueChat(detail.id)">继续对话</button></div>
-          </div>
-          <div v-if="!detail.messages.length" class="empty"><span class="muted">（空会话）</span></div>
-          <div v-else class="transcript">
-            <ChatTranscript :messages="detail.messages" />
-            <ExecutionApprovals :session="detail.id" />
-          </div>
-        </template>
-      </section>
+  <aside class="session-list" aria-label="会话列表">
+    <div v-if="sessions.length" class="list-search">
+      <Icon name="search" :size="14" />
+      <input v-model="q" placeholder="搜索标题或会话 ID" @keydown.esc="q = ''" />
+      <button v-if="filtering" class="clear" title="清除" @click="q = ''">×</button>
     </div>
-  </div>
+    <div v-if="filtering && hasMore" class="hint-bar">
+      仅在已加载的 {{ sessions.length }} 个会话中搜索，共 {{ total }} 个。
+      <button class="link" :disabled="loadingMore" @click="loadMore">加载更多</button>
+    </div>
+    <div v-if="sessions.length" class="list-bar">
+      <label class="selall" title="全选本页 / 取消">
+        <input type="checkbox" :checked="allLoadedChecked" :indeterminate.prop="someChecked" @change="toggleAll" />
+        <span>{{ checked.length ? `已选 ${checked.length}` : '全选' }} / {{ total }}</span>
+      </label>
+      <button v-if="checked.length" class="btn btn-danger btn-sm" :disabled="deleting" @click="removeChecked">
+        <span v-if="deleting" class="spinner" /><Icon v-else name="trash" :size="14" /> 删除选中
+      </button>
+    </div>
+    <div v-if="canSelectAll" class="selectall-bar">
+      已选本页 {{ checked.length }} 个，
+      <button class="link" @click="selectAllMatching">选择全部 {{ total }} 个会话</button>
+    </div>
+    <div v-if="loading" class="empty"><span class="spinner" /></div>
+    <div v-else-if="error && !sessions.length" class="error-bar"><Icon name="alert" :size="16" /> {{ error }}</div>
+    <div v-else-if="!sessions.length" class="empty">
+      <Icon name="sessions" :size="28" />
+      <span class="muted">还没有会话</span>
+    </div>
+    <div v-if="error && sessions.length" class="error-bar"><Icon name="alert" :size="16" /> {{ error }}</div>
+    <div v-if="filtering && !visible.length" class="empty">
+      <Icon name="search" :size="28" />
+      <span class="muted">没有匹配的会话</span>
+    </div>
+    <div
+      v-for="s in visible"
+      :key="s.id"
+      class="sess"
+      :class="{ active: s.id === selected, picked: checked.includes(s.id) }"
+      role="button"
+      tabindex="0"
+      @click="pick(s.id)"
+      @keydown.enter="pick(s.id)"
+    >
+      <div class="sess-top">
+        <input class="pick" type="checkbox" :value="s.id" v-model="checked" title="选择以批量删除" @click.stop />
+        <span class="sess-title">{{ s.preview || '（空会话）' }}</span>
+        <button class="del" title="删除会话" @click.stop="remove(s)"><Icon name="trash" :size="14" /></button>
+      </div>
+      <span class="mono sess-id">{{ s.id }}</span>
+      <span class="sess-meta">
+        <span class="badge">{{ s.events }} 事件</span>
+        <span class="muted time" :title="absTime(s.last_update)">{{ relTime(s.last_update) }}</span>
+      </span>
+    </div>
+    <button v-if="hasMore" class="loadmore" :disabled="loadingMore" @click="loadMore">
+      <span v-if="loadingMore" class="spinner" /> 加载更多（还有 {{ total - sessions.length }} 个）
+    </button>
+  </aside>
 </template>
 
 <style scoped>
-.view {
-  display: flex;
-  flex-direction: column;
-  height: 100%;
-}
-.topbar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: var(--sp-4) var(--sp-5);
-  border-bottom: 1px solid var(--border);
-}
-.topbar h1 {
-  font-size: 18px;
-}
-.body {
-  flex: 1;
-  display: grid;
-  grid-template-columns: 320px 1fr;
-  overflow: hidden;
-}
-.list {
+.session-list {
   border-right: 1px solid var(--border);
   overflow-y: auto;
   padding: var(--sp-3);
@@ -536,24 +429,6 @@ function continueChat(id) { router.push({ path: '/chat', query: { session: id } 
   font-size: 11px;
 }
 
-.detail {
-  overflow-y: auto;
-  padding: var(--sp-5);
-}
-.detail-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding-bottom: var(--sp-3);
-  margin-bottom: var(--sp-4);
-  border-bottom: 1px solid var(--border);
-}
-/* The bubbles bring their own layout; this only spaces the turns apart. */
-.transcript {
-  display: flex;
-  flex-direction: column;
-  gap: var(--sp-5);
-}
 .error-bar {
   display: flex;
   align-items: center;
@@ -563,13 +438,5 @@ function continueChat(id) { router.push({ path: '/chat', query: { session: id } 
   color: var(--danger);
   border-radius: var(--radius-sm);
   font-size: 13px;
-}
-@media (max-width: 820px) {
-  .body {
-    grid-template-columns: 1fr;
-  }
-  .list {
-    display: none;
-  }
 }
 </style>

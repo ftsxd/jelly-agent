@@ -6,8 +6,9 @@ const routes = [
   { path: '/', redirect: '/chat' },
   // group orders the sidebar: what you use daily first, setup after.
   { path: '/chat', name: 'chat', component: () => import('./views/ChatView.vue'), meta: { title: '对话', icon: 'chat', group: '使用' } },
-  { path: '/tasks', name: 'tasks', component: () => import('./views/TasksView.vue'), meta: { title: '任务', icon: 'spark', group: '使用' } },
-  { path: '/sessions', name: 'sessions', component: () => import('./views/SessionsView.vue'), meta: { title: '会话', icon: 'sessions', group: '使用' } },
+  { path: '/tasks', name: 'tasks', component: () => import('./views/TasksView.vue'), meta: { title: '执行记录', icon: 'spark', group: '使用' } },
+  // Sessions are listed beside the conversation now; old links still land there.
+  { path: '/sessions', redirect: { path: '/chat', query: { sessions: '1' } } },
   { path: '/schedules', name: 'schedules', component: () => import('./views/SchedulesView.vue'), meta: { title: '周期任务', icon: 'chart', group: '使用' } },
   { path: '/agents', name: 'agents', component: () => import('./views/AgentsView.vue'), meta: { title: 'Agent', icon: 'bot', group: '能力' } },
   { path: '/skills', name: 'skills', component: () => import('./views/SkillsView.vue'), meta: { title: '技能', icon: 'book', group: '能力' } },

@@ -1,6 +1,7 @@
 <script setup>
 import { onMounted, reactive, ref, computed } from 'vue'
 import Icon from '../components/Icon.vue'
+import BaseInstruction from '../components/BaseInstruction.vue'
 import { api } from '../api'
 import { agentRecord, assignExecution } from '../agents'
 
@@ -250,6 +251,7 @@ async function remove(a) {
     <div class="body">
       <div v-if="notice" class="notice-bar"><Icon name="check" :size="16" /> {{ notice }}</div>
       <div v-if="error" class="error-bar"><Icon name="alert" :size="16" /> {{ error }}</div>
+      <BaseInstruction />
       <p class="muted hint">
         给协调者填上「子 Agent」即开启转交：协调者的 LLM 会按每个子 Agent 的<strong>描述</strong>判断把任务交给谁。未定义任何 Agent 时，对话仍走默认的单 Agent。
       </p>
@@ -274,7 +276,7 @@ async function remove(a) {
             <input v-model="form.description" class="input" placeholder="擅长联网检索与资料整理" />
           </label>
           <label class="field span2">
-            <span class="label">系统指令（留空 = 使用内置默认指令）</span>
+            <span class="label">系统指令（留空 = 沿用上方的基础指令）</span>
             <textarea v-model="form.instruction" class="textarea" rows="5" placeholder="你是协调者，先判断该由哪个专家处理，再决定是否转交…" />
           </label>
 
@@ -316,7 +318,9 @@ async function remove(a) {
             </span>
           </div>
 
-          <div class="capability-grid span2">
+          <details class="span2 tool-tuning" :open="!!(form.required_tools_text.trim() || form.required_suites_text.trim())">
+            <summary class="label">高级：工具选择（必需工具 / 必需能力包）</summary>
+          <div class="capability-grid">
             <label class="field">
               <span class="label">必需工具（每行一个）</span>
               <textarea v-model="form.required_tools_text" class="textarea mono" rows="3"
@@ -330,6 +334,7 @@ async function remove(a) {
               <span class="field-help">自动包含元数据中属于该 suite 的全部工具；可与必需工具同时使用。</span>
             </label>
           </div>
+          </details>
 
           <div v-if="execConfig" class="field span2">
             <span class="label">诊断执行（shell_exec：用官方 CLI 查询，凭据用下方保存的变量）</span>
@@ -419,7 +424,7 @@ async function remove(a) {
               <div class="srv-meta dim">
                 <span v-if="executionProfiles[a.name]?.length">已分配执行器 · {{ executionProfiles[a.name].join('、') }}</span>
                 <span v-else>未分配通用执行器</span>
-                <RouterLink to="/tools">配置执行能力</RouterLink>
+                · <a href="#" @click.prevent="startEdit(a)">{{ executionProfiles[a.name]?.length ? '修改分配' : '分配执行能力' }}</a>
               </div>
               <div v-if="(a.sub_agents || []).length || (a.mcp || []).length || (a.skills || []).length || a.skills || (a.required_tools || []).length || (a.required_suites || []).length || (agentVarKeys[a.name] || []).length" class="srv-secrets">
                 <span v-for="n in a.sub_agents" :key="'s' + n" class="badge" title="子 Agent（转交目标）">↪ {{ n }}</span>
@@ -520,6 +525,12 @@ async function remove(a) {
 }
 .check.sub {
   margin-left: var(--sp-5, 24px);
+}
+.tool-tuning summary {
+  cursor: pointer;
+}
+.tool-tuning[open] summary {
+  margin-bottom: var(--sp-3);
 }
 .chips {
   display: flex;

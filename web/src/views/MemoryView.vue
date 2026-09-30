@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onMounted, ref } from 'vue'
+import { onMounted, ref } from 'vue'
 import Icon from '../components/Icon.vue'
 import { api } from '../api'
 import { sendOnEnter } from '../ime'
@@ -22,65 +22,7 @@ const searchEnabled = ref(false)
 const toggling = ref(false)
 const toggleError = ref('')
 
-// Conversation compaction. Inputs are strings so "blank = use the default" is
-// representable; a max_tokens of 0 means compaction is off entirely.
-const hist = ref(null) // server state incl. defaults
-const histOpen = ref(false)
-const histForm = ref({ max_tokens: '', keep_recent: '', tool_result_tokens: '', max_result_bytes: '' })
-const histSaving = ref(false)
-const histError = ref('')
-const histNotice = ref('')
-
-onMounted(() => {
-  loadCore()
-  loadHistory()
-})
-
-async function loadHistory() {
-  try {
-    hist.value = await api.history()
-    histForm.value = {
-      max_tokens: hist.value.max_tokens ?? '',
-      keep_recent: hist.value.keep_recent || '',
-      tool_result_tokens: hist.value.tool_result_tokens || '',
-      max_result_bytes: hist.value.max_result_bytes || '',
-    }
-  } catch (e) {
-    histError.value = e.message
-  }
-}
-
-// compactionOff mirrors the server rule: an explicit 0 disables compaction,
-// while blank falls back to the default budget.
-const compactionOff = computed(() => String(histForm.value.max_tokens).trim() === '0')
-
-function histNum(v) {
-  const s = String(v ?? '').trim()
-  if (s === '') return null
-  const n = Number(s)
-  return Number.isFinite(n) && n >= 0 ? Math.floor(n) : null
-}
-
-async function saveHistory() {
-  if (histSaving.value) return
-  histSaving.value = true
-  histError.value = ''
-  histNotice.value = ''
-  try {
-    const r = await api.setHistory({
-      max_tokens: histNum(histForm.value.max_tokens), // null = 用默认预算
-      keep_recent: histNum(histForm.value.keep_recent) ?? 0,
-      tool_result_tokens: histNum(histForm.value.tool_result_tokens) ?? 0,
-      max_result_bytes: histNum(histForm.value.max_result_bytes) ?? 0,
-    })
-    histNotice.value = `已保存到 ${r.saved_to}（即时热重载）`
-    await loadHistory()
-  } catch (e) {
-    histError.value = e.message
-  } finally {
-    histSaving.value = false
-  }
-}
+onMounted(loadCore)
 
 async function loadCore() {
   coreLoading.value = true
@@ -258,70 +200,7 @@ function fmtTime(unix) {
       </section>
 
       <section class="col">
-        <!-- compaction: how much conversation survives into each request -->
-        <div class="card hist-card">
-          <button class="hist-head" @click="histOpen = !histOpen">
-            <span class="caret" :class="{ open: histOpen }">▸</span>
-            <Icon name="settings" :size="16" />
-            <span class="hist-title">上下文压缩</span>
-            <span class="hist-badge mono" :class="{ off: compactionOff }">
-              {{ compactionOff ? '已关闭' : `${histForm.max_tokens || hist?.defaults?.max_tokens} token` }}
-            </span>
-          </button>
-          <div v-if="histOpen" class="hist-body">
-            <p class="muted hint">
-              每轮把完整历史发给模型，几次 fetch_url 就能顶满上下文窗口。压缩确定性执行、不调用模型做摘要。留空 = 用默认值，保存即热重载。
-            </p>
-            <div class="hist-grid">
-              <label class="field">
-                <span class="label">历史预算（token）</span>
-                <input v-model="histForm.max_tokens" class="input" type="number" min="0" step="1000"
-                  :placeholder="`留空 = ${hist?.defaults?.max_tokens ?? 24000}`" />
-                <span class="tiny muted">填 0 关闭压缩，永远发送完整历史</span>
-              </label>
-              <label class="field">
-                <span class="label">保留最近条数</span>
-                <input v-model="histForm.keep_recent" class="input" type="number" min="0" step="1"
-                  :placeholder="`留空 = ${hist?.defaults?.keep_recent ?? 6}`" :disabled="compactionOff" />
-                <span class="tiny muted">末尾这些条永不丢弃，保证当前问题送达</span>
-              </label>
-              <label class="field">
-                <span class="label">单个工具结果上限（token）</span>
-                <input v-model="histForm.tool_result_tokens" class="input" type="number" min="0" step="100"
-                  :placeholder="`留空 = ${hist?.defaults?.tool_result_tokens ?? 800}`" :disabled="compactionOff" />
-                <span class="tiny muted">超出后保留首尾、省略中间</span>
-              </label>
-              <!-- Under `tools` in the config file, edited here because it and
-                   compaction are the only two things bounding what reaches the
-                   context, and they interact. -->
-              <label class="field">
-                <span class="label">工具返回硬上限（字节）</span>
-                <input v-model="histForm.max_result_bytes" class="input" type="number" min="0" step="1000"
-                  placeholder="留空或 0 = 不限制" />
-                <span class="tiny muted">0 = 不限制（推荐）。它在调用时无条件截断每个返回，不看预算</span>
-              </label>
-            </div>
-            <p class="tiny muted hint2">
-              两者的性质不同：上面的 token 上限只在超出历史预算时才动手，从旧到新，保护当前这轮；
-              下面的字节上限每次调用都切，切的正是最新那个结果。把返回从中间切断后模型往往无法使用、
-              会换参数重试，而每次重试都要重发整段历史——省下的字节远不及重试的代价。
-            </p>
-            <p v-if="hist?.context_unguarded" class="tiny warn">
-              当前压缩已关闭且返回不限制，没有任何东西约束进入上下文的内容。一个足够大的工具返回会
-              直接让请求失败，而报错不会提到工具返回。二者至少开启一个。
-            </p>
-            <p v-if="!searchEnabled && !compactionOff" class="tiny warn">
-              L2 会话检索当前关闭，被压缩丢弃的早期对话将无法找回。开启下方的 L2 可让 agent 用 load_memory 检索历史。
-            </p>
-            <div v-if="histError" class="error-bar"><Icon name="alert" :size="16" /> {{ histError }}</div>
-            <div v-if="histNotice" class="notice-bar"><Icon name="check" :size="16" /> {{ histNotice }}</div>
-            <div class="hist-actions">
-              <button class="btn btn-primary" :disabled="histSaving" @click="saveHistory">
-                <span v-if="histSaving" class="spinner" /> 保存压缩设置
-              </button>
-            </div>
-          </div>
-        </div>
+        <p class="muted moved">上下文压缩设置已移到 <RouterLink to="/config">模型 Provider</RouterLink> 页。</p>
 
         <div class="l2-head">
           <h2 class="section-title">L2 会话检索 · FTS5</h2>
@@ -391,6 +270,10 @@ function fmtTime(unix) {
 </template>
 
 <style scoped>
+.moved {
+  font-size: 12px;
+  margin: 0 0 var(--sp-3);
+}
 .view {
   display: flex;
   flex-direction: column;
@@ -436,85 +319,9 @@ function fmtTime(unix) {
   text-transform: uppercase;
   letter-spacing: 0.04em;
 }
-.hist-card {
-  padding: 0;
-  margin-bottom: var(--sp-3);
-}
-.hist-head {
-  display: flex;
-  align-items: center;
-  gap: var(--sp-2);
-  width: 100%;
-  padding: var(--sp-3) var(--sp-4);
-  background: none;
-  border: 0;
-  color: var(--text);
-  cursor: pointer;
-  text-align: left;
-}
-.hist-title {
-  font-weight: 600;
-  font-size: 14px;
-}
-.hist-badge {
-  margin-left: auto;
-  font-size: 11px;
-  padding: 2px 8px;
-  border-radius: var(--radius-sm);
-  color: var(--accent);
-  background: var(--accent-tint);
-  border: 1px solid var(--accent-border);
-}
-.hist-badge.off {
-  color: var(--text-dim);
-  background: none;
-  border-color: var(--border);
-}
-.caret {
-  display: inline-block;
-  font-size: 10px;
-  color: var(--text-dim);
-  transition: transform 0.15s ease;
-}
-.caret.open {
-  transform: rotate(90deg);
-}
-.hist-body {
-  padding: 0 var(--sp-4) var(--sp-4);
-  border-top: 1px solid var(--border);
-}
-.hist-body .hint {
-  margin: var(--sp-3) 0 0;
-  font-size: 12px;
-  line-height: 1.6;
-}
-.hist-grid {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: var(--sp-3);
-  margin-top: var(--sp-3);
-}
-.field {
-  display: flex;
-  flex-direction: column;
-  gap: var(--sp-2);
-}
-.label {
-  font-size: 12px;
-  color: var(--text-dim);
-}
 .tiny {
   font-size: 11px;
   line-height: 1.5;
-}
-.warn {
-  margin: var(--sp-3) 0 0;
-  color: var(--warning);
-}
-.hist-actions {
-  display: flex;
-  justify-content: flex-end;
-  margin-top: var(--sp-3);
 }
 .l2-head {
   display: flex;
@@ -706,10 +513,5 @@ function fmtTime(unix) {
   .body {
     grid-template-columns: 1fr;
   }
-}
-.hint2 {
-  margin: var(--sp-2) 0 0;
-  line-height: 1.7;
-  color: var(--text-muted);
 }
 </style>
