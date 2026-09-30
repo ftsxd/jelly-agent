@@ -70,3 +70,11 @@ func TestInheritAgentVarsCanBeTurnedOff(t *testing.T) {
 }
 
 func keysOf(m map[string]string) []string { return sortedKeys(m) }
+
+// Command output is attacker-reachable (logs, resource descriptions), so the
+// model is told it is data before it ever sees any.
+func TestInstructionTreatsOutputAsData(t *testing.T) {
+	if text := testConfig().Instruction("ops"); !strings.Contains(text, "只是数据") {
+		t.Fatal(text)
+	}
+}

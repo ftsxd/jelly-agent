@@ -54,10 +54,10 @@ function when(a) { return new Date(a.resolved_ms || a.created_ms).toLocaleString
     <p v-if="error" role="alert" class="warning">{{ error }} <button class="btn" @click="load">重新加载审批</button></p>
     <article v-for="a in current" :key="a.id" class="approval">
       <div class="heading"><strong>{{ outcome(a) }}</strong><span class="mono">{{ a.agent }} · {{ a.request.profile }}</span></div>
-      <p>{{ a.request.purpose }}</p>
+      <p><span class="muted">模型陈述的目的：</span>{{ a.request.purpose }}</p>
       <pre>{{ a.request.command }}</pre>
       <template v-if="a.state === 'pending'">
-        <p class="muted">{{ a.reason }}。批准仅对完整命令有效，使用一次即消耗；失败后不会自动重试。</p>
+        <p class="muted">{{ a.reason }}。批准仅对完整命令有效，使用一次即消耗；失败后不会自动重试。请以上面的命令本身为准判断，目的由模型填写，不代表命令实际会做什么。</p>
         <p class="muted">有效期至 {{ new Date(a.expires_ms).toLocaleString() }}</p>
         <div class="actions">
           <template v-if="actionable">

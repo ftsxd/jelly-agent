@@ -30,6 +30,14 @@ type helperSpec struct {
 func helperArgv(exe string, p Policy, dir string) []string {
 	argv := []string{exe, HelperCommand}
 	for _, r := range systemPaths(p) {
+		// /proc and /dev entries are resolved by the helper, not here: this
+		// process's /proc/self is the server's own /proc/<pid>, and granting
+		// that would hand the child the service's process details. In the
+		// helper they resolve to its own pid, which exec keeps for the target.
+		if procOrDev(r) {
+			argv = append(argv, flagReadOnly+r)
+			continue
+		}
 		argv = append(argv, flagReadOnly+canonical(r))
 	}
 	for _, r := range p.ReadPaths {
@@ -58,6 +66,15 @@ func helperArgv(exe string, p Policy, dir string) []string {
 		argv = append(argv, flagNoNet)
 	}
 	return append(argv, "--")
+}
+
+func procOrDev(path string) bool {
+	for _, root := range []string{"/proc", "/dev"} {
+		if path == root || strings.HasPrefix(path, root+"/") {
+			return true
+		}
+	}
+	return false
 }
 
 // parseHelperArgs reads the argv helperArgv produced (everything after the

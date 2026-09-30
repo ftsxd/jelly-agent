@@ -74,11 +74,17 @@ func seatbeltProfile(p Policy, dir string) string {
 (allow process-fork)
 (allow signal (target same-sandbox))
 (allow sysctl-read)
-(allow mach-lookup)
 (allow ipc-posix-shm)
 (allow file-read-metadata)
 (allow file-ioctl (subpath "/dev"))
 `)
+
+	// Mach services by name, never all of them: an open mach-lookup lets a
+	// child reach launch services, the pasteboard or another app, all of which
+	// run outside the sandbox. This is what libSystem, logging, user/group
+	// lookup, preferences and certificate checks need — the same base set
+	// Codex CLI allows.
+	b.WriteString("(allow mach-lookup " + globalNames(baseMachServices) + ")\n")
 
 	// Reads: the system allowlist, the workspace, and whatever the operator
 	// added. Metadata (stat) is already allowed globally above — too much
@@ -127,6 +133,35 @@ func seatbeltProfile(p Policy, dir string) string {
 
 	if p.Mode.CanNetwork() {
 		b.WriteString("(allow network*)\n")
+		// DNS configuration, the network daemon and revocation checks.
+		b.WriteString("(allow mach-lookup " + globalNames(networkMachServices) + ")\n")
+	}
+	return b.String()
+}
+
+var baseMachServices = []string{
+	"com.apple.bsd.dirhelper", "com.apple.cfprefsd.agent", "com.apple.cfprefsd.daemon",
+	"com.apple.diagnosticd", "com.apple.logd", "com.apple.logd.events", "com.apple.secinitd",
+	"com.apple.system.DirectoryService.libinfo_v1", "com.apple.system.logger",
+	"com.apple.system.notification_center", "com.apple.system.opendirectoryd.libinfo",
+	"com.apple.system.opendirectoryd.membership", "com.apple.trustd", "com.apple.trustd.agent",
+	"com.apple.xpc.activity.unmanaged",
+}
+
+var networkMachServices = []string{
+	"com.apple.SecurityServer", "com.apple.networkd", "com.apple.ocspd",
+	"com.apple.SystemConfiguration.DNSConfiguration", "com.apple.SystemConfiguration.configd",
+	"com.apple.dnssd.service",
+}
+
+// globalNames renders mach service names as SBPL (global-name "…") filters.
+func globalNames(names []string) string {
+	var b strings.Builder
+	for i, n := range names {
+		if i > 0 {
+			b.WriteString(" ")
+		}
+		b.WriteString(`(global-name "` + sbplEscape(n) + `")`)
 	}
 	return b.String()
 }

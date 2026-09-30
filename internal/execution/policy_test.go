@@ -60,6 +60,24 @@ func TestPolicyChecksAllSegmentsAndStrictestRule(t *testing.T) {
 		{"kubectl get pods '-ojsonpath={.items[*].kind}'", Allow},
 		{"kubectl get pods -n kube-system -A -o wide", Allow},
 		{"kubectl logs -f web", Prompt}, // follow, not a manifest; prompt comes from review-logs
+		// Read-only subcommands are allow-listed; a broad rule cannot let others skip approval.
+		{"kubectl debug node/x -it --image=busybox", Prompt},
+		{"kubectl port-forward svc/web 8080:80", Prompt},
+		{"kubectl proxy", Prompt},
+		{"kubectl krew install ctx", Prompt},
+		{"kubectl cluster-info dump", Prompt},
+		{"kubectl auth reconcile", Prompt},
+		{"kubectl auth can-i list pods", Allow},
+		{"kubectl --request-timeout 5s get pods", Allow},
+		{"kubectl -n kube-system get pods", Allow},
+		{"kubectl -nkube-system top pods", Allow},
+		{"kubectl --unknown-flag get pods", Prompt},
+		{"kubectl get pods --as-uid=1000", Forbidden},
+		// Wrappers would hide the command they run from every rule.
+		{"xargs kubectl delete pod", Forbidden},
+		{"timeout 5 kubectl get pods", Forbidden},
+		{"kubectl get pods | xargs echo", Forbidden},
+		{"eval kubectl get pods", Forbidden},
 	} {
 		t.Run(test.command, func(t *testing.T) {
 			if got := Evaluate(test.command, rules); got.Decision != test.want {

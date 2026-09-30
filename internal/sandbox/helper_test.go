@@ -102,3 +102,26 @@ func TestHelperArgvCarriesWritePaths(t *testing.T) {
 		t.Errorf("under read-only a write path must still be readable: %+v", spec.ReadOnly)
 	}
 }
+
+// /proc/self must reach the helper verbatim. Resolved here it would name the
+// server's own /proc/<pid>; resolved in the helper it names the target, whose
+// pid exec keeps.
+func TestHelperArgvLeavesProcSelfToTheHelper(t *testing.T) {
+	argv := helperArgv("/usr/local/bin/jelly", Policy{Strict: true, Mode: ModeWorkspace}, "/work")
+	spec, err := parseHelperArgs(append(argv[2:], "true"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, p := range spec.ReadOnly {
+		if p == "/proc/self" {
+			found = true
+		}
+		if strings.HasPrefix(p, "/proc/") && p != "/proc/self" && p != "/proc/meminfo" && p != "/proc/cpuinfo" {
+			t.Fatalf("server-side /proc path granted: %s", p)
+		}
+	}
+	if !found {
+		t.Fatalf("/proc/self missing from read paths: %v", spec.ReadOnly)
+	}
+}

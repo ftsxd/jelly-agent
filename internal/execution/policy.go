@@ -334,7 +334,10 @@ func builtinDecision(a []string) (Decision, string) {
 	if cmd == "jq" && len(a) == 2 && (a[1] == "--version" || a[1] == "--help") {
 		return Allow, "本地工具版本与帮助探测"
 	}
-	for _, v := range []string{"rm", "sudo", "su", "doas", "chmod", "chown", "mkfs", "dd", "shutdown", "reboot", "env", "printenv", "sh", "bash", "zsh", "fish", "dash", "busybox", "pip", "pip3", "apt", "apt-get", "brew", "npm"} {
+	for _, v := range []string{"rm", "sudo", "su", "doas", "chmod", "chown", "mkfs", "dd", "shutdown", "reboot", "env", "printenv", "sh", "bash", "zsh", "fish", "dash", "busybox", "pip", "pip3", "apt", "apt-get", "brew", "npm",
+		// Wrappers run their arguments as another command, hiding it from the
+		// policy, which only ever sees the wrapper's own name.
+		"eval", "exec", "command", "builtin", "source", "xargs", "nohup", "timeout", "nice", "ionice", "setsid", "stdbuf", "script", "watch", "chroot", "unshare", "nsenter"} {
 		if cmd == v {
 			return Forbidden, "禁止破坏性命令、凭据枚举、shell 包装和软件安装"
 		}
@@ -379,7 +382,7 @@ func builtinDecision(a []string) (Decision, string) {
 					mutation = true
 				}
 			}
-			for _, flag := range []string{"--token", "--password", "--client-key", "--client-certificate", "--certificate-authority", "--kubeconfig", "--context", "--server", "--cluster", "--user", "--username", "--as", "--as-group", "--raw", "--tls-server-name", "--insecure-skip-tls-verify", "-s"} {
+			for _, flag := range []string{"--token", "--password", "--client-key", "--client-certificate", "--certificate-authority", "--kubeconfig", "--context", "--server", "--cluster", "--user", "--username", "--as", "--as-group", "--as-uid", "--raw", "--tls-server-name", "--insecure-skip-tls-verify", "-s"} {
 				if v == flag || strings.HasPrefix(v, flag+"=") {
 					return Forbidden, "不允许覆盖运行时配置的身份或集群：" + flag
 				}
@@ -390,6 +393,12 @@ func builtinDecision(a []string) (Decision, string) {
 		}
 		if mutation {
 			return Prompt, "变更或远程执行需要逐次审批"
+		}
+		// Allow-listed, not block-listed: debug, port-forward, proxy, plugins
+		// and anything kubectl adds later need a person, even under a broad
+		// administrator rule — the builtin decision is the stricter one.
+		if !kubectlReadOnly(a) {
+			return Prompt, "只读范围之外的 kubectl 子命令需要逐次审批"
 		}
 	}
 	if cmd == "tccli" {
@@ -419,6 +428,43 @@ func builtinDecision(a []string) (Decision, string) {
 		return Prompt, "云操作不在默认只读范围内，需要逐次审批"
 	}
 	return "", ""
+}
+
+// kubectlReadOnly reports whether argv's subcommand is one of kubectl's
+// read-only ones. The subcommand is the first token that is neither a global
+// flag nor such a flag's value; an unknown flag written without "=" may or may
+// not take the next token, so it fails closed rather than guessing.
+func kubectlReadOnly(a []string) bool {
+	valueFlags := map[string]bool{"-n": true, "--namespace": true, "--request-timeout": true, "--cache-dir": true,
+		"-v": true, "--v": true, "--log-file": true, "--log-dir": true, "--vmodule": true, "--profile": true, "--profile-output": true}
+	boolFlags := map[string]bool{"--match-server-version": true, "--disable-compression": true, "--warnings-as-errors": true}
+	for i := 1; i < len(a); i++ {
+		v := a[i]
+		switch {
+		case !strings.HasPrefix(v, "-"):
+			next := ""
+			if i+1 < len(a) {
+				next = a[i+1]
+			}
+			switch v {
+			case "get", "describe", "logs", "top", "version", "api-resources", "api-versions", "help", "explain", "events":
+				return true
+			case "cluster-info":
+				return next != "dump" // dump pulls every namespace's pods and logs
+			case "auth":
+				return next == "can-i" || next == "whoami"
+			}
+			return false
+		case strings.Contains(v, "=") || boolFlags[v]:
+		case valueFlags[v]:
+			i++
+		case strings.HasPrefix(v, "-n") && !strings.HasPrefix(v, "--"):
+			// -nkube-system: the shorthand with its value attached.
+		default:
+			return false
+		}
+	}
+	return false
 }
 
 // kubectlManifestFlag reports whether v selects objects through a manifest:

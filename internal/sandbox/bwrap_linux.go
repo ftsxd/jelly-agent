@@ -32,6 +32,10 @@ var bwrapIsolation = []string{
 	"--unshare-uts",
 	"--unshare-cgroup-try",
 	"--die-with-parent",
+	// A new session detaches the controlling terminal, so the child cannot
+	// TIOCSTI keystrokes into the operator's shell (the interactive CLI).
+	// Cleanup is unaffected: the PID namespace dies with bwrap.
+	"--new-session",
 	"--proc", "/proc",
 	"--dev", "/dev",
 	"--tmpfs", "/tmp",
