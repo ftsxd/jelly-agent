@@ -26,7 +26,7 @@ docker image inspect jelly-agent:local --format '{{ index .Config.Labels "org.op
 ## 配置腾讯云查询 Agent
 
 1. 在 Agent 变量页保存 `TENCENTCLOUD_SECRET_ID`、`TENCENTCLOUD_SECRET_KEY`、`TENCENTCLOUD_REGION`。值由服务端保存，不进入模型上下文；生产诊断应使用只读 IAM 凭据。
-2. 在 Agent 页编辑 TencentQuery，在「诊断执行」里勾选「为此 Agent 新建执行配置」并允许联网（或在工具页分配已有配置）。保存的三个变量会按同名自动注入，无需再逐个引用；注意不要填进「服务端环境变量」，那一类读取的是服务进程自己的环境变量。不要把密钥写进提示词或命令。给协调者和 TencentQuery 的职责描述加入 CLS 日志集/主题元数据查询。
+2. 在 Agent 页编辑 TencentQuery，打开「允许此 Agent 执行命令」并勾选「允许联网」，保存即可：系统会为它建一份专属执行配置并启用执行器（多个 Agent 共用同一份配置时，在工具页分配）。保存的三个变量会按同名自动注入，无需再逐个引用；注意不要填进「服务端环境变量」，那一类读取的是服务进程自己的环境变量。不要把密钥写进提示词或命令。给协调者和 TencentQuery 的职责描述加入 CLS 日志集/主题元数据查询。
 3. 预装 CLI 到隔离环境可读的位置。用户 Python 安装依赖真实 HOME，不能直接用于隔离执行；可用已有安装准备独立运行目录：
 
 ```sh

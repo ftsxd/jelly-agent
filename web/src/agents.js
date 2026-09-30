@@ -17,25 +17,48 @@ export function agentRecord(a, patch = {}) {
   }
 }
 
-// assignExecution returns the execution config with agent's assignment set to
-// exactly `chosen` (profile names), plus — when create is given — a new
-// profile named after the agent. It switches the executor on when the agent
-// ends up assigned: assigning from the agent page means "this agent runs".
-// null when nothing changed, so an untouched form never rewrites the config.
-export function assignExecution(config, agent, before, chosen, create) {
-  const was = new Set(before), now = new Set(chosen)
-  if (!create && was.size === now.size && [...now].every((p) => was.has(p))) return null
-  const cfg = JSON.parse(JSON.stringify(config))
-  cfg.profiles = (cfg.profiles || []).map((p) => {
-    const others = p.agents.filter((a) => a !== agent)
-    return { ...p, agents: now.has(p.name) ? [...others, agent] : others }
-  })
-  if (create) {
+// The agent page shows execution as one switch, not as profiles. Behind it
+// each agent gets its own profile, named after it and assigned to it alone;
+// profiles shared with other agents stay a Tools-page concept and are only
+// reported here.
+export function agentExecution(config, agent) {
+  const mine = (config?.profiles || []).filter((p) => p.agents.includes(agent))
+  const solo = mine.filter((p) => p.agents.length === 1)
+  const own = solo.find((p) => p.name === agent) || solo[0] || null
+  return { on: mine.length > 0, own, shared: mine.filter((p) => p !== own) }
+}
+
+// setAgentExecution returns { config, removed } for the switch's new state,
+// or null when nothing would change. Turning on creates the agent's own
+// profile — network as chosen, and able to ask for approval, since without it
+// a command outside the read-only rules could never run at all. Turning off
+// removes the agent everywhere; a profile left with no agent is deleted
+// (`removed` names them, so the caller can confirm first), and with no profile
+// left the executor is switched off — the server refuses it enabled but empty.
+export function setAgentExecution(config, agent, { on, network }) {
+  const now = agentExecution(config, agent)
+  const cfg = JSON.parse(JSON.stringify(config || { profiles: [] }))
+  cfg.profiles ||= []
+  if (!on) {
+    if (!now.on) return null
+    const removed = []
+    cfg.profiles = cfg.profiles
+      .map((p) => ({ ...p, agents: p.agents.filter((a) => a !== agent) }))
+      .filter((p) => (p.agents.length ? true : (removed.push(p.name), false)))
+    if (!cfg.profiles.length) cfg.enabled = false
+    return { config: cfg, removed }
+  }
+  if (now.own) {
+    if (!!now.own.network === !!network && cfg.enabled) return null
+    cfg.profiles = cfg.profiles.map((p) => (p.name === now.own.name ? { ...p, network: !!network } : p))
+  } else if (!now.on) {
     const taken = new Set(cfg.profiles.map((p) => p.name))
     let name = agent
     for (let i = 2; taken.has(name); i++) name = `${agent}-${i}`
-    cfg.profiles.push({ name, agents: [agent], network: !!create.network, env: {}, rules: [] })
+    cfg.profiles.push({ name, agents: [agent], network: !!network, write_approval: true, env: {}, rules: [] })
+  } else if (cfg.enabled) {
+    return null // only shared profiles: their settings belong to the Tools page
   }
-  if (cfg.profiles.some((p) => p.agents.includes(agent))) cfg.enabled = true
-  return cfg
+  cfg.enabled = true
+  return { config: cfg, removed: [] }
 }

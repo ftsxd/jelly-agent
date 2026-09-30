@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, expect, it } from 'vitest'
-import { agentRecord, assignExecution } from '../agents'
+import { agentExecution, agentRecord, setAgentExecution } from '../agents'
 import { fromRows, inheritedVars, profileIssues, toRows, unreferencedAgentVars } from '../execution'
 
 describe('agent record resend', () => {
@@ -13,24 +13,41 @@ describe('agent record resend', () => {
   })
 })
 
-describe('execution assignment from the agent page', () => {
-  const config = { enabled: false, backend: 'os', profiles: [{ name: 'cloud', agents: ['other'], network: true, agent_env: { A: 'A' } }, { name: 'ops', agents: ['ops', 'TencentQuery'], network: false }] }
-  it('returns null when nothing changed', () => {
-    expect(assignExecution(config, 'TencentQuery', ['ops'], ['ops'], null)).toBeNull()
-  })
-  it('sets exactly the chosen profiles, keeps other fields, and enables the executor', () => {
-    const cfg = assignExecution(config, 'TencentQuery', ['ops'], ['cloud'], null)
-    expect(cfg.profiles.map(p => p.agents)).toEqual([['other', 'TencentQuery'], ['ops']])
-    expect(cfg.profiles[0].agent_env).toEqual({ A: 'A' })
+describe('execution switch on the agent page', () => {
+  const shared = { name: 'shared', agents: ['KubeInspector', 'MetricsQuery'], network: true, rules: [{ name: 'r' }] }
+  const config = { enabled: false, profiles: [shared] }
+
+  it('turning on creates the agent\'s own approving profile and enables the executor', () => {
+    const { config: cfg, removed } = setAgentExecution(config, 'TencentQuery', { on: true, network: true })
+    expect(removed).toEqual([])
     expect(cfg.enabled).toBe(true)
-    expect(config.profiles[0].agents).toEqual(['other']) // input untouched
+    expect(cfg.profiles.at(-1)).toEqual({ name: 'TencentQuery', agents: ['TencentQuery'], network: true, write_approval: true, env: {}, rules: [] })
+    expect(config.profiles).toHaveLength(1) // input untouched
+    expect(agentExecution(cfg, 'TencentQuery')).toMatchObject({ on: true, own: { name: 'TencentQuery' }, shared: [] })
   })
-  it('creates a profile named after the agent, avoiding taken names', () => {
-    const cfg = assignExecution({ ...config, profiles: [...config.profiles, { name: 'TencentQuery', agents: ['x'] }] }, 'TencentQuery', [], [], { network: true })
-    expect(cfg.profiles.at(-1)).toEqual({ name: 'TencentQuery-2', agents: ['TencentQuery'], network: true, env: {}, rules: [] })
+  it('the network box edits the own profile only, and an unchanged form writes nothing', () => {
+    const on = setAgentExecution(config, 'TencentQuery', { on: true, network: true }).config
+    expect(setAgentExecution(on, 'TencentQuery', { on: true, network: true })).toBeNull()
+    const off = setAgentExecution(on, 'TencentQuery', { on: true, network: false }).config
+    expect(off.profiles.find(p => p.name === 'TencentQuery').network).toBe(false)
+    expect(off.profiles.find(p => p.name === 'shared')).toEqual(shared)
   })
-  it('does not switch the executor on when the agent ends up unassigned', () => {
-    expect(assignExecution(config, 'TencentQuery', ['ops'], [], null).enabled).toBe(false)
+  it('an agent on a shared profile is reported, not given a second profile', () => {
+    const state = agentExecution({ ...config, enabled: true }, 'MetricsQuery')
+    expect(state).toMatchObject({ on: true, own: null })
+    expect(state.shared.map(p => p.name)).toEqual(['shared'])
+    expect(setAgentExecution({ ...config, enabled: true }, 'MetricsQuery', { on: true, network: false })).toBeNull()
+  })
+  it('turning off removes the agent everywhere and names profiles left empty', () => {
+    const on = setAgentExecution({ ...config, enabled: true }, 'KubeInspector', { on: true, network: true })
+    expect(on).toBeNull() // already on through the shared profile
+    const r = setAgentExecution({ ...config, enabled: true }, 'KubeInspector', { on: false })
+    expect(r.removed).toEqual([])
+    expect(r.config.profiles[0].agents).toEqual(['MetricsQuery'])
+    const last = setAgentExecution({ enabled: true, profiles: [{ name: 'solo', agents: ['A'] }] }, 'A', { on: false })
+    expect(last.removed).toEqual(['solo'])
+    expect(last.config).toMatchObject({ enabled: false, profiles: [] })
+    expect(setAgentExecution(config, 'Nobody', { on: false })).toBeNull()
   })
 })
 

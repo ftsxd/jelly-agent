@@ -3,7 +3,7 @@ import { onMounted, reactive, ref, computed } from 'vue'
 import Icon from '../components/Icon.vue'
 import BaseInstruction from '../components/BaseInstruction.vue'
 import { api } from '../api'
-import { agentRecord, assignExecution } from '../agents'
+import { agentExecution, agentRecord, setAgentExecution } from '../agents'
 
 const agents = ref([])
 const defaultAgent = ref('')
@@ -37,8 +37,7 @@ const form = reactive({
   varKeys: [],
   varsText: '',
   savingVars: false,
-  exec_profiles: [],
-  exec_create: false,
+  exec_on: false,
   exec_network: true,
 })
 // The execution config as stored, so assigning from this page writes back
@@ -90,8 +89,7 @@ function startNew() {
     varKeys: [],
     varsText: '',
     savingVars: false,
-    exec_profiles: [],
-    exec_create: false,
+    exec_on: false,
     exec_network: true,
   })
 }
@@ -116,21 +114,20 @@ function startEdit(a) {
     // prefill existing keys with blank values (blank = keep server-side)
     varsText: (agentVarKeys.value[a.name] || []).map((k) => `${k}=`).join('\n'),
     savingVars: false,
-    exec_profiles: [...(executionProfiles.value[a.name] || [])],
-    exec_create: false,
-    exec_network: true,
+    exec_on: agentExecution(execConfig.value, a.name).on,
+    exec_network: agentExecution(execConfig.value, a.name).own?.network ?? true,
   })
 }
 
-const execProfiles = computed(() => execConfig.value?.profiles || [])
-// A profile needs at least one agent; the last one cannot leave it from here.
-const soleAssignee = (p) => p.agents.length === 1 && p.agents[0] === form.name && editing.value !== 'new'
+// Execution as this agent's switch; see agentExecution in agents.js.
+const execState = computed(() => agentExecution(execConfig.value, editing.value === 'new' ? '' : form.name))
 
-async function saveExecution(name) {
-  if (!execConfig.value) return
-  const cfg = assignExecution(execConfig.value, name, executionProfiles.value[name] || [], form.exec_profiles,
-    form.exec_create ? { network: form.exec_network } : null)
-  if (cfg) await api.setExecution(cfg)
+// The config change the switch asks for, or null. Confirmed before anything is
+// saved when it would delete a profile — one set up on the Tools page may
+// carry rules or mappings worth keeping.
+function executionPlan(name) {
+  if (!execConfig.value) return null
+  return setAgentExecution(execConfig.value, name, { on: form.exec_on, network: form.exec_network })
 }
 
 function cancel() {
@@ -140,6 +137,8 @@ function cancel() {
 
 async function submit() {
   error.value = ''
+  const plan = executionPlan(form.name.trim())
+  if (plan?.removed.length && !confirm(`关闭后将删除执行配置「${plan.removed.join('、')}」（只分配给了这个 Agent，其中的规则和变量映射会一并删除）。继续？`)) return
   saving.value = true
   try {
     const res = await api.saveAgent({
@@ -155,7 +154,7 @@ async function submit() {
       enabled: form.enabled,
       make_default: form.make_default,
     })
-    await saveExecution(form.name.trim())
+    if (plan) await api.setExecution(plan.config)
     notice.value = `已保存到 ${res.saved_to}（已热重载）`
     editing.value = false
     await load()
@@ -337,25 +336,21 @@ async function remove(a) {
           </details>
 
           <div v-if="execConfig" class="field span2">
-            <span class="label">诊断执行（shell_exec：用官方 CLI 查询，凭据用下方保存的变量）</span>
-            <div v-if="execProfiles.length" class="chips">
-              <label v-for="p in execProfiles" :key="p.name" class="chip" :title="soleAssignee(p) ? '只分配给了这个 Agent；要停用请到「工具」页删除该配置' : ''">
-                <input type="checkbox" :value="p.name" v-model="form.exec_profiles" :disabled="soleAssignee(p)" />
-                <span>{{ p.name }}</span>
-                <span v-if="p.network" class="muted">· 联网</span>
-                <span v-if="p.write_approval" class="muted">· 可审批</span>
-              </label>
-            </div>
             <label class="check">
-              <input type="checkbox" v-model="form.exec_create" />
-              <span>为此 Agent 新建执行配置</span>
+              <input type="checkbox" v-model="form.exec_on" />
+              <span>允许此 Agent 执行命令（shell_exec：用官方 CLI 查询，如 tccli、kubectl）</span>
             </label>
-            <label v-if="form.exec_create" class="check sub">
-              <input type="checkbox" v-model="form.exec_network" />
-              <span>允许联网（调用云 API、K8s API 需要）</span>
-            </label>
-            <span v-if="!execConfig.enabled && (form.exec_create || form.exec_profiles.length)" class="field-help">保存后会同时启用通用执行器。</span>
-            <span class="field-help">保存的变量会按同名自动注入。审批、命令规则等细节在 <RouterLink to="/tools">工具</RouterLink> 页调整。</span>
+            <template v-if="form.exec_on">
+              <label v-if="execState.own || !execState.on" class="check sub">
+                <input type="checkbox" v-model="form.exec_network" />
+                <span>允许联网（调用云 API、K8s API 需要）</span>
+              </label>
+              <span class="field-help">使用下方「变量」里保存的凭据（同名自动注入）。只读命令直接执行，其他命令需要你在对话中逐条批准。</span>
+              <span v-if="execState.shared.length" class="field-help">
+                还通过共享执行配置「{{ execState.shared.map((p) => p.name).join('、') }}」执行，它的联网、审批和规则在 <RouterLink to="/tools">工具</RouterLink> 页调整。
+              </span>
+              <span v-if="!execConfig.enabled" class="field-help">保存后会同时启用通用执行器。</span>
+            </template>
           </div>
 
           <label class="check">
@@ -422,9 +417,9 @@ async function remove(a) {
               </div>
               <div class="srv-meta dim">{{ a.description || '（无描述）' }}</div>
               <div class="srv-meta dim">
-                <span v-if="executionProfiles[a.name]?.length">已分配执行器 · {{ executionProfiles[a.name].join('、') }}</span>
-                <span v-else>未分配通用执行器</span>
-                · <a href="#" @click.prevent="startEdit(a)">{{ executionProfiles[a.name]?.length ? '修改分配' : '分配执行能力' }}</a>
+                <span v-if="executionProfiles[a.name]?.length">可执行命令</span>
+                <span v-else>不执行命令</span>
+                · <a href="#" @click.prevent="startEdit(a)">{{ executionProfiles[a.name]?.length ? '修改' : '允许执行命令' }}</a>
               </div>
               <div v-if="(a.sub_agents || []).length || (a.mcp || []).length || (a.skills || []).length || a.skills || (a.required_tools || []).length || (a.required_suites || []).length || (agentVarKeys[a.name] || []).length" class="srv-secrets">
                 <span v-for="n in a.sub_agents" :key="'s' + n" class="badge" title="子 Agent（转交目标）">↪ {{ n }}</span>
