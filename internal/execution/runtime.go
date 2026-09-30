@@ -301,6 +301,9 @@ func (r Runtime) execute(ctx context.Context, agent, session string, req Request
 			break
 		}
 	}
+	// Same-name agent variables first; an explicit mapping of the same child
+	// variable wins, and approved write sources still overlay both below.
+	profile.AgentEnv = mergeEnv(r.Config.inheritedAgentEnv(profile, agent), profile.AgentEnv)
 	// An approval authorizes elevated sources only when the command itself
 	// needed one. A read that was escalated solely because no sandbox is
 	// available was approved to run unconfined, not to run with write access.
@@ -576,7 +579,7 @@ func (c Config) Instruction(agent string) string {
 	for _, p := range profiles {
 		fmt.Fprintf(&b, "- %s（联网：%t；可申请写审批：%t；无沙箱时可申请审批执行：%t；变量名称：", p.Name, p.Network, p.WriteApproval, p.AllowUnconfinedWithApproval)
 		// Names, not source names or values. Sorting keeps prompts stable.
-		keys := sortedKeys(mergeEnv(p.Env, p.AgentEnv))
+		keys := sortedKeys(mergeEnv(mergeEnv(p.Env, p.AgentEnv), c.inheritedAgentEnv(p, agent)))
 		b.WriteString(strings.Join(keys, ", "))
 		b.WriteString("）\n")
 	}

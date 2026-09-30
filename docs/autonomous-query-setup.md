@@ -26,7 +26,7 @@ docker image inspect jelly-agent:local --format '{{ index .Config.Labels "org.op
 ## 配置腾讯云查询 Agent
 
 1. 在 Agent 变量页保存 `TENCENTCLOUD_SECRET_ID`、`TENCENTCLOUD_SECRET_KEY`、`TENCENTCLOUD_REGION`。值由服务端保存，不进入模型上下文；生产诊断应使用只读 IAM 凭据。
-2. 在工具页启用执行器，明确分配给 TencentQuery，启用联网，引用该 Agent 的三个变量名称。不要把密钥写进提示词或命令。给协调者和 TencentQuery 的职责描述加入 CLS 日志集/主题元数据查询。
+2. 在 Agent 页编辑 TencentQuery，在「诊断执行」里勾选「为此 Agent 新建执行配置」并允许联网（或在工具页分配已有配置）。保存的三个变量会按同名自动注入，无需再逐个引用；注意不要填进「服务端环境变量」，那一类读取的是服务进程自己的环境变量。不要把密钥写进提示词或命令。给协调者和 TencentQuery 的职责描述加入 CLS 日志集/主题元数据查询。
 3. 预装 CLI 到隔离环境可读的位置。用户 Python 安装依赖真实 HOME，不能直接用于隔离执行；可用已有安装准备独立运行目录：
 
 ```sh
@@ -46,14 +46,10 @@ execution:
       agents: [TencentQuery]
       network: true
       tool_dir: /absolute/path/tencent-cli
-      agent_env:
-        TENCENTCLOUD_SECRET_ID: TENCENTCLOUD_SECRET_ID
-        TENCENTCLOUD_SECRET_KEY: TENCENTCLOUD_SECRET_KEY
-        TENCENTCLOUD_REGION: TENCENTCLOUD_REGION
       write_approval: true
 ```
 
-`agent_env` 的值是当前 Agent 的变量名称；`env` 则引用服务端进程环境变量名称。不会自动继承其他 Agent 的变量或宿主凭据。CLS Describe/List/SearchLog 与 CLI 帮助有内置只读规则；其他产品需要在对应 profile 明确添加规则，资源访问权限仍由 IAM 限制。
+分配的 Agent 在变量页保存的变量默认按同名注入（`inherit_agent_vars` 不写即开启；审批专用的 `write_agent_env` 来源、会改变执行环境的变量名除外）。只有需要改名时才写 `agent_env`，它的值是当前 Agent 的变量名称；`env` 则引用服务端进程环境变量名称。不会自动继承其他 Agent 的变量或宿主凭据。CLS Describe/List/SearchLog 与 CLI 帮助有内置只读规则；其他产品需要在对应 profile 明确添加规则，资源访问权限仍由 IAM 限制。
 
 ## 自主执行与审批
 

@@ -51,7 +51,14 @@ type Profile struct {
 	// (Observation.Unconfined records that it happened). Default false — an
 	// unset profile keeps failing closed exactly as before this existed.
 	AllowUnconfinedWithApproval bool `json:"allow_unconfined_with_approval,omitempty" yaml:"allow_unconfined_with_approval,omitempty"`
+	// InheritAgentVars injects each assigned agent's saved variables under
+	// their own names, so the common case needs no AgentEnv at all. Unset
+	// means on; false keeps only the explicit mappings.
+	InheritAgentVars *bool `json:"inherit_agent_vars,omitempty" yaml:"inherit_agent_vars,omitempty"`
 }
+
+// InheritsAgentVars reports whether the profile adds same-name agent variables.
+func (p Profile) InheritsAgentVars() bool { return p.InheritAgentVars == nil || *p.InheritAgentVars }
 
 type Config struct {
 	Enabled     bool      `json:"enabled" yaml:"enabled,omitempty"`
@@ -73,6 +80,11 @@ func (c Config) WithAgentVars(vars map[string]map[string]string) Config {
 			if c.agentVars[agent] == nil {
 				c.agentVars[agent] = make(map[string]string)
 			}
+			if p.InheritsAgentVars() {
+				for source, value := range vars[agent] {
+					c.agentVars[agent][source] = value
+				}
+			}
 			for _, mapping := range []map[string]string{p.AgentEnv, p.WriteAgentEnv} {
 				for _, source := range mapping {
 					if value, ok := vars[agent][source]; ok {
@@ -83,6 +95,33 @@ func (c Config) WithAgentVars(vars map[string]map[string]string) Config {
 		}
 	}
 	return c
+}
+
+// inheritedAgentEnv is the same-name mapping an inheriting profile adds for
+// agent. It skips what must not or need not be injected this way: sources
+// reserved for approved runs, names that would change the execution
+// environment, empty values, and anything the profile already maps
+// explicitly, as a child variable or as a source.
+func (c Config) inheritedAgentEnv(p Profile, agent string) map[string]string {
+	out := map[string]string{}
+	if !p.InheritsAgentVars() {
+		return out
+	}
+	reserved := c.ApprovalVarsFor(agent)
+	explicit := map[string]bool{}
+	for _, mapping := range []map[string]string{p.Env, p.AgentEnv} {
+		for key, source := range mapping {
+			explicit[key] = true
+			explicit[source] = true
+		}
+	}
+	for name, value := range c.agentVars[agent] {
+		if value == "" || reserved[name] || explicit[name] || !envName.MatchString(name) || dangerousEnv(name) {
+			continue
+		}
+		out[name] = name
+	}
+	return out
 }
 
 var identifier = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_-]*$`)

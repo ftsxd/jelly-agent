@@ -24,11 +24,12 @@ default_provider: deepseek
 #         TENCENTCLOUD_SECRET_KEY: TENCENT_RO_SECRET_KEY
 #         TENCENTCLOUD_REGION: TENCENT_RO_REGION
 #         # TENCENTCLOUD_TOKEN: TENCENT_RO_TOKEN  # 使用 STS 时才需要
-#       # 如果凭据保存在 Agent 变量页，以 agent_env 代替上面的 env：
+#       # 凭据保存在 Agent 变量页时不需要上面的 env：分配的 Agent 保存的变量
+#       # 默认按同名注入（审批专用变量除外）。只有改名时才写 agent_env：
 #       # agent_env:
-#       #   TENCENTCLOUD_SECRET_ID: TENCENTCLOUD_SECRET_ID
-#       #   TENCENTCLOUD_SECRET_KEY: TENCENTCLOUD_SECRET_KEY
-#       #   TENCENTCLOUD_REGION: TENCENTCLOUD_REGION
+#       #   TOKEN: SAVED_VARIABLE_NAME
+#       # 只要显式映射、不要自动注入时：
+#       # inherit_agent_vars: false
 #       # 用户级 Python CLI 不能靠真实 HOME 加载依赖。系统沙箱可指定独立目录：
 #       # tool_dir: /opt/sre-tools/tencent-cli  # 预装 bin/lib，不挂载 HOME
 #       # 最后兜底：主机上 docker、bubblewrap、Landlock 都不可用时，默认直接拒绝执行。

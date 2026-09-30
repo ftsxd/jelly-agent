@@ -2,7 +2,7 @@
 import { onMounted, reactive, ref, computed } from 'vue'
 import Icon from '../components/Icon.vue'
 import { api } from '../api'
-import { agentRecord } from '../agents'
+import { agentRecord, assignExecution } from '../agents'
 
 const agents = ref([])
 const defaultAgent = ref('')
@@ -36,7 +36,13 @@ const form = reactive({
   varKeys: [],
   varsText: '',
   savingVars: false,
+  exec_profiles: [],
+  exec_create: false,
+  exec_network: true,
 })
+// The execution config as stored, so assigning from this page writes back
+// exactly what the Tools page would. null when it could not be loaded.
+const execConfig = ref(null)
 
 // other agents (exclude the one being edited) — candidate sub-agents
 const otherAgents = computed(() => agents.value.filter((a) => a.name !== form.name))
@@ -49,7 +55,8 @@ async function load() {
   loading.value = true
   error.value = ''
   try {
-    const [ag, pv, mc, sk] = await Promise.all([api.agents(), api.providers(), api.mcp(), api.skills()])
+    const [ag, pv, mc, sk, ex] = await Promise.all([api.agents(), api.providers(), api.mcp(), api.skills(), api.execution().catch(() => null)])
+    execConfig.value = ex?.config || null
     agents.value = ag.agents || []
     defaultAgent.value = ag.default_agent || ''
     agentVarKeys.value = ag.var_keys || {}
@@ -82,6 +89,9 @@ function startNew() {
     varKeys: [],
     varsText: '',
     savingVars: false,
+    exec_profiles: [],
+    exec_create: false,
+    exec_network: true,
   })
 }
 
@@ -105,7 +115,21 @@ function startEdit(a) {
     // prefill existing keys with blank values (blank = keep server-side)
     varsText: (agentVarKeys.value[a.name] || []).map((k) => `${k}=`).join('\n'),
     savingVars: false,
+    exec_profiles: [...(executionProfiles.value[a.name] || [])],
+    exec_create: false,
+    exec_network: true,
   })
+}
+
+const execProfiles = computed(() => execConfig.value?.profiles || [])
+// A profile needs at least one agent; the last one cannot leave it from here.
+const soleAssignee = (p) => p.agents.length === 1 && p.agents[0] === form.name && editing.value !== 'new'
+
+async function saveExecution(name) {
+  if (!execConfig.value) return
+  const cfg = assignExecution(execConfig.value, name, executionProfiles.value[name] || [], form.exec_profiles,
+    form.exec_create ? { network: form.exec_network } : null)
+  if (cfg) await api.setExecution(cfg)
 }
 
 function cancel() {
@@ -130,6 +154,7 @@ async function submit() {
       enabled: form.enabled,
       make_default: form.make_default,
     })
+    await saveExecution(form.name.trim())
     notice.value = `已保存到 ${res.saved_to}（已热重载）`
     editing.value = false
     await load()
@@ -306,6 +331,28 @@ async function remove(a) {
             </label>
           </div>
 
+          <div v-if="execConfig" class="field span2">
+            <span class="label">诊断执行（shell_exec：用官方 CLI 查询，凭据用下方保存的变量）</span>
+            <div v-if="execProfiles.length" class="chips">
+              <label v-for="p in execProfiles" :key="p.name" class="chip" :title="soleAssignee(p) ? '只分配给了这个 Agent；要停用请到「工具」页删除该配置' : ''">
+                <input type="checkbox" :value="p.name" v-model="form.exec_profiles" :disabled="soleAssignee(p)" />
+                <span>{{ p.name }}</span>
+                <span v-if="p.network" class="muted">· 联网</span>
+                <span v-if="p.write_approval" class="muted">· 可审批</span>
+              </label>
+            </div>
+            <label class="check">
+              <input type="checkbox" v-model="form.exec_create" />
+              <span>为此 Agent 新建执行配置</span>
+            </label>
+            <label v-if="form.exec_create" class="check sub">
+              <input type="checkbox" v-model="form.exec_network" />
+              <span>允许联网（调用云 API、K8s API 需要）</span>
+            </label>
+            <span v-if="!execConfig.enabled && (form.exec_create || form.exec_profiles.length)" class="field-help">保存后会同时启用通用执行器。</span>
+            <span class="field-help">保存的变量会按同名自动注入。审批、命令规则等细节在 <RouterLink to="/tools">工具</RouterLink> 页调整。</span>
+          </div>
+
           <label class="check">
             <input type="checkbox" v-model="form.enabled" />
             <span>启用</span>
@@ -318,7 +365,7 @@ async function remove(a) {
 
         <!-- variables (existing agents only; saved separately from the form) -->
         <div v-if="editing !== 'new'" class="vars-box">
-          <div class="vars-head">变量（密钥脱敏，供技能脚本和已明确映射的执行配置使用；值不显示、不进对话）</div>
+          <div class="vars-head">变量（密钥脱敏，供技能脚本和分配给该 Agent 的执行配置使用；值不显示、不进对话）</div>
           <div class="vars-note">脚本输出里出现的值会被替换成 <code>${变量名}</code> 再返回，所以脚本打印了也不会进对话；4 个字符以内的值不做替换（太短，会误伤正常输出）。</div>
           <div v-if="form.varKeys.length" class="var-chips">
             <span v-for="k in form.varKeys" :key="k" class="badge mono var-chip">
@@ -470,6 +517,9 @@ async function remove(a) {
 .label {
   font-size: 12px;
   color: var(--text-dim);
+}
+.check.sub {
+  margin-left: var(--sp-5, 24px);
 }
 .chips {
   display: flex;

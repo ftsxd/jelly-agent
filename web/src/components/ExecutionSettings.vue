@@ -1,7 +1,7 @@
 <script setup>
 import { onMounted, ref } from 'vue'
 import { api } from '../api'
-import { profileIssues, unreferencedAgentVars } from '../execution'
+import { fromRows, inheritedVars, profileIssues, toRows, unreferencedAgentVars } from '../execution'
 
 const emit = defineEmits(['saved'])
 const loading = ref(true), saving = ref(false), checking = ref(false)
@@ -27,49 +27,38 @@ async function load() {
       timeout_sec: c.timeout_sec || data.defaults.timeout_sec,
       max_output_kb: c.max_output_kb || data.defaults.max_output_kb,
       profiles: (c.profiles || []).map(p => ({ ...p, agents: [...p.agents], network: !!p.network,
-        variables: Object.entries(p.env || {}).map(([key, source]) => ({ key, source })),
-        writeVariables: Object.entries(p.write_env || {}).map(([key, source]) => ({ key, source })),
-        agentVariables: Object.entries(p.agent_env || {}).map(([key, source]) => ({ key, source })),
-        writeAgentVariables: Object.entries(p.write_agent_env || {}).map(([key, source]) => ({ key, source })),
+        inherit: p.inherit_agent_vars !== false, mappings: toRows(p),
         rules: (p.rules || []).map(r => ({ ...r, pattern: [...r.pattern] })) })),
     }
     probe.value.profile = config.value.profiles[0]?.name || ''
   } catch (e) { error.value = e.message } finally { loading.value = false }
 }
 function addProfile() {
-  config.value.profiles.push({ name: '', agents: [], network: false, variables: [], writeVariables: [], agentVariables: [], writeAgentVariables: [], rules: [] })
+  config.value.profiles.push({ name: '', agents: [], network: false, inherit: true, mappings: [], rules: [] })
 }
 const savedKeys = (p) => [...new Set(p.agents.flatMap(a => varKeys.value[a] || []))].sort()
 const unreferenced = (p) => unreferencedAgentVars(p, varKeys.value)
+const inherited = (p) => inheritedVars(p, varKeys.value)
 const issues = (p) => profileIssues(p, varKeys.value)
+const addMapping = (p) => p.mappings.push({ key: '', from: 'agent', source: '', when: 'always' })
 // Open the advanced section only when something in it is already set, so a
 // configured value is never hidden behind a closed fold.
-const hasAdvanced = (p) => !!(p.tool_dir || p.kubeconfig_env || p.variables.length || p.rules.length || p.allow_unconfined_with_approval ||
-  (p.write_approval && (p.writeVariables.length || p.writeAgentVariables.length || p.write_kubeconfig_env)))
+const hasAdvanced = (p) => !!(p.tool_dir || p.kubeconfig_env || p.mappings.length || p.rules.length || p.allow_unconfined_with_approval ||
+  (p.write_approval && p.write_kubeconfig_env))
 // Same-name references for every saved variable not yet mapped — the common
 // case, which otherwise means typing each name twice.
 function referenceSaved(p) {
-  for (const key of unreferencedAgentVars(p, varKeys.value)) p.agentVariables.push({ key, source: key })
-}
-function sources(variables) {
-  const env = {}
-  for (const v of variables) {
-    const key = v.key.trim(), source = v.source.trim()
-    if (!key || !source || key in env) throw new Error('变量名和来源名称必须填写，变量名不能重复')
-    env[key] = source
-  }
-  return env
+  for (const key of unreferencedAgentVars(p, varKeys.value)) p.mappings.push({ key, from: 'agent', source: key, when: 'always' })
 }
 async function save() {
   if (saving.value) return
   saving.value = true; error.value = ''; notice.value = ''; checked.value = null
   try {
     const profiles = config.value.profiles.map(p => {
-      const env = sources(p.variables)
-      return { name: p.name.trim(), agents: p.agents, network: p.network, env,
-        ...(p.agentVariables.length ? { agent_env: sources(p.agentVariables) } : {}),
+      return { name: p.name.trim(), agents: p.agents, network: p.network, ...fromRows(p.mappings, p.write_approval),
+        ...(p.inherit === false ? { inherit_agent_vars: false } : {}),
         ...(config.value.backend === 'os' && p.tool_dir ? { tool_dir: p.tool_dir.trim() } : {}), ...(p.kubeconfig_env ? { kubeconfig_env: p.kubeconfig_env.trim() } : {}),
-        ...(p.write_approval ? { write_approval: true, write_env: sources(p.writeVariables), ...(p.writeAgentVariables.length ? { write_agent_env: sources(p.writeAgentVariables) } : {}), ...(p.write_kubeconfig_env ? { write_kubeconfig_env: p.write_kubeconfig_env.trim() } : {}) } : {}),
+        ...(p.write_approval ? { write_approval: true, ...(p.write_kubeconfig_env ? { write_kubeconfig_env: p.write_kubeconfig_env.trim() } : {}) } : {}),
         ...(p.allow_unconfined_with_approval ? { allow_unconfined_with_approval: true } : {}),
         rules: p.rules.map(r => ({ name: r.name.trim(), pattern: r.pattern, decision: r.decision, reason: r.reason || '' })) }
     })
@@ -119,17 +108,13 @@ async function check() {
           <p v-if="p.write_approval" class="warning">用户将在对话中看到完整命令并确认。审批十分钟失效；命令、执行配置改变后需重新申请。禁止规则无法通过审批放行。</p>
 
           <fieldset class="group">
-            <legend>诊断时注入的 Agent 变量</legend>
-            <p class="muted detail">从分配的 Agent 在「Agent」页保存的变量取值，每次执行都注入。密钥值不会发送给模型。</p>
-            <datalist :id="'agent-vars-' + i"><option v-for="k in savedKeys(p)" :key="k" :value="k" /></datalist>
-            <div v-for="(v, j) in p.agentVariables" :key="'av' + j" class="variable-row">
-              <label>子进程变量<input v-model="v.key" class="input mono" placeholder="TENCENTCLOUD_SECRET_KEY" required /></label>
-              <label>该 Agent 保存的变量名称<input v-model="v.source" :list="'agent-vars-' + i" class="input mono" placeholder="TENCENTCLOUD_SECRET_KEY" required /></label>
-              <button class="btn" type="button" @click="p.agentVariables.splice(j, 1)">移除 Agent 变量</button>
-            </div>
-            <div class="actions">
+            <legend>Agent 变量</legend>
+            <label class="check"><input v-model="p.inherit" type="checkbox" /> 自动注入分配的 Agent 在「Agent」页保存的变量（同名）</label>
+            <p v-if="p.inherit && inherited(p).length" class="muted detail">每次执行注入：<span class="mono">{{ inherited(p).join('、') }}</span>。审批专用的变量不在其中；密钥值不会发送给模型。</p>
+            <p v-else-if="p.inherit" class="muted detail">分配的 Agent 还没有保存变量。到「Agent」页编辑该 Agent，在「变量」里保存凭据后即可自动注入。</p>
+            <div v-else class="actions">
+              <span class="muted detail">已关闭自动注入，只注入「高级」里显式映射的变量。</span>
               <button v-if="unreferenced(p).length" class="btn" type="button" @click="referenceSaved(p)">引用已保存的变量（{{ unreferenced(p).join('、') }}）</button>
-              <button class="btn" type="button" @click="p.agentVariables.push({ key: '', source: '' })">引用 Agent 变量</button>
             </div>
           </fieldset>
           <ul v-if="issues(p).length" class="issues" role="note">
@@ -137,38 +122,29 @@ async function check() {
           </ul>
 
           <details class="advanced" :open="hasAdvanced(p)">
-            <summary>高级：服务端环境变量、审批凭据、Kubeconfig、CLI 目录、命令规则</summary>
+            <summary>高级：变量映射、Kubeconfig、CLI 目录、无沙箱执行、命令规则</summary>
             <label v-if="config.backend === 'os'">独立 CLI 运行目录<input v-model="p.tool_dir" class="input mono" placeholder="管理员预装 CLI 的目录，包含 bin 和 lib（可选）" /></label>
 
             <fieldset class="group">
-              <legend>服务端环境变量（诊断时注入）</legend>
-              <p class="muted detail">读取 jelly-agent 服务进程自己的环境变量（如容器 environment），不读 Agent 页保存的变量。</p>
-              <div v-for="(v, j) in p.variables" :key="j" class="variable-row">
-                <label>子进程变量<input v-model="v.key" class="input mono" placeholder="TENCENTCLOUD_SECRET_KEY" required /></label>
-                <label>服务端变量名称<input v-model="v.source" class="input mono" placeholder="TENCENT_RO_SECRET_KEY" required /></label>
-                <button class="btn" type="button" @click="p.variables.splice(j, 1)">移除变量</button>
+              <legend>变量映射</legend>
+              <p class="muted detail">只在需要改名、读取服务进程环境变量，或只在审批后注入写凭据时才用。「服务端环境变量」读的是 jelly-agent 服务进程自己的环境变量（如容器 environment），不读 Agent 页保存的变量。</p>
+              <datalist :id="'agent-vars-' + i"><option v-for="k in savedKeys(p)" :key="k" :value="k" /></datalist>
+              <div v-for="(m, j) in p.mappings" :key="j" class="mapping-row">
+                <label>子进程变量<input v-model="m.key" class="input mono" placeholder="TENCENTCLOUD_SECRET_KEY" required /></label>
+                <label>来源<select v-model="m.from" class="input"><option value="agent">Agent 变量</option><option value="server">服务端环境变量</option></select></label>
+                <label>来源名称<input v-model="m.source" :list="m.from === 'agent' ? 'agent-vars-' + i : null" class="input mono" required /></label>
+                <label>时机<select v-model="m.when" class="input"><option value="always">每次执行</option><option value="approved" :disabled="!p.write_approval">仅审批后</option></select></label>
+                <button class="btn" type="button" @click="p.mappings.splice(j, 1)">移除</button>
+                <p v-if="m.when === 'approved' && !p.write_approval" class="warning span">未启用写操作审批，这一行保存时会被移除。</p>
               </div>
-              <button class="btn" type="button" @click="p.variables.push({ key: '', source: '' })">添加变量映射</button>
-              <label>Kubeconfig 服务端变量名称<input v-model="p.kubeconfig_env" class="input mono" placeholder="SRE_READONLY_KUBECONFIG（可选）" /></label>
-              <p class="muted detail">此变量应包含只读 kubeconfig 正文。执行时写入私有目录并在结束后删除，不挂载宿主机凭据文件。</p>
+              <button class="btn" type="button" @click="addMapping(p)">添加变量映射</button>
             </fieldset>
 
-            <fieldset v-if="p.write_approval" class="group write-credentials">
-              <legend>审批后追加的写凭据</legend>
-              <p class="muted detail">只在命令获批后注入，覆盖同名诊断变量，执行结束后清理；留空则审批后沿用诊断凭据。审批专用 Agent 变量不会注入技能脚本，也不能同时用于诊断。</p>
-              <div v-for="(v, j) in p.writeAgentVariables" :key="'wa' + j" class="variable-row">
-                <label>审批子进程变量<input v-model="v.key" class="input mono" required /></label>
-                <label>该 Agent 保存的写变量名称<input v-model="v.source" :list="'agent-vars-' + i" class="input mono" required /></label>
-                <button class="btn" type="button" @click="p.writeAgentVariables.splice(j, 1)">移除审批 Agent 变量</button>
-              </div>
-              <button class="btn" type="button" @click="p.writeAgentVariables.push({ key: '', source: '' })">引用 Agent 写变量</button>
-              <div v-for="(v, j) in p.writeVariables" :key="j" class="variable-row">
-                <label>审批子进程变量<input v-model="v.key" class="input mono" placeholder="TENCENTCLOUD_SECRET_KEY" required /></label>
-                <label>审批服务端变量名称<input v-model="v.source" class="input mono" placeholder="TENCENT_WRITE_SECRET_KEY" required /></label>
-                <button class="btn" type="button" @click="p.writeVariables.splice(j, 1)">移除审批变量</button>
-              </div>
-              <button class="btn" type="button" @click="p.writeVariables.push({ key: '', source: '' })">添加审批服务端变量</button>
-              <label>审批执行 Kubeconfig 变量名称<input v-model="p.write_kubeconfig_env" class="input mono" placeholder="SRE_WRITE_KUBECONFIG（可选）" /></label>
+            <fieldset class="group">
+              <legend>Kubeconfig</legend>
+              <label>Kubeconfig 服务端变量名称<input v-model="p.kubeconfig_env" class="input mono" placeholder="SRE_READONLY_KUBECONFIG（可选）" /></label>
+              <label v-if="p.write_approval">审批执行 Kubeconfig 变量名称<input v-model="p.write_kubeconfig_env" class="input mono" placeholder="SRE_WRITE_KUBECONFIG（可选）" /></label>
+              <p class="muted detail">变量内容是 kubeconfig 正文（服务进程环境变量）。执行时写入私有目录并在结束后删除，不挂载宿主机凭据文件。</p>
             </fieldset>
 
             <label class="check"><input v-model="p.allow_unconfined_with_approval" type="checkbox" /> 沙箱不可用时允许经审批后无隔离执行</label>
@@ -236,7 +212,9 @@ fieldset { border: 0; padding: 0; } legend { font-size: 12px; margin-bottom: var
 .group { display: grid; gap: var(--sp-2); padding: var(--sp-3) 0 0; border-top: 1px solid var(--border); }
 .advanced { display: grid; gap: var(--sp-3); }
 .advanced[open] > summary { margin-bottom: var(--sp-3); }
+.mapping-row { display: grid; grid-template-columns: 1.2fr 1fr 1.2fr 0.9fr auto; gap: var(--sp-2); align-items: end; }
+.mapping-row .span { grid-column: 1 / -1; }
 .issues { margin: 0; padding-left: 18px; display: grid; gap: var(--sp-1); }
 .result { margin-top: var(--sp-3); font-size: 13px; } pre { overflow: auto; font-size: 12px; }
-@media (max-width: 640px) { .limits, .variable-row { grid-template-columns: 1fr; } }
+@media (max-width: 640px) { .limits, .variable-row, .mapping-row { grid-template-columns: 1fr; } }
 </style>
