@@ -155,13 +155,18 @@ func (r Runtime) Check(agent string, req Request) Evaluation {
 		if p.Name == req.Profile {
 			ev := Evaluate(req.Command, p.Rules)
 			// A Forbidden command stays forbidden regardless of sandbox
-			// availability; an already-Prompt decision (from a rule) keeps its
-			// own reason — this only escalates the plain Allow case, and only
-			// for a profile that opted in.
-			if p.AllowUnconfinedWithApproval && ev.Decision == Allow {
+			// availability. For a profile that opted in, a missing sandbox
+			// escalates Allow to Prompt, and a command that already needed
+			// approval says so too: an approver must know the run will be
+			// unconfined, not discover it in the audit afterwards.
+			if p.AllowUnconfinedWithApproval && ev.Decision != Forbidden {
 				if err := checkStrict(r.policy(p, req)); err != nil {
-					ev.Decision = Prompt
-					ev.Reason = "沙箱隔离不可用，需人工批准后以无隔离方式执行：" + err.Error()
+					if ev.Decision == Allow {
+						ev.Decision = Prompt
+						ev.Reason = "沙箱隔离不可用，需人工批准后以无隔离方式执行：" + err.Error()
+					} else {
+						ev.Reason += "；沙箱隔离不可用，获批后将以无隔离方式执行：" + err.Error()
+					}
 				}
 			}
 			return ev

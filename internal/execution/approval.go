@@ -129,6 +129,22 @@ func configHash(c Config) string {
 			h.Write([]byte(value))
 		}
 	}
+	// Bind whether each escape-hatch profile is confined right now. A grant
+	// given while the sandbox worked must not run unconfined after it breaks,
+	// nor one given for an unconfined run go ahead once isolation returns —
+	// either way the approver agreed to something else, so it is invalidated.
+	for _, p := range c.Profiles {
+		if !p.AllowUnconfinedWithApproval {
+			continue
+		}
+		confined := byte(0)
+		if checkStrict(Runtime{Config: c}.policy(p, Request{})) == nil {
+			confined = 1
+		}
+		h.Write([]byte{0})
+		h.Write([]byte("sandbox:" + p.Name))
+		h.Write([]byte{0, confined})
+	}
 	for _, agent := range sortedKeys(c.agentVars) {
 		for _, source := range sortedKeys(c.agentVars[agent]) {
 			h.Write([]byte{0})

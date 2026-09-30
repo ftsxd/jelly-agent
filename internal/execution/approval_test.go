@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -351,5 +352,70 @@ func TestUnconfinedReadApprovalKeepsReadCredentials(t *testing.T) {
 		if !out.Executed || !out.Unconfined || out.WriteCredentials != test.write || got[i] != test.want {
 			t.Fatalf("%s: credential %q, observation %+v", test.command, got[i], out)
 		}
+	}
+}
+
+// A command that already needed approval must tell the approver it will run
+// unconfined, and a grant must not survive the sandbox changing under it.
+func TestUnconfinedRunsOnlyWhatTheApproverWasShown(t *testing.T) {
+	restore := checkStrict
+	t.Cleanup(func() { checkStrict = restore })
+	sandboxOK := true
+	checkStrict = func(sandbox.Policy) error {
+		if sandboxOK {
+			return nil
+		}
+		return fmt.Errorf("no sandbox on this host")
+	}
+	s := approvalStore(t)
+	c := approvalConfig()
+	c.Profiles[0].AllowUnconfinedWithApproval = true
+	calls := 0
+	r := Runtime{Config: c, Approvals: &s, run: func(context.Context, sandbox.Policy, sandbox.Spec) (sandbox.Result, error) {
+		calls++
+		return sandbox.Result{Started: true}, nil
+	}}
+	req := approvalRequest() // kubectl scale: needs approval on its own
+
+	// Approved while sandboxed, then the sandbox breaks: the grant is void.
+	a := newApproval(t, s, c, req)
+	if strings.Contains(a.Reason, "无隔离") {
+		t.Fatalf("sandboxed approval mentions unconfined: %q", a.Reason)
+	}
+	if err := s.Resolve(t.Context(), a.ID, "s", "admin", true, c); err != nil {
+		t.Fatal(err)
+	}
+	sandboxOK = false
+	if out := r.ExecuteApproved(WithApproval(t.Context(), a.ID), "ops", "s", "call", req); out.Executed || calls != 0 {
+		t.Fatalf("approval given for a sandboxed run executed unconfined: %+v", out)
+	}
+
+	// Asked while unconfined: the approver is told, and the run is unconfined.
+	b, err := s.Create(WithOrigin(t.Context(), "coordinator", "test"), c, "ops", "s", "round", "call-2", req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(b.Reason, "获批后将以无隔离方式执行") {
+		t.Fatalf("approver not told the run is unconfined: %q", b.Reason)
+	}
+	if err := s.Resolve(t.Context(), b.ID, "s", "admin", true, c); err != nil {
+		t.Fatal(err)
+	}
+	out := r.ExecuteApproved(WithApproval(t.Context(), b.ID), "ops", "s", "call-2", req)
+	if !out.Executed || !out.Unconfined || calls != 1 {
+		t.Fatalf("expected the disclosed unconfined run: %+v", out)
+	}
+
+	// And the reverse: approved for an unconfined run, isolation comes back.
+	d, err := s.Create(WithOrigin(t.Context(), "coordinator", "test"), c, "ops", "s", "round", "call-3", req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Resolve(t.Context(), d.ID, "s", "admin", true, c); err != nil {
+		t.Fatal(err)
+	}
+	sandboxOK = true
+	if out := r.ExecuteApproved(WithApproval(t.Context(), d.ID), "ops", "s", "call-3", req); out.Executed || calls != 1 {
+		t.Fatalf("grant for an unconfined run survived a sandbox change: %+v", out)
 	}
 }

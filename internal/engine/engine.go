@@ -1285,31 +1285,45 @@ func (e *Engine) ExecutionConfig() execution.Config {
 
 // ShellExecToolFor constructs only tools explicitly assigned to this node.
 func (e *Engine) ShellExecToolFor(agent string) (adktool.Tool, error) {
+	runtime, ok, err := e.executionRuntime(agent)
+	if !ok || err != nil {
+		return nil, err
+	}
+	return jellytool.NewShellExecTool(runtime, agent)
+}
+
+// executionRuntime wires the executor for one agent; ok is false when no
+// profile is assigned to it.
+func (e *Engine) executionRuntime(agent string) (execution.Runtime, bool, error) {
 	if len(e.cfg.Execution.ProfilesFor(agent)) == 0 {
-		return nil, nil
+		return execution.Runtime{}, false, nil
 	}
 	if err := e.cfg.Execution.Validate(); err != nil {
-		return nil, err
+		return execution.Runtime{}, false, err
 	}
 	runtime := execution.Runtime{Config: e.ExecutionConfig()}
 	if e.cfg.Execution.Backend == "docker" {
 		journal, err := e.ExecutionJournal()
 		if err != nil {
-			return nil, err
+			return execution.Runtime{}, false, err
 		}
 		runtime.Journal = journal
 	}
+	// The approval store is needed by every profile that can turn a Prompt
+	// into a confirmation — write approval, and the unconfined escape hatch.
+	// Wiring it for write approval alone left the escape hatch reporting
+	// approval_required with no approval to confirm.
 	for _, p := range e.cfg.Execution.ProfilesFor(agent) {
-		if p.WriteApproval {
+		if runtime.ApprovalEnabled(agent, p.Name) {
 			db, err := e.StateDB()
 			if err != nil {
-				return nil, err
+				return execution.Runtime{}, false, err
 			}
 			runtime.Approvals = &execution.Approvals{DB: db}
 			break
 		}
 	}
-	return jellytool.NewShellExecTool(runtime, agent)
+	return runtime, true, nil
 }
 
 func (e *Engine) ExecutionJournal() (*execution.Journal, error) {

@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -44,5 +45,33 @@ func TestApprovalOnlyAgentVariablesNeverReachSkillScripts(t *testing.T) {
 		if vars["READ"] != "read-value" || vars["WRITE"] != "" {
 			t.Fatal("write source reached script", enabled)
 		}
+	}
+}
+
+// Every profile that can ask for confirmation needs the approval store; the
+// unconfined escape hatch alone used to get none and could never be approved.
+func TestApprovalStoreWiredForEveryApprovingProfile(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		profile execution.Profile
+		want    bool
+	}{
+		{"read only", execution.Profile{Name: "p"}, false},
+		{"write approval", execution.Profile{Name: "p", WriteApproval: true}, true},
+		{"unconfined only", execution.Profile{Name: "p", AllowUnconfinedWithApproval: true}, true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			test.profile.Agents = []string{"expert"}
+			e := New(&config.Config{Execution: execution.Config{Enabled: true, Profiles: []execution.Profile{test.profile}}})
+			e.SetStateRef(filepath.Join(t.TempDir(), "state.db"))
+			t.Cleanup(e.Close)
+			runtime, ok, err := e.executionRuntime("expert")
+			if err != nil || !ok {
+				t.Fatal(ok, err)
+			}
+			if got := runtime.Approvals != nil; got != test.want {
+				t.Fatalf("approval store wired = %v, want %v", got, test.want)
+			}
+		})
 	}
 }
