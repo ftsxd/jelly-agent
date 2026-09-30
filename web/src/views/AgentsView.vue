@@ -2,6 +2,7 @@
 import { onMounted, reactive, ref, computed } from 'vue'
 import Icon from '../components/Icon.vue'
 import { api } from '../api'
+import { agentRecord } from '../agents'
 
 const agents = ref([])
 const defaultAgent = ref('')
@@ -186,44 +187,17 @@ function parseNames(text) {
   return [...new Set((text || '').split(/[\n,]/).map((v) => v.trim()).filter(Boolean))]
 }
 
-async function toggle(a) {
+async function saveRecord(a, patch) {
   try {
-    await api.saveAgent({
-      name: a.name,
-      description: a.description || '',
-      provider: a.provider || '',
-      instruction: a.instruction || '',
-      mcp: a.mcp || [],
-      required_tools: a.required_tools || [],
-      required_suites: a.required_suites || [],
-      sub_agents: a.sub_agents || [],
-      enabled: !a.enabled,
-    })
+    await api.saveAgent(agentRecord(a, patch))
     await load()
   } catch (e) {
     error.value = e.message
   }
 }
 
-async function makeDefault(a) {
-  try {
-    await api.saveAgent({
-      name: a.name,
-      description: a.description || '',
-      provider: a.provider || '',
-      instruction: a.instruction || '',
-      mcp: a.mcp || [],
-      required_tools: a.required_tools || [],
-      required_suites: a.required_suites || [],
-      sub_agents: a.sub_agents || [],
-      enabled: a.enabled,
-      make_default: true,
-    })
-    await load()
-  } catch (e) {
-    error.value = e.message
-  }
-}
+const toggle = (a) => saveRecord(a, { enabled: !a.enabled })
+const makeDefault = (a) => saveRecord(a, { make_default: true })
 
 async function remove(a) {
   if (!confirm(`确认删除 Agent「${a.name}」？它会从其它 Agent 的子列表中一并移除。`)) return

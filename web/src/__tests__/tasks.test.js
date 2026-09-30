@@ -42,7 +42,7 @@ describe('statusOf', () => {
 
 describe('typeLabel', () => {
   it('names the four types and defaults sanely', () => {
-    expect(typeLabel('monitor')).toBe('监控查询')
+    expect(typeLabel('monitor')).toBe('指标查询')
     expect(typeLabel('log')).toBe('日志分析')
     expect(typeLabel('inspection')).toBe('日常巡检')
     expect(typeLabel('other')).toBe('其他任务')

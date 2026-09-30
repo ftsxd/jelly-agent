@@ -300,7 +300,7 @@ function continueChat(id) {
       <div class="topbar-r">
         <select v-model="filterType" class="input sel" aria-label="按类型筛选" @change="load">
           <option value="">全部类型</option>
-          <option value="monitor">监控查询</option>
+          <option value="monitor">指标查询</option>
           <option value="log">日志分析</option>
           <option value="inspection">日常巡检</option>
           <option value="other">其他任务</option>

@@ -436,7 +436,7 @@ function handleFrame(live, ev) {
         <div v-else>
           <p style="margin: 0 0 4px">尚未配置 Provider</p>
           <p class="muted" style="margin: 0; font-size: 13px">
-            前往 <RouterLink to="/config">配置</RouterLink> 页新建一个 OpenAI 兼容端点即可开始对话
+            前往 <RouterLink to="/config">模型 Provider</RouterLink> 页新建一个 OpenAI 兼容端点即可开始对话
           </p>
         </div>
       </div>

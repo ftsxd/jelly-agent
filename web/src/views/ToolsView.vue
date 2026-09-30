@@ -103,8 +103,9 @@ async function runFetch() {
       </section>
 
       <section class="col">
-        <h2 class="section-title">测试台</h2>
+        <h2 class="section-title">诊断执行</h2>
         <ExecutionSettings class="execution-settings" @saved="load" />
+        <h2 class="section-title">测试台</h2>
         <div class="tabs">
           <button class="tab" :class="{ on: tab === 'web_search' }" @click="switchTab('web_search')">web_search</button>
           <button class="tab" :class="{ on: tab === 'fetch_url' }" @click="switchTab('fetch_url')">fetch_url</button>

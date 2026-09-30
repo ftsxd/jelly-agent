@@ -59,6 +59,27 @@ func TestCodeRootsRoundTripAndReportStatus(t *testing.T) {
 	}
 }
 
+// The page edits only the roots; code-project tuning in the same section must
+// survive a save instead of being reset to defaults.
+func TestCodeRootsSaveKeepsCodeProjectTuning(t *testing.T) {
+	s, path := codeServer(t)
+	seed := &config.Config{Files: config.Files{CodeProjects: config.CodeProjects{SyncTimeoutSec: 900, MaxSnapshotMB: 2048, NoRemoteCheck: true}}}
+	if err := config.Save(seed, path); err != nil {
+		t.Fatal(err)
+	}
+	body, _ := json.Marshal(codeInput{Roots: []string{t.TempDir()}})
+	if w := do(t, s, "POST", "/api/files", string(body)); w.Code != http.StatusOK {
+		t.Fatalf("save status = %d: %s", w.Code, w.Body.String())
+	}
+	raw, err := config.LoadRaw(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := raw.Files.CodeProjects; got.SyncTimeoutSec != 900 || got.MaxSnapshotMB != 2048 || !got.NoRemoteCheck || len(raw.Files.Roots) != 1 {
+		t.Fatalf("files section after save: %+v", raw.Files)
+	}
+}
+
 // The one mistake path containment cannot undo: pointing a root AT the agent's
 // own state. Everything in there — API keys, the session database — would then
 // be legitimately readable, and no amount of symlink checking helps.

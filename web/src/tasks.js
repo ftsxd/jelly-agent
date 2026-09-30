@@ -41,7 +41,7 @@ export function statusOf(status) {
 
 /** Task types, matching internal/server/task.go. */
 export const TYPES = {
-  monitor: '监控查询',
+  monitor: '指标查询',
   log: '日志分析',
   inspection: '日常巡检',
   other: '其他任务',

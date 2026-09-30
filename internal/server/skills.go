@@ -242,16 +242,31 @@ func (s *Server) handleSetAllowScripts(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "allow_scripts": s.engineAfterReload().Config().Skills.AllowScripts})
 }
 
-// handleDeleteSkill removes a skill file (idempotent).
+// handleDeleteSkill removes a skill file (idempotent) and its variables —
+// otherwise a later skill reusing the name, say from an imported zip, would
+// inherit the old one's secrets.
 func (s *Server) handleDeleteSkill(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
 	store, err := s.engineFor(r).Skills()
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	if err := store.Delete(r.PathValue("name")); err != nil {
+	if err := store.Delete(name); err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
+	}
+	path, raw, done, err := s.editConfig()
+	defer done()
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if _, ok := raw.SkillVars[name]; ok {
+		delete(raw.SkillVars, name)
+		if err := s.persist(w, raw, path); err != nil {
+			return
+		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }

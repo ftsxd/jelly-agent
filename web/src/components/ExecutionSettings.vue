@@ -1,10 +1,13 @@
 <script setup>
 import { onMounted, ref } from 'vue'
 import { api } from '../api'
+import { profileIssues, unreferencedAgentVars } from '../execution'
 
 const emit = defineEmits(['saved'])
 const loading = ref(true), saving = ref(false), checking = ref(false)
 const error = ref(''), notice = ref(''), info = ref(null), agents = ref(['root'])
+// agent → saved variable NAMES, for picking sources and catching misplacement.
+const varKeys = ref({})
 const config = ref({ enabled: false, backend: 'os', image: '', timeout_sec: 30, max_output_kb: 64, profiles: [] })
 const probe = ref({ agent: 'root', profile: '', purpose: '检查诊断命令是否符合执行规则', command: '' })
 const checked = ref(null)
@@ -17,6 +20,7 @@ async function load() {
     const [data, list] = await Promise.all([api.execution(), api.agents()])
     info.value = data
     agents.value = ['root', ...(list.agents || []).map(a => a.name).filter(n => n !== 'root')]
+    varKeys.value = list.var_keys || {}
     const c = data.config
     config.value = {
       enabled: !!c.enabled, backend: c.backend || 'os', image: c.image || '',
@@ -34,6 +38,18 @@ async function load() {
 }
 function addProfile() {
   config.value.profiles.push({ name: '', agents: [], network: false, variables: [], writeVariables: [], agentVariables: [], writeAgentVariables: [], rules: [] })
+}
+const savedKeys = (p) => [...new Set(p.agents.flatMap(a => varKeys.value[a] || []))].sort()
+const unreferenced = (p) => unreferencedAgentVars(p, varKeys.value)
+const issues = (p) => profileIssues(p, varKeys.value)
+// Open the advanced section only when something in it is already set, so a
+// configured value is never hidden behind a closed fold.
+const hasAdvanced = (p) => !!(p.tool_dir || p.kubeconfig_env || p.variables.length || p.rules.length || p.allow_unconfined_with_approval ||
+  (p.write_approval && (p.writeVariables.length || p.writeAgentVariables.length || p.write_kubeconfig_env)))
+// Same-name references for every saved variable not yet mapped — the common
+// case, which otherwise means typing each name twice.
+function referenceSaved(p) {
+  for (const key of unreferencedAgentVars(p, varKeys.value)) p.agentVariables.push({ key, source: key })
 }
 function sources(variables) {
   const env = {}
@@ -54,6 +70,7 @@ async function save() {
         ...(p.agentVariables.length ? { agent_env: sources(p.agentVariables) } : {}),
         ...(config.value.backend === 'os' && p.tool_dir ? { tool_dir: p.tool_dir.trim() } : {}), ...(p.kubeconfig_env ? { kubeconfig_env: p.kubeconfig_env.trim() } : {}),
         ...(p.write_approval ? { write_approval: true, write_env: sources(p.writeVariables), ...(p.writeAgentVariables.length ? { write_agent_env: sources(p.writeAgentVariables) } : {}), ...(p.write_kubeconfig_env ? { write_kubeconfig_env: p.write_kubeconfig_env.trim() } : {}) } : {}),
+        ...(p.allow_unconfined_with_approval ? { allow_unconfined_with_approval: true } : {}),
         rules: p.rules.map(r => ({ name: r.name.trim(), pattern: r.pattern, decision: r.decision, reason: r.reason || '' })) }
     })
     await api.setExecution({ ...config.value, profiles, timeout_sec: Number(config.value.timeout_sec), max_output_kb: Number(config.value.max_output_kb) })
@@ -77,15 +94,18 @@ async function check() {
     <template v-else-if="info">
       <form @submit.prevent="save">
         <label class="check"><input v-model="config.enabled" type="checkbox" /> 启用通用执行器</label>
-        <div class="limits">
-          <label>隔离后端<select v-model="config.backend" class="input"><option value="os">系统沙箱</option><option value="docker">Docker</option></select></label>
-          <label>超时秒数<input v-model="config.timeout_sec" class="input" type="number" min="1" max="300" required /></label>
-          <label>每路输出上限 KiB<input v-model="config.max_output_kb" class="input" type="number" min="1" max="1024" required /></label>
-        </div>
+        <label class="backend">隔离后端<select v-model="config.backend" class="input"><option value="os">系统沙箱</option><option value="docker">Docker</option></select></label>
         <p class="muted detail">{{ info.os_detail }}。沙箱不可用时停止执行。</p>
         <label v-if="config.backend === 'docker'">诊断工具镜像<input v-model="config.image" class="input mono" placeholder="已预装所需 CLI 的本地镜像" /></label>
         <p v-if="config.backend === 'docker' && !info.docker_available" class="warning">服务端尚未检测到 Docker，执行时不会降级到宿主机。</p>
-        <p v-if="config.backend === 'os'" class="hint">需要崩溃后的资源回收和完整子进程终止保障时，请使用 Docker。系统沙箱无法保证终止脱离进程组的子进程。</p>
+        <details class="advanced">
+          <summary>高级：超时与输出上限</summary>
+          <div class="limits">
+            <label>超时秒数<input v-model="config.timeout_sec" class="input" type="number" min="1" max="300" required /></label>
+            <label>每路输出上限 KiB<input v-model="config.max_output_kb" class="input" type="number" min="1" max="1024" required /></label>
+          </div>
+          <p v-if="config.backend === 'os'" class="hint">需要崩溃后的资源回收和完整子进程终止保障时，请使用 Docker。系统沙箱无法保证终止脱离进程组的子进程。</p>
+        </details>
 
         <div v-for="(p, i) in config.profiles" :key="i" class="profile">
           <div class="heading"><h3>执行配置 {{ i + 1 }}</h3><button class="btn" type="button" @click="config.profiles.splice(i, 1)">移除配置</button></div>
@@ -93,59 +113,84 @@ async function check() {
           <fieldset><legend>分配给 Agent</legend><div class="assignments">
             <label v-for="agent in agents" :key="agent" class="check"><input v-model="p.agents" :value="agent" type="checkbox" /> {{ agent === 'root' ? 'root（单 Agent）' : agent }}</label>
           </div></fieldset>
-          <label v-if="config.backend === 'os'">独立 CLI 运行目录<input v-model="p.tool_dir" class="input mono" placeholder="管理员预装 CLI 的目录，包含 bin 和 lib（可选）" /></label>
           <label class="check"><input v-model="p.network" type="checkbox" /> 允许此配置访问网络</label>
           <p v-if="p.network" class="warning">当前版本不限制目标域名。自动诊断使用只读凭据；生产出口白名单需由部署环境配置。</p>
           <label class="check"><input v-model="p.write_approval" type="checkbox" /> 允许申请写操作审批（每条命令批准一次）</label>
-          <div v-if="p.write_approval" class="write-credentials">
-            <p class="warning">用户将在对话中看到完整命令并确认。审批十分钟失效；命令、执行配置改变后需重新申请。禁止规则无法通过审批放行。</p>
-            <label>审批执行 Kubeconfig 变量名称<input v-model="p.write_kubeconfig_env" class="input mono" placeholder="SRE_WRITE_KUBECONFIG（可选）" /></label>
-            <p class="muted detail">可引用权限限定到目标资源的独立写凭据。审批专用 Agent 来源不会注入技能脚本。获批后覆盖同名诊断变量，执行结束后清理；留空沿用诊断凭据。当前未自动签发临时凭据。</p>
-            <div v-for="(v, j) in p.writeVariables" :key="j" class="variable-row">
-              <label>审批子进程变量<input v-model="v.key" class="input mono" placeholder="TENCENTCLOUD_SECRET_KEY" required /></label>
-              <label>审批服务端变量名称<input v-model="v.source" class="input mono" placeholder="TENCENT_WRITE_SECRET_KEY" required /></label>
-              <button class="btn" type="button" @click="p.writeVariables.splice(j, 1)">移除审批变量</button>
-            </div>
-            <button class="btn" type="button" @click="p.writeVariables.push({ key: '', source: '' })">添加审批变量映射</button>
-            <div v-for="(v, j) in p.writeAgentVariables" :key="'wa' + j" class="variable-row">
-              <label>审批子进程变量<input v-model="v.key" class="input mono" required /></label>
-              <label>该 Agent 保存的写变量名称<input v-model="v.source" class="input mono" required /></label>
-              <button class="btn" type="button" @click="p.writeAgentVariables.splice(j, 1)">移除审批 Agent 变量</button>
-            </div>
-            <button class="btn" type="button" @click="p.writeAgentVariables.push({ key: '', source: '' })">引用 Agent 写变量</button>
-          </div>
-          <details>
-            <summary>凭据与附加命令规则</summary>
-            <p class="muted detail">凭据通过变量映射注入，可引用服务端环境变量或当前 Agent 已保存的变量名称。不要在命令或此处填写密钥值。</p>
-            <label>Kubeconfig 服务端变量名称<input v-model="p.kubeconfig_env" class="input mono" placeholder="SRE_READONLY_KUBECONFIG（可选）" /></label>
-            <p class="muted detail">此变量应包含只读 kubeconfig 正文。执行时写入私有目录并在结束后删除，不挂载宿主机凭据文件。</p>
-            <div v-for="(v, j) in p.variables" :key="j" class="variable-row">
-              <label>子进程变量<input v-model="v.key" class="input mono" placeholder="TENCENTCLOUD_SECRET_KEY" required /></label>
-              <label>服务端变量名称<input v-model="v.source" class="input mono" placeholder="TENCENT_RO_SECRET_KEY" required /></label>
-              <button class="btn" type="button" @click="p.variables.splice(j, 1)">移除变量</button>
-            </div>
-            <button class="btn" type="button" @click="p.variables.push({ key: '', source: '' })">添加变量映射</button>
-            <p class="muted detail">引用 Agent 变量后，执行器从当前 Agent 的变量设置中取值；每个分配的 Agent 都需要保存对应来源。密钥值不会发送给模型。</p>
+          <p v-if="p.write_approval" class="warning">用户将在对话中看到完整命令并确认。审批十分钟失效；命令、执行配置改变后需重新申请。禁止规则无法通过审批放行。</p>
+
+          <fieldset class="group">
+            <legend>诊断时注入的 Agent 变量</legend>
+            <p class="muted detail">从分配的 Agent 在「Agent」页保存的变量取值，每次执行都注入。密钥值不会发送给模型。</p>
+            <datalist :id="'agent-vars-' + i"><option v-for="k in savedKeys(p)" :key="k" :value="k" /></datalist>
             <div v-for="(v, j) in p.agentVariables" :key="'av' + j" class="variable-row">
               <label>子进程变量<input v-model="v.key" class="input mono" placeholder="TENCENTCLOUD_SECRET_KEY" required /></label>
-              <label>该 Agent 保存的变量名称<input v-model="v.source" class="input mono" placeholder="TENCENTCLOUD_SECRET_KEY" required /></label>
+              <label>该 Agent 保存的变量名称<input v-model="v.source" :list="'agent-vars-' + i" class="input mono" placeholder="TENCENTCLOUD_SECRET_KEY" required /></label>
               <button class="btn" type="button" @click="p.agentVariables.splice(j, 1)">移除 Agent 变量</button>
             </div>
-            <button class="btn" type="button" @click="p.agentVariables.push({ key: '', source: '' })">引用 Agent 变量</button>
-            <p class="muted detail">内置只读规则包括 kubectl get / describe / logs / top、tccli CLS Describe* / List* / SearchLog 和 CLI help。未知命令需要审批。附加规则按 token 前缀匹配，匹配结果取最严格的一项。</p>
-            <div v-for="(rule, j) in p.rules" :key="j" class="rule">
-              <div class="variable-row">
-                <label>规则名称<input v-model="rule.name" class="input" required /></label>
-                <label>执行决策<select v-model="rule.decision" class="input"><option value="allow">允许</option><option value="prompt">需审批</option><option value="forbidden">禁止</option></select></label>
-                <button class="btn" type="button" @click="p.rules.splice(j, 1)">移除规则</button>
-              </div>
-              <div class="tokens"><label v-for="(_, k) in rule.pattern" :key="k">前缀参数 {{ k + 1 }}<input v-model="rule.pattern[k]" class="input mono" required /></label>
-                <button class="btn" type="button" @click="rule.pattern.push('')">添加参数</button>
-                <button v-if="rule.pattern.length > 1" class="btn" type="button" @click="rule.pattern.pop()">移除末尾参数</button>
-              </div>
-              <label>原因<input v-model="rule.reason" class="input" /></label>
+            <div class="actions">
+              <button v-if="unreferenced(p).length" class="btn" type="button" @click="referenceSaved(p)">引用已保存的变量（{{ unreferenced(p).join('、') }}）</button>
+              <button class="btn" type="button" @click="p.agentVariables.push({ key: '', source: '' })">引用 Agent 变量</button>
             </div>
-            <button class="btn" type="button" @click="p.rules.push({ name: '', pattern: [''], decision: 'prompt', reason: '' })">添加命令规则</button>
+          </fieldset>
+          <ul v-if="issues(p).length" class="issues" role="note">
+            <li v-for="(msg, k) in issues(p)" :key="k" class="warning">{{ msg }}</li>
+          </ul>
+
+          <details class="advanced" :open="hasAdvanced(p)">
+            <summary>高级：服务端环境变量、审批凭据、Kubeconfig、CLI 目录、命令规则</summary>
+            <label v-if="config.backend === 'os'">独立 CLI 运行目录<input v-model="p.tool_dir" class="input mono" placeholder="管理员预装 CLI 的目录，包含 bin 和 lib（可选）" /></label>
+
+            <fieldset class="group">
+              <legend>服务端环境变量（诊断时注入）</legend>
+              <p class="muted detail">读取 jelly-agent 服务进程自己的环境变量（如容器 environment），不读 Agent 页保存的变量。</p>
+              <div v-for="(v, j) in p.variables" :key="j" class="variable-row">
+                <label>子进程变量<input v-model="v.key" class="input mono" placeholder="TENCENTCLOUD_SECRET_KEY" required /></label>
+                <label>服务端变量名称<input v-model="v.source" class="input mono" placeholder="TENCENT_RO_SECRET_KEY" required /></label>
+                <button class="btn" type="button" @click="p.variables.splice(j, 1)">移除变量</button>
+              </div>
+              <button class="btn" type="button" @click="p.variables.push({ key: '', source: '' })">添加变量映射</button>
+              <label>Kubeconfig 服务端变量名称<input v-model="p.kubeconfig_env" class="input mono" placeholder="SRE_READONLY_KUBECONFIG（可选）" /></label>
+              <p class="muted detail">此变量应包含只读 kubeconfig 正文。执行时写入私有目录并在结束后删除，不挂载宿主机凭据文件。</p>
+            </fieldset>
+
+            <fieldset v-if="p.write_approval" class="group write-credentials">
+              <legend>审批后追加的写凭据</legend>
+              <p class="muted detail">只在命令获批后注入，覆盖同名诊断变量，执行结束后清理；留空则审批后沿用诊断凭据。审批专用 Agent 变量不会注入技能脚本，也不能同时用于诊断。</p>
+              <div v-for="(v, j) in p.writeAgentVariables" :key="'wa' + j" class="variable-row">
+                <label>审批子进程变量<input v-model="v.key" class="input mono" required /></label>
+                <label>该 Agent 保存的写变量名称<input v-model="v.source" :list="'agent-vars-' + i" class="input mono" required /></label>
+                <button class="btn" type="button" @click="p.writeAgentVariables.splice(j, 1)">移除审批 Agent 变量</button>
+              </div>
+              <button class="btn" type="button" @click="p.writeAgentVariables.push({ key: '', source: '' })">引用 Agent 写变量</button>
+              <div v-for="(v, j) in p.writeVariables" :key="j" class="variable-row">
+                <label>审批子进程变量<input v-model="v.key" class="input mono" placeholder="TENCENTCLOUD_SECRET_KEY" required /></label>
+                <label>审批服务端变量名称<input v-model="v.source" class="input mono" placeholder="TENCENT_WRITE_SECRET_KEY" required /></label>
+                <button class="btn" type="button" @click="p.writeVariables.splice(j, 1)">移除审批变量</button>
+              </div>
+              <button class="btn" type="button" @click="p.writeVariables.push({ key: '', source: '' })">添加审批服务端变量</button>
+              <label>审批执行 Kubeconfig 变量名称<input v-model="p.write_kubeconfig_env" class="input mono" placeholder="SRE_WRITE_KUBECONFIG（可选）" /></label>
+            </fieldset>
+
+            <label class="check"><input v-model="p.allow_unconfined_with_approval" type="checkbox" /> 沙箱不可用时允许经审批后无隔离执行</label>
+            <p v-if="p.allow_unconfined_with_approval" class="warning">仅用于 docker、bubblewrap、Landlock 都不可用的主机：获批的命令将不受任何文件系统或网络隔离，并在审计中标记为无隔离。</p>
+
+            <fieldset class="group">
+              <legend>附加命令规则</legend>
+              <p class="muted detail">内置只读规则包括 kubectl get / describe / logs / top、tccli CLS Describe* / List* / SearchLog 和 CLI help。未知命令需要审批。附加规则按 token 前缀匹配，匹配结果取最严格的一项。</p>
+              <div v-for="(rule, j) in p.rules" :key="j" class="rule">
+                <div class="variable-row">
+                  <label>规则名称<input v-model="rule.name" class="input" required /></label>
+                  <label>执行决策<select v-model="rule.decision" class="input"><option value="allow">允许</option><option value="prompt">需审批</option><option value="forbidden">禁止</option></select></label>
+                  <button class="btn" type="button" @click="p.rules.splice(j, 1)">移除规则</button>
+                </div>
+                <div class="tokens"><label v-for="(_, k) in rule.pattern" :key="k">前缀参数 {{ k + 1 }}<input v-model="rule.pattern[k]" class="input mono" required /></label>
+                  <button class="btn" type="button" @click="rule.pattern.push('')">添加参数</button>
+                  <button v-if="rule.pattern.length > 1" class="btn" type="button" @click="rule.pattern.pop()">移除末尾参数</button>
+                </div>
+                <label>原因<input v-model="rule.reason" class="input" /></label>
+              </div>
+              <button class="btn" type="button" @click="p.rules.push({ name: '', pattern: [''], decision: 'prompt', reason: '' })">添加命令规则</button>
+            </fieldset>
           </details>
         </div>
         <div class="actions"><button class="btn" type="button" @click="addProfile">添加执行配置</button><button class="btn btn-primary" :disabled="saving">{{ saving ? '保存中…' : '保存执行配置' }}</button></div>
@@ -187,6 +232,11 @@ fieldset { border: 0; padding: 0; } legend { font-size: 12px; margin-bottom: var
 .detail, .warning, .notice, .muted { font-size: 12px; line-height: 1.7; margin: 0; }
 .detail { margin: var(--sp-2) 0; } .warning { color: var(--warning); } .notice { color: var(--accent); }
 .probe { border-top: 1px solid var(--border); padding-top: var(--sp-3); }
+.backend { max-width: 240px; }
+.group { display: grid; gap: var(--sp-2); padding: var(--sp-3) 0 0; border-top: 1px solid var(--border); }
+.advanced { display: grid; gap: var(--sp-3); }
+.advanced[open] > summary { margin-bottom: var(--sp-3); }
+.issues { margin: 0; padding-left: 18px; display: grid; gap: var(--sp-1); }
 .result { margin-top: var(--sp-3); font-size: 13px; } pre { overflow: auto; font-size: 12px; }
 @media (max-width: 640px) { .limits, .variable-row { grid-template-columns: 1fr; } }
 </style>

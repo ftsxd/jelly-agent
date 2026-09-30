@@ -179,7 +179,7 @@ function errKinds(t) {
 <template>
   <div class="view">
     <header class="topbar">
-      <h1>监控</h1>
+      <h1>用量统计</h1>
       <button class="btn" @click="load" :disabled="loading">
         <Icon name="refresh" :size="16" /> 刷新
       </button>

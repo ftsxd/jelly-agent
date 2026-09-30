@@ -2,7 +2,7 @@
 import { onMounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import Icon from './components/Icon.vue'
-import { navItems } from './router'
+import { navGroups } from './router'
 import { api } from './api'
 
 const route = useRoute()
@@ -179,16 +179,19 @@ async function submitChange() {
       </div>
 
       <nav class="nav" aria-label="主导航">
-        <RouterLink
-          v-for="item in navItems"
-          :key="item.path"
-          :to="item.path"
-          class="nav-item"
-          :class="{ active: route.name === item.name }"
-        >
-          <Icon :name="item.meta.icon" :size="18" />
-          <span>{{ item.meta.title }}</span>
-        </RouterLink>
+        <template v-for="group in navGroups" :key="group.title">
+          <span class="nav-group">{{ group.title }}</span>
+          <RouterLink
+            v-for="item in group.items"
+            :key="item.path"
+            :to="item.path"
+            class="nav-item"
+            :class="{ active: route.name === item.name }"
+          >
+            <Icon :name="item.meta.icon" :size="18" />
+            <span>{{ item.meta.title }}</span>
+          </RouterLink>
+        </template>
       </nav>
 
       <div class="sidebar-foot">
@@ -277,6 +280,15 @@ async function submitChange() {
   display: flex;
   flex-direction: column;
   gap: 2px;
+}
+.nav-group {
+  padding: var(--sp-3) var(--sp-3) var(--sp-1);
+  font-size: 11px;
+  color: var(--text-muted);
+  letter-spacing: 0.04em;
+}
+.nav-group:first-child {
+  padding-top: 0;
 }
 .nav-item {
   position: relative;
@@ -458,7 +470,8 @@ async function submitChange() {
     flex-direction: row;
     margin-left: var(--sp-4);
   }
-  .nav-item span {
+  .nav-item span,
+  .nav-group {
     display: none;
   }
   .sidebar-foot {

@@ -78,6 +78,30 @@ func TestSkillVarsMasked(t *testing.T) {
 	}
 }
 
+// A deleted skill's secrets must not pass to a new skill that reuses the name.
+func TestDeleteSkillDropsItsVars(t *testing.T) {
+	s := newEmptyServer(t)
+	create := `{"name":"deploy","description":"部署","body":"b","enabled":true}`
+	if w := do(t, s, "POST", "/api/skills", create); w.Code != http.StatusOK {
+		t.Fatalf("create skill: %d", w.Code)
+	}
+	if w := do(t, s, "POST", "/api/skills/deploy/vars", `{"vars":{"API_TOKEN":"old-secret"}}`); w.Code != http.StatusOK {
+		t.Fatalf("set vars: %d %s", w.Code, w.Body.String())
+	}
+	if w := do(t, s, "DELETE", "/api/skills/deploy", ""); w.Code != http.StatusOK {
+		t.Fatalf("delete skill: %d %s", w.Code, w.Body.String())
+	}
+	if _, ok := s.engine().Config().SkillVars["deploy"]; ok {
+		t.Fatal("deleted skill kept its variables")
+	}
+	if w := do(t, s, "POST", "/api/skills", create); w.Code != http.StatusOK {
+		t.Fatalf("recreate skill: %d", w.Code)
+	}
+	if body := do(t, s, "GET", "/api/skills/deploy", "").Body.String(); strings.Contains(body, "API_TOKEN") {
+		t.Fatalf("recreated skill inherited variables: %s", body)
+	}
+}
+
 func TestAllowScriptsToggle(t *testing.T) {
 	s := newEmptyServer(t)
 	if s.engine().Config().Skills.AllowScripts {

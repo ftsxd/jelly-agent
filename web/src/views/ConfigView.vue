@@ -157,7 +157,7 @@ async function remove(p) {
   <div class="view">
     <header class="topbar">
       <div class="topbar-l">
-        <h1>配置</h1>
+        <h1>模型 Provider</h1>
         <span v-if="savedTo" class="mono dim path">{{ savedTo }}</span>
       </div>
       <button class="btn btn-primary" @click="startNew" :disabled="editing === 'new'">

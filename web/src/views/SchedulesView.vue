@@ -13,7 +13,7 @@ onMounted(load)
   <div class="view">
     <header class="topbar">
       <div class="topbar-l">
-        <h1>定时任务</h1>
+        <h1>周期任务</h1>
         <span class="muted sub">使用标准 Cron 表达式；每次执行都会记录结果。</span>
       </div>
       <button class="btn" @click="load">刷新</button>

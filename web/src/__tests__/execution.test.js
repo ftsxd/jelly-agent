@@ -48,6 +48,15 @@ describe('execution management', () => {
     host.querySelector('form').dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })); await settle()
     expect(api.setExecution.mock.calls[0][0].profiles[0]).toMatchObject({ tool_dir: '/opt/sre-tools', agent_env: { TOKEN: 'CLOUD_READ_KEY' }, write_agent_env: { TOKEN: 'CLOUD_WRITE_KEY' } })
   })
+  it('keeps the unconfined escape hatch on save and references saved agent variables in one click', async () => {
+    api.agents.mockResolvedValue({ agents: [{ name: 'expert' }], var_keys: { expert: ['CLOUD_ID', 'CLOUD_KEY'] } })
+    api.execution.mockResolvedValue({ ...data, config: { enabled: true, profiles: [{ name: 'cloud', agents: ['expert'], network: true, allow_unconfined_with_approval: true, write_approval: true, write_env: { CLOUD_ID: 'CLOUD_ID' } }] } })
+    host = document.createElement('div'); document.body.append(host); app = createApp(ExecutionSettings); app.mount(host); await settle()
+    expect(host.querySelector('.issues').textContent).toContain('服务端环境变量 CLOUD_ID')
+    button('引用已保存的变量（CLOUD_ID、CLOUD_KEY）').click(); await settle()
+    host.querySelector('form').dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })); await settle()
+    expect(api.setExecution.mock.calls[0][0].profiles[0]).toMatchObject({ allow_unconfined_with_approval: true, agent_env: { CLOUD_ID: 'CLOUD_ID', CLOUD_KEY: 'CLOUD_KEY' } })
+  })
   it('preserves separate write credential references and can revoke write approval', async () => {
     await mount({ enabled: true, profiles: [{ name: 'write', agents: ['expert'], network: true, write_approval: true, env: { TOKEN: 'READ_SOURCE' }, write_env: { TOKEN: 'WRITE_SOURCE' }, write_kubeconfig_env: 'WRITE_KUBE' }] })
     host.querySelector('form').dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })); await settle()

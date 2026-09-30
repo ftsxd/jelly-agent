@@ -7,7 +7,6 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/jelly-agent/jelly-agent/internal/config"
 	"github.com/jelly-agent/jelly-agent/internal/tool"
 )
 
@@ -143,7 +142,9 @@ func (s *Server) handleSetFiles(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	raw.Files = config.Files{Roots: roots}
+	// Only the roots belong to this form; replacing the whole section would
+	// silently reset files.code_projects tuning.
+	raw.Files.Roots = roots
 	if err := s.persist(w, raw, path); err != nil {
 		return
 	}
