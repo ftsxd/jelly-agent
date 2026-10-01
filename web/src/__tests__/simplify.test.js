@@ -84,6 +84,11 @@ describe('execution profile checks', () => {
     expect(profileIssues(profile({ agents: ['root'], mappings: [row('T', 'agent', 'T')] }), varKeys)[0]).toContain('root')
     expect(profileIssues(profile({ mappings: [row('TOKEN', 'agent', 'TENCENTCLOUD_SECRET_ID')] }), varKeys)).toEqual([])
   })
+  it('flags assigned agents that saved nothing while inheritance is on', () => {
+    expect(profileIssues(profile({ agents: ['Empty'] }), varKeys)[0]).toContain('Empty 还没有保存任何变量')
+    expect(profileIssues(profile({ agents: ['Empty'], inherit: false }), varKeys)).toEqual([])
+    expect(profileIssues(profile({}), varKeys)).toEqual([])
+  })
   it('previews inherited variables with the server exclusions', () => {
     const p = profile({ write_approval: true, mappings: [row('REGION', 'agent', 'TENCENTCLOUD_REGION'), row('KEY', 'agent', 'WRITE_KEY', 'approved')] })
     expect(inheritedVars(p, varKeys)).toEqual(['TENCENTCLOUD_SECRET_ID', 'TENCENTCLOUD_SECRET_KEY'])

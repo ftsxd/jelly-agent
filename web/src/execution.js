@@ -86,6 +86,12 @@ export function profileIssues(p, varKeys = {}) {
       continue
     }
     const have = new Set(varKeys[agent] || [])
+    // Inheritance on and nothing saved: the run will carry no credentials,
+    // and a CLI then fails with its own, misleading error (tccli: "secretId
+    // is invalid"). Say where they go before that happens.
+    if (p.inherit !== false && !have.size && !agentRows.length) {
+      issues.push(`${agent} 还没有保存任何变量，命令执行时不会带凭据。到「Agent」页编辑 ${agent}，在「变量」里保存。`)
+    }
     for (const source of sourcesOf(agentRows)) {
       if (!have.has(source)) issues.push(`${agent} 没有保存变量 ${source}，执行时会报「未配置执行变量来源」。`)
     }

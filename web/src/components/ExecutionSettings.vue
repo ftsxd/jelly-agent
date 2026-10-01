@@ -79,6 +79,7 @@ async function check() {
   <section class="card execution">
     <div class="heading"><h2>通用诊断执行器</h2><span class="badge">shell_exec</span></div>
     <p class="muted">缺少专用工具时，让已分配的 Agent 使用 CLI 帮助和诊断命令。默认关闭；写操作需单独启用审批，并由用户逐次批准。</p>
+    <p class="hint-bar">让某个 Agent 执行命令，只要到 <RouterLink to="/agents">Agent</RouterLink> 页编辑它、打开「允许此 Agent 执行命令」——凭据用它自己保存的变量，执行配置会自动建好。这里用于全局开关、隔离后端，以及多个 Agent 共用的执行配置。</p>
     <div v-if="loading" class="muted">加载中…</div>
     <template v-else-if="info">
       <form @submit.prevent="save">
@@ -209,6 +210,7 @@ fieldset { border: 0; padding: 0; } legend { font-size: 12px; margin-bottom: var
 .detail { margin: var(--sp-2) 0; } .warning { color: var(--warning); } .notice { color: var(--accent); }
 .probe { border-top: 1px solid var(--border); padding-top: var(--sp-3); }
 .backend { max-width: 240px; }
+.hint-bar { margin: 0; padding: var(--sp-2) var(--sp-3); border-radius: var(--radius-sm); background: var(--primary-tint); font-size: 12px; line-height: 1.7; }
 .group { display: grid; gap: var(--sp-2); padding: var(--sp-3) 0 0; border-top: 1px solid var(--border); }
 .advanced { display: grid; gap: var(--sp-3); }
 .advanced[open] > summary { margin-bottom: var(--sp-3); }
