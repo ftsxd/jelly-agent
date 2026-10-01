@@ -49,7 +49,7 @@ execution:
       write_approval: true
 ```
 
-分配的 Agent 在变量页保存的变量默认按同名注入（`inherit_agent_vars` 不写即开启；审批专用的 `write_agent_env` 来源、会改变执行环境的变量名除外）。只有需要改名时才写 `agent_env`，它的值是当前 Agent 的变量名称；`env` 则引用服务端进程环境变量名称。不会自动继承其他 Agent 的变量或宿主凭据。CLS Describe/List/SearchLog 与 CLI 帮助有内置只读规则；其他产品需要在对应 profile 明确添加规则，资源访问权限仍由 IAM 限制。
+分配的 Agent 在变量页保存的变量默认按同名注入（`inherit_agent_vars` 不写即开启；审批专用的 `write_agent_env` 来源、会改变执行环境的变量名除外）。只有需要改名时才写 `agent_env`，它的值是当前 Agent 的变量名称；`env` 则引用服务端进程环境变量名称。不会自动继承其他 Agent 的变量或宿主凭据。tccli 各产品的 Describe*/List*、CLS SearchLog、STS GetCallerIdentity 与 CLI 帮助按内置只读规则直接执行；名称表明会返回凭据或访问入口的查询（含 Secret、Password、Credential、Token、Vnc、LoginKey、PrivateKey、Certificate、Kubeconfig、AccessKey）仍需逐次审批。资源访问权限仍由 IAM 限制，生产诊断应使用只读凭据。
 
 ## 自主执行与审批
 

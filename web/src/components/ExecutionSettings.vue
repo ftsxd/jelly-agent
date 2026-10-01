@@ -153,7 +153,7 @@ async function check() {
 
             <fieldset class="group">
               <legend>附加命令规则</legend>
-              <p class="muted detail">内置只读规则包括 kubectl get / describe / logs / top、tccli CLS Describe* / List* / SearchLog 和 CLI help。未知命令需要审批。附加规则按 token 前缀匹配，匹配结果取最严格的一项。</p>
+              <p class="muted detail">内置只读规则包括 kubectl get / describe / logs / top 等只读子命令、tccli 各产品的 Describe* / List*（返回凭据或访问入口的除外）、CLS SearchLog 和 CLI help。其他命令需要审批。附加规则按 token 前缀匹配，匹配结果取最严格的一项。</p>
               <div v-for="(rule, j) in p.rules" :key="j" class="rule">
                 <div class="variable-row">
                   <label>规则名称<input v-model="rule.name" class="input" required /></label>

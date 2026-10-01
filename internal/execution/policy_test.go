@@ -78,6 +78,18 @@ func TestPolicyChecksAllSegmentsAndStrictestRule(t *testing.T) {
 		{"timeout 5 kubectl get pods", Forbidden},
 		{"kubectl get pods | xargs echo", Forbidden},
 		{"eval kubectl get pods", Forbidden},
+		// Describe/List of any product is a read; reads that return access are not.
+		{"tccli cvm DescribeRegions", Allow},
+		{"tccli cvm DescribeInstances --Limit 100", Allow},
+		{"tccli cdb DescribeDBInstances", Allow},
+		{"tccli sts GetCallerIdentity", Allow},
+		{"tccli ssl DescribeCertificateDetail --CertificateId x", Prompt},
+		{"tccli tke DescribeClusterKubeconfig --ClusterId x", Prompt},
+		{"tccli cvm DescribeInstanceVncUrl --InstanceId x", Prompt},
+		{"tccli cam ListAccessKeys", Prompt},
+		{"tccli ssm GetSecretValue --SecretName x", Prompt},
+		{"tccli cvm StopInstances --InstanceIds x", Prompt},
+		{"tccli --region ap-guangzhou cvm DescribeInstances", Prompt},
 	} {
 		t.Run(test.command, func(t *testing.T) {
 			if got := Evaluate(test.command, rules); got.Decision != test.want {

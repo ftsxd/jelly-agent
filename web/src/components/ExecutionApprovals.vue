@@ -46,29 +46,41 @@ function tone(a) {
   if (a.outcome === 'failed') return 'bad'
   return 'quiet'
 }
+// The parts of a reason an approver must not skim past.
+const alarming = (reason) => /无隔离|凭据|访问入口/.test(reason || '')
 function when(a) { return new Date(a.resolved_ms || a.created_ms).toLocaleString() }
 </script>
 
 <template>
   <section v-if="approvals.length || error" class="approvals" aria-label="命令审批">
     <p v-if="error" role="alert" class="warning">{{ error }} <button class="btn" @click="load">重新加载审批</button></p>
-    <article v-for="a in current" :key="a.id" class="approval">
-      <div class="heading"><strong>{{ outcome(a) }}</strong><span class="mono">{{ a.agent }} · {{ a.request.profile }}</span></div>
-      <p><span class="muted">模型陈述的目的：</span>{{ a.request.purpose }}</p>
-      <pre>{{ a.request.command }}</pre>
-      <template v-if="a.state === 'pending'">
-        <p class="muted">{{ a.reason }}。批准仅对完整命令有效，使用一次即消耗；失败后不会自动重试。请以上面的命令本身为准判断，目的由模型填写，不代表命令实际会做什么。</p>
-        <p class="muted">有效期至 {{ new Date(a.expires_ms).toLocaleString() }}</p>
-        <div class="actions">
+    <!-- Compact, but never truncated: the whole command stays visible, since a
+         clipped tail is exactly where an approver would miss "&& …". The
+         reason stays too — it is where "will run unconfined" or "returns a
+         credential" is said. The rest is one click away. -->
+    <article v-for="a in current" :key="a.id" class="approval" :class="{ pending: a.state === 'pending' }">
+      <div class="line">
+        <strong class="state-tag">{{ a.state === 'pending' ? '待批准' : outcome(a) }}</strong>
+        <span class="reason" :class="alarming(a.reason) ? 'warning' : 'muted'">{{ a.reason }}</span>
+        <div v-if="a.state === 'pending'" class="actions">
           <template v-if="actionable">
-            <button class="btn btn-primary" :disabled="disabled" @click="decision(a, true)">批准并执行一次</button>
-            <button class="btn" :disabled="disabled" @click="decision(a, false)">拒绝</button>
+            <button class="btn btn-primary btn-sm" :disabled="disabled" @click="decision(a, true)">批准并执行一次</button>
+            <button class="btn btn-sm" :disabled="disabled" @click="decision(a, false)">拒绝</button>
           </template>
-          <RouterLink v-else class="btn" :to="{ path: '/chat', query: { session } }">打开对话审批</RouterLink>
+          <RouterLink v-else class="btn btn-sm" :to="{ path: '/chat', query: { session } }">打开对话审批</RouterLink>
         </div>
-      </template>
-      <p v-else-if="a.resolved_by" class="muted">处理人 {{ a.resolved_by }} · {{ when(a) }}</p>
-      <p v-if="a.exec_id" class="mono muted">{{ a.exec_id }}</p>
+      </div>
+      <pre>{{ a.request.command }}</pre>
+      <details class="more">
+        <summary class="muted">详情</summary>
+        <p><span class="muted">模型陈述的目的：</span>{{ a.request.purpose }}</p>
+        <p class="muted">{{ a.agent }} · {{ a.request.profile }}
+          <template v-if="a.state === 'pending'"> · 有效期至 {{ new Date(a.expires_ms).toLocaleString() }}</template>
+          <template v-else-if="a.resolved_by"> · 处理人 {{ a.resolved_by }} · {{ when(a) }}</template>
+        </p>
+        <p v-if="a.state === 'pending'" class="muted">批准仅对上面这条完整命令有效，使用一次即消耗，失败后不会自动重试。请以命令本身为准判断，目的由模型填写。</p>
+        <p v-if="a.exec_id" class="mono muted">{{ a.exec_id }}</p>
+      </details>
     </article>
     <details v-if="settled.length" class="history">
       <summary>已处理的命令审批 {{ settled.length }} 条</summary>
@@ -92,9 +104,16 @@ function when(a) { return new Date(a.resolved_ms || a.created_ms).toLocaleString
 
 <style scoped>
 .approvals { max-width: 820px; width: 100%; margin: 0 auto; display: grid; gap: var(--sp-3); }
-.approval { padding: var(--sp-4); border: 1px solid var(--warning); border-radius: var(--radius); display: grid; gap: var(--sp-2); background: var(--surface-2); }
-.heading, .actions { display: flex; flex-wrap: wrap; justify-content: space-between; gap: var(--sp-2); }
-.actions { justify-content: flex-start; }
+.approval { padding: var(--sp-2) var(--sp-3); border: 1px solid var(--border); border-left: 3px solid var(--text-muted); border-radius: var(--radius-sm); display: grid; gap: var(--sp-1); background: var(--surface-2); }
+.approval.pending { border-left-color: var(--warning); }
+.line { display: flex; align-items: center; flex-wrap: wrap; gap: var(--sp-2); min-width: 0; }
+.state-tag { flex: none; font-size: 12px; }
+.reason { flex: 1; min-width: 0; font-size: 12px; line-height: 1.6; }
+.line .actions { flex: none; display: flex; gap: var(--sp-2); }
+.btn-sm { padding: 2px 10px; font-size: 12px; height: auto; }
+.approval pre { padding: var(--sp-2); }
+.more summary { cursor: pointer; font-size: 12px; }
+.more p { margin-top: var(--sp-1); }
 p { margin: 0; font-size: 12px; line-height: 1.7; }
 pre { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; padding: var(--sp-3); background: var(--surface); border-radius: var(--radius-sm); font-size: 12px; }
 .warning { color: var(--warning); }

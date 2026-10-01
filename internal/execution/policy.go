@@ -418,12 +418,23 @@ func builtinDecision(a []string) (Decision, string) {
 		if len(a) < 3 {
 			return "", ""
 		}
-		action := a[2]
-		if a[1] == "cls" && (strings.HasPrefix(action, "Describe") || strings.HasPrefix(action, "List") || action == "SearchLog") {
-			return Allow, "只读云查询；资源权限由配置的只读凭据限制"
+		product, action := a[1], a[2]
+		if !identifier.MatchString(product) || !identifier.MatchString(action) {
+			return Prompt, "无法识别 tccli 的产品与接口位置，需要逐次审批"
+		}
+		if (product == "cls" && action == "SearchLog") || (product == "sts" && action == "GetCallerIdentity") {
+			return Allow, "只读云查询；资源权限由配置的凭据限制"
 		}
 		if strings.HasPrefix(action, "Describe") || strings.HasPrefix(action, "List") {
-			return "", ""
+			// Read-only by Tencent Cloud's naming, but some reads hand back
+			// something usable as access: a certificate's private key, a
+			// cluster kubeconfig, a VNC login URL, secret or key material.
+			for _, word := range sensitiveReads {
+				if strings.Contains(strings.ToLower(action), word) {
+					return Prompt, "该查询会返回凭据或访问入口，需要逐次审批"
+				}
+			}
+			return Allow, "只读云查询（Describe/List）；资源权限由配置的凭据限制"
 		}
 		return Prompt, "云操作不在默认只读范围内，需要逐次审批"
 	}
@@ -490,6 +501,10 @@ func kubectlManifestFlag(v string) bool {
 	}
 	return false
 }
+
+// sensitiveReads are lower-case fragments of Describe/List action names whose
+// result is a credential or a way in rather than a description.
+var sensitiveReads = []string{"secret", "password", "passwd", "credential", "token", "vnc", "loginkey", "privatekey", "certificate", "kubeconfig", "accesskey"}
 
 // Help occupies a command slot, never an arbitrary argument value. Only the
 // documented detail modifier is accepted; identity/endpoint bans run first.
