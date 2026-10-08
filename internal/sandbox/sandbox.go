@@ -435,7 +435,7 @@ func redactInjected(out string, env map[string]string, truncated bool) string {
 	}
 	names := make([]string, 0, len(env))
 	for k, v := range env {
-		if len(v) >= minRedactLen {
+		if len(v) >= minRedactLen && !publicSetting(k) {
 			names = append(names, k)
 		}
 	}
@@ -467,6 +467,27 @@ func redactInjected(out string, env map[string]string, truncated bool) string {
 		}
 	}
 	return out
+}
+
+// publicSetting reports whether an injected variable names a location rather
+// than a secret — a region, zone or namespace. Masking those wrecked answers:
+// TENCENTCLOUD_REGION=ap-shanghai turned every "ap-shanghai" in an API reply
+// into ${TENCENTCLOUD_REGION}. The rule is by name and deliberately narrow:
+// anything else stays masked, and a name that also says secret, key, token or
+// password is masked whatever it ends with.
+func publicSetting(name string) bool {
+	n := strings.ToUpper(name)
+	for _, secret := range []string{"SECRET", "KEY", "TOKEN", "PASS", "CREDENTIAL", "AUTH"} {
+		if strings.Contains(n, secret) {
+			return false
+		}
+	}
+	for _, suffix := range []string{"REGION", "ZONE", "NAMESPACE"} {
+		if strings.HasSuffix(n, suffix) {
+			return true
+		}
+	}
+	return false
 }
 
 // joinNotes concatenates the non-empty degradation notes, in order.

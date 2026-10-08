@@ -56,3 +56,19 @@ func TestRedactInjectedNoopsWithoutEnvOrOutput(t *testing.T) {
 		t.Fatalf("redactInjected = %q", out)
 	}
 }
+
+// A region is where, not a secret: masking it turned every "ap-shanghai" in a
+// cloud API reply into ${TENCENTCLOUD_REGION}.
+func TestLocationSettingsAreNotMasked(t *testing.T) {
+	env := map[string]string{
+		"TENCENTCLOUD_REGION":     "ap-shanghai",
+		"TENCENTCLOUD_SECRET_ID":  "AKIDsecretsecret",
+		"TENCENTCLOUD_SECRET_KEY": "keykeykeykey",
+		"K8S_NAMESPACE":           "payments",
+		"REGION_TOKEN":            "region-token-value", // says token: masked
+	}
+	out := Redact("ap-shanghai payments AKIDsecretsecret keykeykeykey region-token-value", env, false)
+	if out != "ap-shanghai payments ${TENCENTCLOUD_SECRET_ID} ${TENCENTCLOUD_SECRET_KEY} ${REGION_TOKEN}" {
+		t.Fatal(out)
+	}
+}
