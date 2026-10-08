@@ -13,7 +13,7 @@
 import AgentTimeline from './AgentTimeline.vue'
 import Icon from './Icon.vue'
 import { renderMarkdown } from '../markdown'
-import { finalAnswer } from '../timeline'
+import { answerSteps, finalAnswer } from '../timeline'
 
 const props = defineProps({
   messages: { type: Array, required: true },
@@ -30,8 +30,8 @@ const props = defineProps({
 // handoff produce one bubble attributed to whichever agent spoke last.
 function answerOf(m) {
   if (m.role !== 'agent') return m.text || ''
-  const step = m.timeline ? finalAnswer(m.timeline) : null
-  return step ? step.text : m.text || ''
+  const steps = m.timeline ? answerSteps(m.timeline) : []
+  return steps.length ? steps.map((s) => s.text).join('\n\n') : m.text || ''
 }
 
 function authorOf(m) {

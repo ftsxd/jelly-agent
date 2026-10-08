@@ -299,10 +299,35 @@ export function finalAnswer(state) {
   return null
 }
 
-/** Steps the timeline should render, i.e. everything except the main answer. */
+// Tools that tidy memory rather than do the work. A model that writes its
+// answer, calls remember, then adds "saved to memory" has still answered with
+// the first text; ending the answer at the last text alone left the bubble
+// holding only the note, with the real answer folded into the process.
+const HOUSEKEEPING = new Set(['remember', 'forget'])
+
+/**
+ * The texts that make up the answer: the final one, and the same agent's
+ * texts before it back to the last tool call that did real work. Narration
+ * ahead of a real call ("let me check…") stays in the process; thoughts and
+ * memory housekeeping between texts do not split the answer.
+ */
+export function answerSteps(state) {
+  const last = finalAnswer(state)
+  if (!last) return []
+  const out = [last]
+  for (let i = state.steps.indexOf(last) - 1; i >= 0; i -= 1) {
+    const s = state.steps[i]
+    if (s.kind === 'thought' || (s.kind === 'tool' && HOUSEKEEPING.has(s.name))) continue
+    if (s.kind !== 'text' || s.agent !== last.agent) break
+    out.unshift(s)
+  }
+  return out
+}
+
+/** Steps the timeline should render, i.e. everything except the answer. */
 export function timelineSteps(state) {
-  const answer = finalAnswer(state)
-  return state.steps.filter((s) => s !== answer && s.kind !== 'user')
+  const answer = new Set(answerSteps(state))
+  return state.steps.filter((s) => !answer.has(s) && s.kind !== 'user')
 }
 
 /** A one-line summary for the timeline's header. */

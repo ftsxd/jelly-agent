@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   applyFrame,
   emptyTimeline,
+  answerSteps,
   finalAnswer,
   reduceFrames,
   summarize,
@@ -439,5 +440,42 @@ describe('finalAnswer with a delegating coordinator', () => {
       { type: 'text', text: '旧会话的回答', round: 'r1', ts: 1 },
     ])
     expect(finalAnswer(s).text).toBe('旧会话的回答')
+  })
+})
+
+// The answer, then remember, then "saved to memory": the bubble used to hold
+// only the note, with the 95-topic answer folded away in the process.
+describe('answer spanning memory housekeeping', () => {
+  const run = (frames) => {
+    const s = emptyTimeline()
+    for (const f of frames) applyFrame(s, f)
+    return s
+  }
+  const sub = { agent: 'TencentQuery', branch: 'OrchestrationAgent.TencentQuery', round: 'r1' }
+
+  it('keeps the answer written before remember', () => {
+    const s = run([
+      { type: 'text', text: '我先查一下。', ...sub, final: false, ts: 1 },
+      { type: 'tool_call', name: 'shell_exec', call_id: 'c1', ...sub, ts: 2 },
+      { type: 'tool_result', call_id: 'c1', ok: true, response: {}, ts: 3 },
+      { type: 'text', text: '共 95 个主题：……', ...sub, final: false, ts: 4 },
+      { type: 'tool_call', name: 'remember', call_id: 'c2', ...sub, ts: 5 },
+      { type: 'tool_result', call_id: 'c2', ok: true, response: {}, ts: 6 },
+      { type: 'text', text: '已写入长期记忆。', ...sub, final: true, ts: 7 },
+    ])
+    expect(answerSteps(s).map((x) => x.text)).toEqual(['共 95 个主题：……', '已写入长期记忆。'])
+    const shown = timelineSteps(s)
+    expect(shown.filter((x) => x.kind === 'text').map((x) => x.text)).toEqual(['我先查一下。'])
+    expect(shown.some((x) => x.kind === 'tool' && x.name === 'remember')).toBe(true)
+  })
+
+  it('stops at a real tool call', () => {
+    const s = run([
+      { type: 'text', text: '让我确认有哪些指标。', ...sub, final: false, ts: 1 },
+      { type: 'tool_call', name: 'shell_exec', call_id: 'c1', ...sub, ts: 2 },
+      { type: 'tool_result', call_id: 'c1', ok: true, response: {}, ts: 3 },
+      { type: 'text', text: '峰值 28.7%。', ...sub, final: true, ts: 4 },
+    ])
+    expect(answerSteps(s).map((x) => x.text)).toEqual(['峰值 28.7%。'])
   })
 })
