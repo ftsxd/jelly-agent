@@ -244,6 +244,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/execution/check", s.handleCheckExecution)
 	mux.HandleFunc("GET /api/sessions/{id}/approvals", s.handleExecutionApprovals)
 	mux.HandleFunc("DELETE /api/sessions/{id}/grants/{grant}", s.handleRevokeGrant)
+	mux.HandleFunc("PUT /api/sessions/{id}/execution-mode", s.handleSetExecutionMode)
 	mux.HandleFunc("GET /api/agents", s.handleListAgents)
 	mux.HandleFunc("POST /api/agents", s.handleSaveAgent)
 	mux.HandleFunc("DELETE /api/agents/{name}", s.handleDeleteAgent)

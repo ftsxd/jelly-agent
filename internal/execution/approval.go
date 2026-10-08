@@ -36,6 +36,9 @@ func EnsureApprovalSchema(db *storage.DB) error {
 	if err := ensureGrantSchema(db); err != nil {
 		slog.Warn("会话内免审批不可用，审批仍逐条进行", "error", err)
 	}
+	if err := ensureSessionModeSchema(db); err != nil {
+		slog.Warn("逐条审批模式不可用", "error", err)
+	}
 	return nil
 }
 
@@ -169,6 +172,10 @@ func configHash(c Config) string {
 func (s Approvals) Create(ctx context.Context, c Config, agent, session, invocation, call string, req Request) (Approval, error) {
 	r := Runtime{Config: c}
 	ev := r.Check(agent, req)
+	// A session set to ask for everything turns a direct read into a request.
+	if ev.Decision == Allow && s.Strict(ctx, session) {
+		ev.Decision, ev.Reason = Prompt, StrictReason
+	}
 	if ev.Decision != Prompt || !r.ApprovalEnabled(agent, req.Profile) || session == "" || call == "" {
 		return Approval{}, ErrApproval
 	}

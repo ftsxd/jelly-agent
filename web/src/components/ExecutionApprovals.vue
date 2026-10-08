@@ -4,7 +4,7 @@ import { api } from '../api'
 import { latestOnly } from '../latest'
 
 const props = defineProps({ session: { type: String, required: true }, refreshKey: { type: Number, default: 0 }, disabled: Boolean, actionable: Boolean })
-const emit = defineEmits(['resolve', 'grants'])
+const emit = defineEmits(['resolve', 'grants', 'mode'])
 const approvals = ref([]), error = ref('')
 // Session grants ("don't ask again for this kind") in force, and whether the
 // store can hold them at all — an unmigrated PostgreSQL store cannot.
@@ -23,6 +23,7 @@ async function load() {
     approvals.value = result.value?.approvals || []
     grants.value = result.value?.grants || []
     emit('grants', grants.value)
+    emit('mode', { strict: !!result.value?.strict, available: !!result.value?.strict_available })
     grantsAvailable.value = !!result.value?.grants_available
     error.value = ''
   }

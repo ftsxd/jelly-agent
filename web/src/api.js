@@ -144,6 +144,7 @@ export const api = {
   setExecution: (p) => jput('/api/execution', p),
   checkExecution: (p) => jpost('/api/execution/check', p),
   executionApprovals: (session, signal) => jget(`/api/sessions/${encodeURIComponent(session)}/approvals`, signal),
+  setExecutionMode: (session, strict) => jput(`/api/sessions/${encodeURIComponent(session)}/execution-mode`, { strict }),
   revokeGrant: (session, id) => jdelete(`/api/sessions/${encodeURIComponent(session)}/grants/${encodeURIComponent(id)}`),
   setSandbox: (p) => jpost('/api/sandbox', p),
   agents: () => jget('/api/agents'),

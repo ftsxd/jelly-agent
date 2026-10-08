@@ -137,3 +137,98 @@ func TestSessionGrantSkipsTheNextApprovalOfItsClass(t *testing.T) {
 		t.Fatalf("revoked grant still applied: %+v", p)
 	}
 }
+
+// "Ask for every command" stops the direct reads and session grants alike,
+// and switching back restores both.
+func TestSessionAskingForEveryCommand(t *testing.T) {
+	if !sandbox.OSSandboxAvailable() {
+		t.Skip("OS sandbox required")
+	}
+	dir := t.TempDir()
+	tools := filepath.Join(dir, "tools")
+	if err := os.MkdirAll(filepath.Join(tools, "bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tools, "bin", "tccli"), []byte("#!/bin/sh\necho FAKE_TCCLI \"$@\"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var calls atomic.Int32
+	var lastBody atomic.Value
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		lastBody.Store(string(body))
+		n := calls.Add(1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		delta, finish := map[string]any{"content": "好的"}, "stop"
+		if n%2 == 1 {
+			args, _ := json.Marshal(execution.Request{Command: fmt.Sprintf("tccli cls DescribeTopics --Offset %d", n), Purpose: "列主题", Profile: "cloud"})
+			finish = "tool_calls"
+			delta = map[string]any{"tool_calls": []any{map[string]any{"index": 0, "id": fmt.Sprintf("call_%d", n), "type": "function", "function": map[string]any{"name": "shell_exec", "arguments": string(args)}}}}
+		}
+		chunk, _ := json.Marshal(map[string]any{"id": "c", "object": "chat.completion.chunk", "model": "m", "choices": []any{map[string]any{"index": 0, "delta": delta, "finish_reason": finish}}})
+		fmt.Fprintf(w, "data: %s\n\ndata: [DONE]\n\n", chunk)
+	}))
+	defer provider.Close()
+	cfg := &config.Config{DefaultProvider: "test", Providers: []config.Provider{{Name: "test", BaseURL: provider.URL + "/v1", APIKey: "test", Model: "m"}},
+		Memory:    config.Memory{Core: config.MemoryCore{Dir: filepath.Join(dir, "memory")}},
+		Execution: execution.Config{Enabled: true, Backend: "os", Profiles: []execution.Profile{{Name: "cloud", Agents: []string{"root"}, WriteApproval: true, ToolDir: tools}}}}
+	e := engine.New(cfg)
+	e.SetStateRef(filepath.Join(dir, "state.db"))
+	t.Cleanup(e.Close)
+	s := New(e, nil)
+	chat := func(body string) string {
+		t.Helper()
+		w := do(t, s, "POST", "/api/chat/stream", body)
+		if w.Code != 200 {
+			t.Fatal(w.Code, w.Body.String())
+		}
+		session := ""
+		for _, f := range parseSSE(t, w.Body.String()) {
+			if f["type"] == "error" {
+				t.Fatal(f)
+			}
+			if f["type"] == "session" {
+				session, _ = f["session_id"].(string)
+			}
+		}
+		return session
+	}
+	type listing struct {
+		Approvals []execution.Approval `json:"approvals"`
+		Strict    bool                 `json:"strict"`
+		Available bool                 `json:"strict_available"`
+	}
+	list := func(session string) listing {
+		var l listing
+		if err := json.Unmarshal(do(t, s, "GET", "/api/sessions/"+session+"/approvals", "").Body.Bytes(), &l); err != nil {
+			t.Fatal(err)
+		}
+		return l
+	}
+	pendingCount := func(l listing) (n int) {
+		for _, a := range l.Approvals {
+			if a.State == "pending" {
+				n++
+			}
+		}
+		return
+	}
+
+	// A read runs directly by default.
+	session := chat(`{"message":"列主题"}`)
+	if l := list(session); pendingCount(l) != 0 || l.Strict || !l.Available || !strings.Contains(lastBody.Load().(string), "FAKE_TCCLI cls DescribeTopics --Offset 1") {
+		t.Fatalf("default read did not run directly: %+v", l)
+	}
+	// Ask for everything: the next read waits for a person.
+	if w := do(t, s, "PUT", "/api/sessions/"+session+"/execution-mode", `{"strict":true}`); w.Code != 200 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	chat(`{"message":"再列一次","session_id":"` + session + `"}`)
+	l := list(session)
+	if !l.Strict || pendingCount(l) != 1 || l.Approvals[0].Reason != execution.StrictReason {
+		t.Fatalf("strict session ran a read without asking: %+v", l)
+	}
+	if strings.Contains(lastBody.Load().(string), "--Offset 3") && strings.Contains(lastBody.Load().(string), "FAKE_TCCLI cls DescribeTopics --Offset 3") {
+		t.Fatal("read executed in a strict session")
+	}
+}

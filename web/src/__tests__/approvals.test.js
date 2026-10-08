@@ -124,6 +124,15 @@ describe('session grants', () => {
     app.mount(host); await settle()
     expect(reported.at(-1)).toEqual(['kubectl scale'])
   })
+  it('reports the session mode to the page', async () => {
+    api.executionApprovals.mockResolvedValue({ approvals: [], grants: [], strict: true, strict_available: true })
+    props = reactive({ session: 's', actionable: true, disabled: false, refreshKey: 0 })
+    const modes = []
+    host = document.createElement('div'); document.body.append(host)
+    app = createApp({ render: () => h(ExecutionApprovals, { ...props, onMode: (m) => modes.push(m) }) })
+    app.mount(host); await settle()
+    expect(modes.at(-1)).toEqual({ strict: true, available: true })
+  })
   it('lists grants in force and revokes one', async () => {
     const grant = { id: 'grant_1', class: 'tccli cvm StopInstances', uses: 3 }
     await mount([], { grants: [grant], grants_available: true })

@@ -271,6 +271,11 @@ CREATE TABLE IF NOT EXISTS execution_grants (
 );
 CREATE INDEX IF NOT EXISTS execution_grants_session ON execution_grants(session_id, class);
 
+CREATE TABLE IF NOT EXISTS execution_session_modes (
+ session_id TEXT PRIMARY KEY, strict BIGINT NOT NULL DEFAULT 0,
+ updated_ms BIGINT NOT NULL, updated_by TEXT NOT NULL DEFAULT ''
+);
+
 -- Durable local container authority; intentionally no session cascade.
 CREATE TABLE IF NOT EXISTS execution_runs (
  exec_id TEXT PRIMARY KEY, session_id TEXT NOT NULL, agent TEXT NOT NULL,

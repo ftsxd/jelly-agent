@@ -43,7 +43,36 @@ func (s *Server) handleExecutionApprovals(w http.ResponseWriter, r *http.Request
 	if grants == nil {
 		grants = []execution.Grant{}
 	}
-	writeJSON(w, 200, map[string]any{"approvals": list, "grants": grants, "grants_available": grantErr == nil})
+	strict, modeAvailable := (execution.Approvals{DB: db}).SessionMode(r.Context(), r.PathValue("id"))
+	writeJSON(w, 200, map[string]any{"approvals": list, "grants": grants, "grants_available": grantErr == nil,
+		"strict": strict, "strict_available": modeAvailable})
+}
+
+// handleSetExecutionMode switches a session between running read-only queries
+// (and granted classes) directly and asking for every command.
+func (s *Server) handleSetExecutionMode(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Strict bool `json:"strict"`
+	}
+	if err := decodeJSON(r, &in); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	eng := s.engineFor(r)
+	db, err := eng.StateDB()
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	actor := eng.Config().Web.Admin.Username
+	if actor == "" {
+		actor = engine.UserID
+	}
+	if err := (execution.Approvals{DB: db}).SetStrict(r.Context(), r.PathValue("id"), in.Strict, actor); err != nil {
+		writeErr(w, http.StatusConflict, err.Error())
+		return
+	}
+	writeJSON(w, 200, map[string]any{"ok": true, "strict": in.Strict})
 }
 
 // handleRevokeGrant ends a session grant: later commands of its class are

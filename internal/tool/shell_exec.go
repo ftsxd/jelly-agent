@@ -22,12 +22,21 @@ func NewShellExecTool(runtime execution.Runtime, agent string) (adktool.Tool, er
 			return runtime.ExecuteApproved(tc, agent, tc.SessionID(), tc.FunctionCallID(), req), nil
 		}
 		check := runtime.Check(agent, req)
+		// A session switched to "ask for every command" stops the direct
+		// reads and the session grants alike, until it is switched back.
+		strict := runtime.Approvals != nil && check.Decision != execution.Forbidden && runtime.Approvals.Strict(tc, tc.SessionID())
+		if strict && check.Decision == execution.Allow {
+			check.Decision, check.Reason = execution.Prompt, execution.StrictReason
+		}
+		if strict && !runtime.ApprovalEnabled(agent, req.Profile) {
+			return execution.Observation{Evaluation: execution.Evaluation{Decision: execution.Forbidden, Reason: "本会话已设为逐条审批，但该执行配置不能申请审批"}, Profile: req.Profile, ExitCode: -1, Error: "本会话已设为逐条审批，但该执行配置不能申请审批，命令未执行"}, nil
+		}
 		// A command the environment lacks is refused by Execute before it would
 		// run, so asking a person to approve it would only add a dead card.
 		if check.Decision == execution.Prompt && runtime.ApprovalEnabled(agent, req.Profile) && runtime.Approvals != nil && runtime.MissingCommand(agent, req) == "" {
 			// A person already said "don't ask again" for this class in this
 			// session: run it as approved instead of raising another card.
-			if g, ok := runtime.Approvals.FindGrant(tc, runtime.Config, agent, tc.SessionID(), req); ok {
+			if g, ok := runtime.Approvals.FindGrant(tc, runtime.Config, agent, tc.SessionID(), req); ok && !strict {
 				return runtime.ExecuteGranted(tc, agent, tc.SessionID(), req, g), nil
 			}
 			a, err := runtime.Approvals.Create(tc, runtime.Config, agent, tc.SessionID(), tc.InvocationID(), tc.FunctionCallID(), req)

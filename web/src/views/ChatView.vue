@@ -33,9 +33,26 @@ const listVersion = ref(0)
 // Session grants in force, reported by the approvals panel: a grant quietly
 // skips approvals, so the conversation says so at the top, not only at the end.
 const activeGrants = ref([])
-function showGrants() {
-  document.querySelector('.approvals .grants')?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+// Whether this session's commands may run without asking — read-only queries
+// by rule, granted classes by grant — or must all wait for a person. Shown in
+// the top bar with the switch beside it, so "nothing asked me" is never a
+// mystery and is one click from being undone.
+const executorInUse = ref(false)
+const execMode = ref({ strict: false, available: false })
+const modeOpen = ref(false)
+const modeBusy = ref(false)
+async function setStrict(strict) {
+  if (!sessionId.value || modeBusy.value) return
+  modeBusy.value = true
+  try { await api.setExecutionMode(sessionId.value, strict); approvalVersion.value++ }
+  catch (e) { error.value = e.message }
+  finally { modeBusy.value = false }
 }
+async function revokeGrant(g) {
+  try { await api.revokeGrant(sessionId.value, g.id); approvalVersion.value++ }
+  catch (e) { error.value = e.message }
+}
+const grantUntil = (g) => new Date(g.expires_ms).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
 function toggleSessions() {
   showSessions.value = !showSessions.value
   try { localStorage.setItem(SESSIONS_OPEN_KEY, showSessions.value ? '1' : '0') } catch { /* storage is optional */ }
@@ -134,6 +151,7 @@ onMounted(async () => {
   try {
     const data = await api.agents()
     agents.value = (data.agents || []).filter((a) => a.enabled)
+    executorInUse.value = Object.keys(data.execution_profiles || {}).length > 0
     if (agents.value.length) {
       const saved = localStorage.getItem(AGENT_KEY)
       const valid = (n) => agents.value.some((a) => a.name === n)
@@ -295,6 +313,8 @@ const enter = sendOnEnter(() => send())
 function newChat() {
   if (busy.value) return
   activeGrants.value = []
+  execMode.value = { strict: false, available: false }
+  modeOpen.value = false
   // The gate is abandoned, not just ignored: a replay still in flight would
   // otherwise land after this and refill the view with the session the user
   // just left. Polling stops for the same reason.
@@ -422,9 +442,31 @@ function handleFrame(live, ev) {
       <div class="topbar-l">
         <h1>对话</h1>
         <span v-if="sessionId" class="badge mono">{{ sessionId }}</span>
-        <button v-if="sessionId && activeGrants.length" class="badge badge-warn" :title="'本会话免审批：' + activeGrants.map((g) => g.class).join('、') + '（点击查看或撤销）'" @click="showGrants">
-          免审批 {{ activeGrants.length }} 项
-        </button>
+        <div v-if="sessionId && executorInUse && execMode.available" class="mode">
+          <button class="badge mode-chip" :class="{ strict: execMode.strict, granted: !execMode.strict && activeGrants.length }" :aria-expanded="modeOpen" @click="modeOpen = !modeOpen">
+            <template v-if="execMode.strict">命令：逐条审批</template>
+            <template v-else>命令：只读自动执行<template v-if="activeGrants.length"> + {{ activeGrants.length }} 类免审批</template></template>
+          </button>
+          <div v-if="modeOpen" class="mode-panel" role="dialog" aria-label="命令执行方式">
+            <template v-if="!execMode.strict">
+              <div class="mode-row">
+                <span>只读查询（tccli Describe/List、kubectl get 等）直接执行，不弹审批</span>
+                <button class="btn btn-sm" :disabled="modeBusy" @click="setStrict(true)">改为逐条审批</button>
+              </div>
+              <div v-for="g in activeGrants" :key="g.id" class="mode-row">
+                <span>免审批：<code>{{ g.class }}</code>（已用 {{ g.uses }} 次，至 {{ grantUntil(g) }}）</span>
+                <button class="btn btn-sm" @click="revokeGrant(g)">撤销</button>
+              </div>
+              <p class="mode-note">其他命令仍逐条审批。</p>
+            </template>
+            <template v-else>
+              <div class="mode-row">
+                <span>本会话所有命令（包括只读查询和已授权的类别）都需要你逐条批准</span>
+                <button class="btn btn-sm" :disabled="modeBusy" @click="setStrict(false)">恢复自动执行</button>
+              </div>
+            </template>
+          </div>
+        </div>
         <!-- Running is a fact about the server, not about this page: it shows
              for a run started here, in another tab, or by this tab before the
              user walked away from the view. -->
@@ -479,7 +521,7 @@ function handleFrame(live, ev) {
       </div>
 
       <ChatTranscript :messages="messages" :show-provider="showProviderTag" :pending="locked" />
-      <ExecutionApprovals v-if="sessionId" :session="sessionId" :refresh-key="approvalVersion" :disabled="locked" actionable @resolve="send" @grants="activeGrants = $event" />
+      <ExecutionApprovals v-if="sessionId" :session="sessionId" :refresh-key="approvalVersion" :disabled="locked" actionable @resolve="send" @grants="activeGrants = $event" @mode="execMode = $event" />
 
       <!-- Below the transcript, not above it. A run is watched from the bottom
            of a long page, and a notice at the top is a notice nobody sees.
@@ -591,11 +633,44 @@ function handleFrame(live, ev) {
   display: flex;
   flex-direction: column;
 }
-.badge-warn {
+.mode {
+  position: relative;
+}
+.mode-chip {
   cursor: pointer;
-  border: 1px solid var(--warning);
-  color: var(--warning);
+  white-space: nowrap;
+  border: 1px solid var(--border);
   background: none;
+}
+.mode-chip.granted,
+.mode-chip.strict {
+  border-color: var(--warning);
+  color: var(--warning);
+}
+.mode-panel {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 20;
+  width: min(520px, 90vw);
+  padding: var(--sp-3);
+  display: grid;
+  gap: var(--sp-2);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+  font-size: 12px;
+}
+.mode-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+}
+.mode-note {
+  margin: 0;
+  color: var(--text-muted);
 }
 .btn-on {
   background: var(--primary-tint);

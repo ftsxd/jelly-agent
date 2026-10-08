@@ -208,10 +208,17 @@ func (s Approvals) RevokeGrant(ctx context.Context, session, id string) error {
 }
 
 func grantStoreError(err error) error {
-	if msg := err.Error(); strings.Contains(msg, "execution_grants") && (strings.Contains(msg, "does not exist") || strings.Contains(msg, "no such table")) {
+	if isMissingTable(err, "execution_grants") {
 		return ErrGrantUnavailable
 	}
 	return err
+}
+
+// isMissingTable recognizes "no such table" from SQLite and "does not exist"
+// from PostgreSQL for one optional table.
+func isMissingTable(err error, table string) bool {
+	msg := err.Error()
+	return strings.Contains(msg, table) && (strings.Contains(msg, "does not exist") || strings.Contains(msg, "no such table"))
 }
 
 // ensureGrantSchema is best effort: without the table, approvals still work

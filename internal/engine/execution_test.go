@@ -56,7 +56,7 @@ func TestApprovalStoreWiredForEveryApprovingProfile(t *testing.T) {
 		profile execution.Profile
 		want    bool
 	}{
-		{"read only", execution.Profile{Name: "p"}, false},
+		{"read only", execution.Profile{Name: "p"}, true}, // the session "ask for everything" switch needs it too
 		{"write approval", execution.Profile{Name: "p", WriteApproval: true}, true},
 		{"unconfined only", execution.Profile{Name: "p", AllowUnconfinedWithApproval: true}, true},
 	} {

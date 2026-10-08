@@ -266,6 +266,9 @@ func ApplySchema(db *DB, ddl string, tables ...string) error {
 			return fmt.Errorf("storage: inspect %s: %w", t, err)
 		}
 		if !has {
+			if t == "execution_session_modes" {
+				return fmt.Errorf("storage: 表 %s 不存在。逐条审批开关需要在应用使用的数据库/schema 执行 migrations/postgres/0005_execution_session_modes.sql", t)
+			}
 			if t == "execution_grants" {
 				return fmt.Errorf("storage: 表 %s 不存在。会话内免审批需要在应用使用的数据库/schema 执行 migrations/postgres/0004_execution_grants.sql；未执行时审批仍逐条进行", t)
 			}

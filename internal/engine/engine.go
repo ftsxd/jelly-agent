@@ -1309,20 +1309,16 @@ func (e *Engine) executionRuntime(agent string) (execution.Runtime, bool, error)
 		}
 		runtime.Journal = journal
 	}
-	// The approval store is needed by every profile that can turn a Prompt
-	// into a confirmation — write approval, and the unconfined escape hatch.
-	// Wiring it for write approval alone left the escape hatch reporting
-	// approval_required with no approval to confirm.
-	for _, p := range e.cfg.Execution.ProfilesFor(agent) {
-		if runtime.ApprovalEnabled(agent, p.Name) {
-			db, err := e.StateDB()
-			if err != nil {
-				return execution.Runtime{}, false, err
-			}
-			runtime.Approvals = &execution.Approvals{DB: db}
-			break
-		}
+	// The approval store is wired for every profile: approvals and session
+	// grants need it, and so does the per-session "ask for every command"
+	// switch, which must hold even on a profile that cannot ask (it then
+	// refuses instead of quietly running). Whether a profile may raise an
+	// approval is still ApprovalEnabled's decision, checked at each use.
+	db, err := e.StateDB()
+	if err != nil {
+		return execution.Runtime{}, false, err
 	}
+	runtime.Approvals = &execution.Approvals{DB: db}
 	return runtime, true, nil
 }
 
