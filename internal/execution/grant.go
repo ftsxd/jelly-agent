@@ -67,7 +67,9 @@ func GrantClass(command string) string {
 	a := parsed.Segments[0]
 	switch a[0] {
 	case "tccli":
-		if len(a) < 3 || !identifier.MatchString(a[1]) || !identifier.MatchString(a[2]) {
+		// configure reads and writes the CLI's own credential files; it is
+		// not a cloud API and is never "the same kind" as anything.
+		if len(a) < 3 || a[1] == "configure" || !identifier.MatchString(a[1]) || !identifier.MatchString(a[2]) {
 			return ""
 		}
 		for _, word := range sensitiveReads {

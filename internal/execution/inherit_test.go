@@ -43,6 +43,15 @@ func TestSavedAgentVarsInjectedByName(t *testing.T) {
 			t.Fatalf("%s = %q, want %q (env %v)", k, env[k], v, keysOf(env))
 		}
 	}
+	out := r.Execute(t.Context(), "ops", "s", req)
+	if got := strings.Join(out.InjectedEnv, ","); got != "TENCENTCLOUD_REGION,TENCENTCLOUD_SECRET_ID,TOKEN" {
+		t.Fatalf("injected_env = %q", got)
+	}
+	for _, v := range []string{"sid-value", "ap-shanghai", "renamed-value"} {
+		if strings.Contains(strings.Join(out.InjectedEnv, ","), v) {
+			t.Fatal("a value leaked into injected_env")
+		}
+	}
 	// The model learns the names it can rely on, never a value.
 	text := c.Instruction("ops")
 	if !strings.Contains(text, "TENCENTCLOUD_SECRET_ID") || strings.Contains(text, "APPROVAL_ONLY") || strings.Contains(text, "sid-value") {

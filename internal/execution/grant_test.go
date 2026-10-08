@@ -26,6 +26,7 @@ func TestGrantClassIsNarrowAndRefusesWhatShouldStayPerCommand(t *testing.T) {
 		{"kubectl --unknown scale deployment/web", ""}, // subcommand not certain
 		{"python3 -c 'print(1)'", ""},                  // "same kind" is any code
 		{"curl https://example.com", ""},
+		{"tccli configure list", ""}, // local credential files, not an API
 		{"tccli cvm StopInstances --InstanceIds x && tccli cvm StartInstances", ""},
 	} {
 		if got := GrantClass(test.command); got != test.class {
