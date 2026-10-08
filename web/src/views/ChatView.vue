@@ -339,7 +339,7 @@ async function send(choice = null) {
         // and silently attaching everything after would let one task swallow
         // the rest of the conversation.
         taskId: activeTask.value,
-        ...(approval ? { approvalId: approval.id, approve: approval.approve } : {}),
+        ...(approval ? { approvalId: approval.id, approve: approval.approve, remember: !!approval.remember } : {}),
       },
       (ev) => handleFrame(live, ev),
       abort.signal,

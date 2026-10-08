@@ -34,6 +34,9 @@ type Observation struct {
 	ApprovalRequired bool   `json:"approval_required,omitempty"`
 	ApprovalID       string `json:"approval_id,omitempty"`
 	Approved         bool   `json:"approved,omitempty"`
+	// Grant names the session grant class the call ran under instead of its
+	// own approval ("tccli cvm StopInstances"); ApprovalID is then the grant id.
+	Grant string `json:"grant,omitempty"`
 	// WriteCredentials records that the approved call ran with the profile's
 	// write sources rather than its read identity.
 	WriteCredentials bool   `json:"write_credentials,omitempty"`
@@ -255,6 +258,18 @@ func (r Runtime) ExecuteApproved(ctx context.Context, agent, session, call strin
 	if err := r.Approvals.Finish(finishCtx, id, out); err != nil {
 		slog.Error("审批执行结果记录失败", "approval_id", id, "error", err)
 	}
+	return out
+}
+
+// ExecuteGranted runs a call that needed approval under a session grant a
+// person gave for its class earlier. It runs exactly as an approved call does
+// — same credentials, same sandbox — and the observation says which grant.
+func (r Runtime) ExecuteGranted(ctx context.Context, agent, session string, req Request, g Grant) Observation {
+	if ev := r.Check(agent, req); ev.Decision != Prompt || !r.ApprovalEnabled(agent, req.Profile) {
+		return Observation{Evaluation: ev, Profile: req.Profile, ExitCode: -1, Error: "会话授权不适用于此命令"}
+	}
+	out := r.execute(ctx, agent, session, req, g.ID, nil)
+	out.Grant = g.Class
 	return out
 }
 

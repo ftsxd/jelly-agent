@@ -441,11 +441,11 @@ func builtinDecision(a []string) (Decision, string) {
 	return "", ""
 }
 
-// kubectlReadOnly reports whether argv's subcommand is one of kubectl's
-// read-only ones. The subcommand is the first token that is neither a global
-// flag nor such a flag's value; an unknown flag written without "=" may or may
-// not take the next token, so it fails closed rather than guessing.
-func kubectlReadOnly(a []string) bool {
+// kubectlSubcommand finds argv's subcommand and the token after it: the first
+// token that is neither a global flag nor such a flag's value. An unknown flag
+// written without "=" may or may not take the next token, so ok is false
+// rather than a guess.
+func kubectlSubcommand(a []string) (sub, next string, ok bool) {
 	valueFlags := map[string]bool{"-n": true, "--namespace": true, "--request-timeout": true, "--cache-dir": true,
 		"-v": true, "--v": true, "--log-file": true, "--log-dir": true, "--vmodule": true, "--profile": true, "--profile-output": true}
 	boolFlags := map[string]bool{"--match-server-version": true, "--disable-compression": true, "--warnings-as-errors": true}
@@ -453,27 +453,36 @@ func kubectlReadOnly(a []string) bool {
 		v := a[i]
 		switch {
 		case !strings.HasPrefix(v, "-"):
-			next := ""
 			if i+1 < len(a) {
 				next = a[i+1]
 			}
-			switch v {
-			case "get", "describe", "logs", "top", "version", "api-resources", "api-versions", "help", "explain", "events":
-				return true
-			case "cluster-info":
-				return next != "dump" // dump pulls every namespace's pods and logs
-			case "auth":
-				return next == "can-i" || next == "whoami"
-			}
-			return false
+			return v, next, true
 		case strings.Contains(v, "=") || boolFlags[v]:
 		case valueFlags[v]:
 			i++
 		case strings.HasPrefix(v, "-n") && !strings.HasPrefix(v, "--"):
 			// -nkube-system: the shorthand with its value attached.
 		default:
-			return false
+			return "", "", false
 		}
+	}
+	return "", "", false
+}
+
+// kubectlReadOnly reports whether argv's subcommand is one of kubectl's
+// read-only ones.
+func kubectlReadOnly(a []string) bool {
+	sub, next, ok := kubectlSubcommand(a)
+	if !ok {
+		return false
+	}
+	switch sub {
+	case "get", "describe", "logs", "top", "version", "api-resources", "api-versions", "help", "explain", "events":
+		return true
+	case "cluster-info":
+		return next != "dump" // dump pulls every namespace's pods and logs
+	case "auth":
+		return next == "can-i" || next == "whoami"
 	}
 	return false
 }

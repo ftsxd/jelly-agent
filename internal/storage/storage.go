@@ -266,6 +266,9 @@ func ApplySchema(db *DB, ddl string, tables ...string) error {
 			return fmt.Errorf("storage: inspect %s: %w", t, err)
 		}
 		if !has {
+			if t == "execution_grants" {
+				return fmt.Errorf("storage: 表 %s 不存在。会话内免审批需要在应用使用的数据库/schema 执行 migrations/postgres/0004_execution_grants.sql；未执行时审批仍逐条进行", t)
+			}
 			if t == "execution_approvals" || t == "execution_runs" {
 				return fmt.Errorf("storage: 表 %s 不存在。已有 PostgreSQL 部署请在应用使用的数据库/schema 执行 migrations/postgres/0003_execution_runtime_upgrade.sql，再重启服务；该增量会补齐审批和执行恢复表，保留已有数据", t)
 			}

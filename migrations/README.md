@@ -4,6 +4,7 @@
 migrations/postgres/0001_init.sql    七张表 + 索引 + pg_trgm
 migrations/postgres/0002_execution_runs.sql    已有 PG 部署的执行恢复记录增量
 migrations/postgres/0003_execution_runtime_upgrade.sql    旧库补齐审批和执行恢复表
+migrations/postgres/0004_execution_grants.sql    会话内免审批（可选；不执行时审批仍逐条进行）
 ```
 
 升级到执行审批/持久化回收版本时，SQLite 会自动建表。已有 PostgreSQL 部署应用
@@ -29,6 +30,10 @@ psql "$JELLY_DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/postgres/0003_execut
 docker compose --profile db exec -T postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=1' < migrations/postgres/0003_execution_runtime_upgrade.sql
 docker compose restart jelly-agent
 ```
+
+审批卡片上的「本会话内同类命令不再询问」需要 `execution_grants` 表。SQLite 自动建表；
+已有 PostgreSQL 部署执行 `0004_execution_grants.sql`（可重复执行），未执行时该选项不生效，
+单条审批照常工作，服务也照常启动。
 
 PostgreSQL 镜像的初始化目录只在空卷首次启动时执行。更新代码、重建/重启容器不会
 为已有卷补表；升级不需要删除数据卷。

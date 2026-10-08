@@ -4,12 +4,12 @@ import { createApp, h, nextTick, reactive } from 'vue'
 import ExecutionApprovals from '../components/ExecutionApprovals.vue'
 import { api, streamChat } from '../api'
 
-vi.mock('../api', async (original) => ({ ...(await original()), api: { executionApprovals: vi.fn() } }))
+vi.mock('../api', async (original) => ({ ...(await original()), api: { executionApprovals: vi.fn(), revokeGrant: vi.fn() } }))
 let app, host, props, decisions
 const pending = { id: 'approval_one', agent: 'ops', session_id: 's', state: 'pending', reason: '变更需要审批', expires_ms: Date.now() + 600000, request: { profile: 'production', command: 'kubectl scale deployment/web -n app --replicas=2', purpose: '恢复容量' } }
 async function settle() { for (let i = 0; i < 10; i++) { await Promise.resolve(); await nextTick() } }
-async function mount(list = [pending]) {
-  api.executionApprovals.mockResolvedValue({ approvals: list })
+async function mount(list = [pending], extra = {}) {
+  api.executionApprovals.mockResolvedValue({ approvals: list, ...extra })
   props = reactive({ session: 's', actionable: true, disabled: false, refreshKey: 0 })
   decisions = []
   host = document.createElement('div'); document.body.append(host)
@@ -92,4 +92,46 @@ it('refreshes a consumed approval until execution has an outcome', async () => {
     await vi.advanceTimersByTimeAsync(3100)
     expect(api.executionApprovals).toHaveBeenCalledTimes(2)
   } finally { vi.useRealTimers() }
+})
+
+describe('session grants', () => {
+  const grantable = { ...pending, grant_class: 'kubectl scale' }
+  function remember() { return host.querySelector('.remember input') }
+  it('offers "don\'t ask again" only where the server would honour it', async () => {
+    await mount([grantable], { grants_available: true })
+    expect(host.querySelector('.remember').textContent).toContain('kubectl scale')
+    app.unmount(); host.remove()
+    await mount([grantable], { grants_available: false })
+    expect(remember()).toBeNull()
+    app.unmount(); host.remove()
+    await mount([pending], { grants_available: true })
+    expect(remember()).toBeNull()
+  })
+  it('sends remember with an approval only, never with a rejection', async () => {
+    await mount([grantable], { grants_available: true })
+    remember().checked = true; remember().dispatchEvent(new Event('change')); await settle()
+    button('拒绝').click(); await settle()
+    button('批准并执行一次').click(); await settle()
+    expect(decisions).toEqual([{ id: grantable.id, approve: false }, { id: grantable.id, approve: true, remember: true }])
+  })
+  it('lists grants in force and revokes one', async () => {
+    const grant = { id: 'grant_1', class: 'tccli cvm StopInstances', uses: 3 }
+    await mount([], { grants: [grant], grants_available: true })
+    expect(host.querySelector('.grants').textContent).toContain('tccli cvm StopInstances')
+    expect(host.querySelector('.grants').textContent).toContain('已用 3 次')
+    api.revokeGrant.mockResolvedValue({ ok: true })
+    api.executionApprovals.mockResolvedValue({ approvals: [], grants: [], grants_available: true })
+    button('撤销').click(); await settle()
+    expect(api.revokeGrant).toHaveBeenCalledWith('s', 'grant_1')
+    expect(host.querySelector('.grants')).toBeNull()
+  })
+})
+
+it('puts remember on the wire only for an approval', async () => {
+  const fetch = vi.fn().mockResolvedValue({ ok: true, body: { getReader: () => ({ read: async () => ({ done: true }) }) } })
+  vi.stubGlobal('fetch', fetch)
+  await streamChat({ sessionId: 's', approvalId: pending.id, approve: true, remember: true }, () => {})
+  await streamChat({ sessionId: 's', approvalId: pending.id, approve: false, remember: true }, () => {})
+  expect(JSON.parse(fetch.mock.calls[0][1].body)).toMatchObject({ approve: true, remember: true })
+  expect(JSON.parse(fetch.mock.calls[1][1].body)).not.toHaveProperty('remember')
 })

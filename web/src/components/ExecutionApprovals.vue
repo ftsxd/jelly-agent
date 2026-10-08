@@ -6,6 +6,9 @@ import { latestOnly } from '../latest'
 const props = defineProps({ session: { type: String, required: true }, refreshKey: { type: Number, default: 0 }, disabled: Boolean, actionable: Boolean })
 const emit = defineEmits(['resolve'])
 const approvals = ref([]), error = ref('')
+// Session grants ("don't ask again for this kind") in force, and whether the
+// store can hold them at all — an unmigrated PostgreSQL store cannot.
+const grants = ref([]), grantsAvailable = ref(false), remember = ref({}), revoking = ref('')
 const gate = latestOnly()
 let timer = null
 const labels = { pending: '等待审批', expired: '审批已过期', invalidated: '配置或凭据已改变，审批失效', approved: '已批准，等待执行', consumed: '审批已使用，执行结果未记录，请先核查目标资源', rejected: '已拒绝', abandoned: '执行未开始，审批已失效' }
@@ -16,7 +19,12 @@ async function load() {
   const result = await gate.run(signal => api.executionApprovals(session, signal))
   if (!result.owned) return
   if (result.error) error.value = result.error.message
-  else { approvals.value = result.value?.approvals || []; error.value = '' }
+  else {
+    approvals.value = result.value?.approvals || []
+    grants.value = result.value?.grants || []
+    grantsAvailable.value = !!result.value?.grants_available
+    error.value = ''
+  }
   // Consumption precedes execution. Poll for its outcome for a bounded time,
   // including on task/session detail pages where no stream triggers a refresh.
   if (approvals.value.some(a => ['pending', 'approved'].includes(a.state) || (a.state === 'consumed' && !a.outcome && Date.now() < Math.max(a.expires_ms, a.resolved_ms || 0) + 360000))) timer = setTimeout(load, 3000)
@@ -25,7 +33,14 @@ watch(() => [props.session, props.refreshKey, props.disabled], () => { approvals
 onUnmounted(() => { clearTimeout(timer); gate.abandon() })
 function decision(a, approve) {
   if (props.disabled || a.state !== 'pending') return
-  emit('resolve', { id: a.id, approve })
+  emit('resolve', { id: a.id, approve, ...(approve && remember.value[a.id] ? { remember: true } : {}) })
+}
+async function revoke(g) {
+  if (revoking.value) return
+  revoking.value = g.id
+  try { await api.revokeGrant(props.session, g.id); await load() }
+  catch (e) { error.value = e.message }
+  finally { revoking.value = '' }
 }
 function outcome(a) {
   if (a.outcome === 'succeeded') return '执行成功'
@@ -52,7 +67,7 @@ function when(a) { return new Date(a.resolved_ms || a.created_ms).toLocaleString
 </script>
 
 <template>
-  <section v-if="approvals.length || error" class="approvals" aria-label="命令审批">
+  <section v-if="approvals.length || grants.length || error" class="approvals" aria-label="命令审批">
     <p v-if="error" role="alert" class="warning">{{ error }} <button class="btn" @click="load">重新加载审批</button></p>
     <!-- Compact, but never truncated: the whole command stays visible, since a
          clipped tail is exactly where an approver would miss "&& …". The
@@ -71,6 +86,10 @@ function when(a) { return new Date(a.resolved_ms || a.created_ms).toLocaleString
         </div>
       </div>
       <pre>{{ a.request.command }}</pre>
+      <label v-if="a.state === 'pending' && actionable && grantsAvailable && a.grant_class" class="remember">
+        <input v-model="remember[a.id]" type="checkbox" :disabled="disabled" />
+        批准后，本会话内「<code>{{ a.grant_class }}</code>」不再询问（8 小时内，可随时撤销）
+      </label>
       <details class="more">
         <summary class="muted">详情</summary>
         <p><span class="muted">模型陈述的目的：</span>{{ a.request.purpose }}</p>
@@ -82,6 +101,13 @@ function when(a) { return new Date(a.resolved_ms || a.created_ms).toLocaleString
         <p v-if="a.exec_id" class="mono muted">{{ a.exec_id }}</p>
       </details>
     </article>
+    <div v-if="grants.length" class="grants">
+      <span class="muted">本会话免审批：</span>
+      <span v-for="g in grants" :key="g.id" class="grant">
+        <code>{{ g.class }}</code><span class="muted">（已用 {{ g.uses }} 次）</span>
+        <button class="link" :disabled="revoking === g.id" @click="revoke(g)">撤销</button>
+      </span>
+    </div>
     <details v-if="settled.length" class="history">
       <summary>已处理的命令审批 {{ settled.length }} 条</summary>
       <details v-for="a in settled" :key="a.id" class="row">
@@ -113,6 +139,10 @@ function when(a) { return new Date(a.resolved_ms || a.created_ms).toLocaleString
 .btn-sm { padding: 2px 10px; font-size: 12px; height: auto; }
 .approval pre { padding: var(--sp-2); }
 .more summary { cursor: pointer; font-size: 12px; }
+.remember { display: flex; align-items: center; gap: var(--sp-2); font-size: 12px; cursor: pointer; }
+.grants { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-2) var(--sp-3); font-size: 12px; }
+.grant { display: inline-flex; align-items: center; gap: var(--sp-1); }
+.link { background: none; border: 0; padding: 0; color: var(--primary); cursor: pointer; font-size: 12px; }
 .more p { margin-top: var(--sp-1); }
 p { margin: 0; font-size: 12px; line-height: 1.7; }
 pre { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; padding: var(--sp-3); background: var(--surface); border-radius: var(--radius-sm); font-size: 12px; }

@@ -32,7 +32,33 @@ func (s *Server) handleExecutionApprovals(w http.ResponseWriter, r *http.Request
 			}
 		}
 	}
-	writeJSON(w, 200, map[string]any{"approvals": list})
+	cfg := eng.ExecutionConfig()
+	for i := range list {
+		if list[i].State == "pending" {
+			list[i].GrantClass = cfg.GrantClassFor(list[i].Agent, list[i].Request)
+		}
+	}
+	// Grants are optional: a store without the table still lists approvals.
+	grants, grantErr := (execution.Approvals{DB: db}).Grants(r.Context(), r.PathValue("id"), cfg)
+	if grants == nil {
+		grants = []execution.Grant{}
+	}
+	writeJSON(w, 200, map[string]any{"approvals": list, "grants": grants, "grants_available": grantErr == nil})
+}
+
+// handleRevokeGrant ends a session grant: later commands of its class are
+// asked about again.
+func (s *Server) handleRevokeGrant(w http.ResponseWriter, r *http.Request) {
+	db, err := s.engineFor(r).StateDB()
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	if err := (execution.Approvals{DB: db}).RevokeGrant(r.Context(), r.PathValue("id"), r.PathValue("grant")); err != nil {
+		writeErr(w, http.StatusConflict, err.Error())
+		return
+	}
+	writeJSON(w, 200, map[string]any{"ok": true})
 }
 func sessionHasPendingApprovals(ctx context.Context, eng *engine.Engine, session string) bool {
 	db, err := eng.StateDB()

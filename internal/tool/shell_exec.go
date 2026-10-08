@@ -25,6 +25,11 @@ func NewShellExecTool(runtime execution.Runtime, agent string) (adktool.Tool, er
 		// A command the environment lacks is refused by Execute before it would
 		// run, so asking a person to approve it would only add a dead card.
 		if check.Decision == execution.Prompt && runtime.ApprovalEnabled(agent, req.Profile) && runtime.Approvals != nil && runtime.MissingCommand(agent, req) == "" {
+			// A person already said "don't ask again" for this class in this
+			// session: run it as approved instead of raising another card.
+			if g, ok := runtime.Approvals.FindGrant(tc, runtime.Config, agent, tc.SessionID(), req); ok {
+				return runtime.ExecuteGranted(tc, agent, tc.SessionID(), req, g), nil
+			}
 			a, err := runtime.Approvals.Create(tc, runtime.Config, agent, tc.SessionID(), tc.InvocationID(), tc.FunctionCallID(), req)
 			if err != nil {
 				return execution.Observation{}, err

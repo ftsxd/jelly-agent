@@ -38,6 +38,9 @@ type chatRequest struct {
 	TaskID     string `json:"task_id,omitempty"`
 	ApprovalID string `json:"approval_id,omitempty"`
 	Approve    *bool  `json:"approve,omitempty"`
+	// Remember also grants the approval's class for the rest of the session
+	// ("don't ask again for this kind of command"). Ignored on a rejection.
+	Remember bool `json:"remember,omitempty"`
 }
 
 // sessionSeq disambiguates web session ids created within the same nanosecond.
@@ -162,6 +165,16 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 		if err := approvals.Resolve(ctx, approval.ID, sessionID, actor, *req.Approve, eng.ExecutionConfig()); err != nil {
 			writeErr(w, http.StatusConflict, err.Error())
 			return
+		}
+		if *req.Approve && req.Remember {
+			// The approval stands even if the grant cannot be made (an
+			// unmigrated store, a class that no longer qualifies): the person
+			// is simply asked again next time.
+			if g, err := approvals.CreateGrant(ctx, eng.ExecutionConfig(), approval, actor); err != nil {
+				slog.Warn("会话内免审批未生效，下次仍会询问", "approval_id", approval.ID, logging.Err(err))
+			} else {
+				slog.Info("会话内免审批", "session_id", sessionID, "class", g.Class, "grant_id", g.ID, "by", actor)
+			}
 		}
 		defer approvals.Abandon(approval.ID)
 	}

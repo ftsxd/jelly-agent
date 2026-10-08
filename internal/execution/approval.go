@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"time"
 
@@ -29,7 +30,13 @@ const approvalSchema = `CREATE TABLE IF NOT EXISTS execution_approvals (
 CREATE INDEX IF NOT EXISTS execution_approvals_session ON execution_approvals(session_id, created_ms);`
 
 func EnsureApprovalSchema(db *storage.DB) error {
-	return storage.ApplySchema(db, approvalSchema, "execution_approvals")
+	if err := storage.ApplySchema(db, approvalSchema, "execution_approvals"); err != nil {
+		return err
+	}
+	if err := ensureGrantSchema(db); err != nil {
+		slog.Warn("会话内免审批不可用，审批仍逐条进行", "error", err)
+	}
+	return nil
 }
 
 type Origin struct {
@@ -96,6 +103,9 @@ type Approval struct {
 	ResolvedBy   string  `json:"resolved_by,omitempty"`
 	ExecID       string  `json:"exec_id,omitempty"`
 	Outcome      string  `json:"outcome,omitempty"`
+	// GrantClass is set on pending approvals that may also be granted for the
+	// rest of the session ("don't ask again for this kind"); never stored.
+	GrantClass string `json:"grant_class,omitempty"`
 }
 type Approvals struct{ DB *storage.DB }
 

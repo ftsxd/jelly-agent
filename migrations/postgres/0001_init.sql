@@ -263,6 +263,14 @@ CREATE TABLE IF NOT EXISTS execution_approvals (
 );
 CREATE INDEX IF NOT EXISTS execution_approvals_session ON execution_approvals(session_id, created_ms);
 
+CREATE TABLE IF NOT EXISTS execution_grants (
+ id TEXT PRIMARY KEY, session_id TEXT NOT NULL, agent TEXT NOT NULL, profile TEXT NOT NULL,
+ class TEXT NOT NULL, config_hash TEXT NOT NULL, approval_id TEXT NOT NULL,
+ created_by TEXT NOT NULL, created_ms BIGINT NOT NULL, expires_ms BIGINT NOT NULL,
+ revoked_ms BIGINT NOT NULL DEFAULT 0, uses BIGINT NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS execution_grants_session ON execution_grants(session_id, class);
+
 -- Durable local container authority; intentionally no session cascade.
 CREATE TABLE IF NOT EXISTS execution_runs (
  exec_id TEXT PRIMARY KEY, session_id TEXT NOT NULL, agent TEXT NOT NULL,
