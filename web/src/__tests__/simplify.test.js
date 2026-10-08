@@ -89,6 +89,12 @@ describe('execution profile checks', () => {
     expect(profileIssues(profile({ agents: ['Empty'], inherit: false }), varKeys)).toEqual([])
     expect(profileIssues(profile({}), varKeys)).toEqual([])
   })
+  it('flags agents whose every variable is approval-only', () => {
+    const keys = { TencentQuery: ['TENCENTCLOUD_REGION', 'TENCENTCLOUD_SECRET_ID', 'TENCENTCLOUD_SECRET_KEY'] }
+    const rows = keys.TencentQuery.map(k => row(k, 'agent', k, 'approved'))
+    expect(profileIssues(profile({ write_approval: true, mappings: rows }), keys).join('')).toContain('仅审批后')
+    expect(profileIssues(profile({ write_approval: true, mappings: rows.slice(1) }), keys).join('')).not.toContain('仅审批后')
+  })
   it('previews inherited variables with the server exclusions', () => {
     const p = profile({ write_approval: true, mappings: [row('REGION', 'agent', 'TENCENTCLOUD_REGION'), row('KEY', 'agent', 'WRITE_KEY', 'approved')] })
     expect(inheritedVars(p, varKeys)).toEqual(['TENCENTCLOUD_SECRET_ID', 'TENCENTCLOUD_SECRET_KEY'])

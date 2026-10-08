@@ -92,6 +92,14 @@ export function profileIssues(p, varKeys = {}) {
     if (p.inherit !== false && !have.size && !agentRows.length) {
       issues.push(`${agent} 还没有保存任何变量，命令执行时不会带凭据。到「Agent」页编辑 ${agent}，在「变量」里保存。`)
     }
+    // Every saved variable reserved for approved runs: direct read-only
+    // queries then carry no credentials at all, and the CLI's own error
+    // ("secretId is invalid") says nothing about why.
+    const alwaysAgent = sourcesOf(rowsOf(p, 'agent', 'always'))
+    const approvalOnly = sourcesOf(rowsOf(p, 'agent', 'approved'))
+    if (have.size && [...have].every((k) => approvalOnly.has(k)) && !alwaysAgent.size && !rowsOf(p, 'server', 'always').length) {
+      issues.push(`${agent} 的变量全部设成了「仅审批后」注入，直接执行的只读查询（如 tccli … Describe*）不会带凭据。只读查询也要用这些凭据的话，删掉这几行映射，让它们自动注入即可。`)
+    }
     for (const source of sourcesOf(agentRows)) {
       if (!have.has(source)) issues.push(`${agent} 没有保存变量 ${source}，执行时会报「未配置执行变量来源」。`)
     }
