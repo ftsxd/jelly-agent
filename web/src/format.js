@@ -19,9 +19,22 @@ export function fmtArgs(args, max = 120) {
   return truncate(parts.join(', '), max)
 }
 
+/**
+ * A shell_exec call that asked for approval instead of running. It returns
+ * normally, so by status alone it reads as a success — a green tick next to
+ * "executed=false" is how a request looked like a finished command.
+ */
+export function isApprovalRequest(step) {
+  if (!step || step.kind !== 'tool' || step.name !== 'shell_exec') return false
+  const r = step.response
+  const d = r && typeof r === 'object' && r.data && typeof r.data === 'object' ? r.data : r
+  return !!(d && d.approval_required === true && d.executed !== true)
+}
+
 /** A step's result in one line, driven by status rather than by content. */
 export function resultSummary(step, max = 160) {
   if (!step || step.kind !== 'tool') return ''
+  if (isApprovalRequest(step)) return '已提交审批：命令尚未执行，批准后才会运行（结果在后续步骤）'
   switch (step.status) {
     case 'pending':
       return '执行中…'

@@ -145,3 +145,15 @@ describe('prettyJSON', () => {
     expect(prettyJSON(cyclic)).toBeTypeOf('string')
   })
 })
+
+describe('approval requests in the timeline', () => {
+  const step = (data, status = 'ok') => ({ kind: 'tool', name: 'shell_exec', status, response: { evidence_id: 'e1', data } })
+  it('tells a request from a finished command', async () => {
+    const { isApprovalRequest, resultSummary } = await import('../format')
+    const asked = step({ approval_required: true, executed: false, decision: 'prompt' })
+    expect(isApprovalRequest(asked)).toBe(true)
+    expect(resultSummary(asked)).toContain('尚未执行')
+    expect(isApprovalRequest(step({ approved: true, executed: true, exit_code: 0 }))).toBe(false)
+    expect(isApprovalRequest({ kind: 'tool', name: 'web_search', status: 'ok', response: { approval_required: true } })).toBe(false)
+  })
+})

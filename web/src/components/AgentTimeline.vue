@@ -25,7 +25,7 @@ import Icon from './Icon.vue'
 import { summarize, timelineSteps } from '../timeline'
 import { renderMarkdown } from '../markdown'
 import {
-  cacheShare, evidenceId, fmtArgs, fmtBytes, fmtTokens, isRetrievable, isTruncated,
+  cacheShare, evidenceId, fmtArgs, fmtBytes, fmtTokens, isApprovalRequest, isRetrievable, isTruncated,
   isWithheld, overviewOf, prettyJSON, resultSummary, stepLabel,
 } from '../format'
 
@@ -37,6 +37,19 @@ const props = defineProps({
 })
 
 const open = ref(new Set())
+
+// The whole process can be folded down to its one-line summary; the answer is
+// a separate bubble, so it stays. The choice is remembered per browser and
+// applies to timelines opened afterwards.
+const COLLAPSE_KEY = 'jelly.timeline.collapsed'
+function readCollapsed() {
+  try { return localStorage.getItem(COLLAPSE_KEY) === '1' } catch { return false }
+}
+const collapsed = ref(readCollapsed())
+function toggleCollapsed() {
+  collapsed.value = !collapsed.value
+  try { localStorage.setItem(COLLAPSE_KEY, collapsed.value ? '1' : '0') } catch { /* optional */ }
+}
 // Long runs are folded in the middle rather than virtualised: a few hundred
 // rounds would otherwise all go into the DOM. The head and tail are what
 // people look at; the middle is what they scroll past.
@@ -73,6 +86,7 @@ function toggle(id) {
 }
 
 function statusIcon(step) {
+  if (isApprovalRequest(step)) return 'lock'
   if (step.status === 'failed') return 'alert'
   if (step.status === 'pending') return ''
   return 'check'
@@ -91,7 +105,10 @@ function statusIcon(step) {
         <span v-if="stats.pending" class="wait"> · {{ stats.pending }} 执行中</span>
       </span>
       <span class="tl-actions">
-        <button v-if="thoughtCount" class="tl-btn" @click="thoughtsOpen = !thoughtsOpen">
+        <button class="tl-btn" :aria-expanded="!collapsed" @click="toggleCollapsed">
+          {{ collapsed ? '展开过程' : '收起过程' }}
+        </button>
+        <button v-if="thoughtCount && !collapsed" class="tl-btn" @click="thoughtsOpen = !thoughtsOpen">
           {{ thoughtsOpen ? '收起' : '展开' }}思考（{{ thoughtCount }}）
         </button>
         <span v-if="stats.usage.total" class="tl-tok mono">
@@ -106,7 +123,7 @@ function statusIcon(step) {
       </span>
     </div>
 
-    <ol class="tl-list">
+    <ol v-if="!collapsed" class="tl-list">
       <li v-for="s in shown" :key="s.id" :style="{ '--depth': s.depth || 0 }" class="tl-row" :class="s.kind">
         <template v-if="s.kind === 'fold'">
           <button class="tl-fold" @click="expandedAll = true">
@@ -116,7 +133,7 @@ function statusIcon(step) {
 
         <template v-else>
           <span class="tl-rail" aria-hidden="true" />
-          <span class="tl-mark" :class="s.status || s.kind">
+          <span class="tl-mark" :class="isApprovalRequest(s) ? 'approval' : (s.status || s.kind)">
             <span v-if="s.status === 'pending'" class="spinner" />
             <Icon v-else-if="statusIcon(s)" :name="statusIcon(s)" :size="12" />
             <Icon v-else-if="s.kind === 'transfer'" name="link" :size="12" />
@@ -142,7 +159,7 @@ function statusIcon(step) {
               >推测配对</span>
             </button>
 
-            <div v-if="s.kind === 'tool'" class="tl-res" :class="s.status">
+            <div v-if="s.kind === 'tool'" class="tl-res" :class="isApprovalRequest(s) ? 'approval' : s.status">
               {{ resultSummary(s) }}
               <!-- Withheld and truncated are different things and need
                    different labels: truncation means this tool's own ceiling
@@ -301,6 +318,12 @@ function statusIcon(step) {
   background: var(--surface);
   box-shadow: 0 0 0 1px var(--hairline);
   color: var(--text-muted);
+}
+.tl-mark.approval {
+  color: var(--warning);
+}
+.tl-res.approval {
+  color: var(--warning);
 }
 .tl-mark.ok {
   color: var(--accent);
