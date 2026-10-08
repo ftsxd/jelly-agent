@@ -31,6 +31,22 @@ export function isApprovalRequest(step) {
   return !!(d && d.approval_required === true && d.executed !== true)
 }
 
+/**
+ * Why a shell_exec ran without asking, or that someone did approve it: the
+ * read-only rules, a one-off approval, or a session grant (and for which
+ * class). '' for anything else, including a request still waiting.
+ */
+export function execAuthority(step) {
+  if (!step || step.kind !== 'tool' || step.name !== 'shell_exec') return ''
+  const r = step.response
+  const d = r && typeof r === 'object' && r.data && typeof r.data === 'object' ? r.data : r
+  if (!d || d.executed !== true) return ''
+  if (d.grant) return `会话授权 · ${d.grant}`
+  if (d.approved) return '已批准'
+  if (d.decision === 'allow') return '只读 · 自动执行'
+  return ''
+}
+
 /** A step's result in one line, driven by status rather than by content. */
 export function resultSummary(step, max = 160) {
   if (!step || step.kind !== 'tool') return ''

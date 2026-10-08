@@ -4,7 +4,7 @@ import { api } from '../api'
 import { latestOnly } from '../latest'
 
 const props = defineProps({ session: { type: String, required: true }, refreshKey: { type: Number, default: 0 }, disabled: Boolean, actionable: Boolean })
-const emit = defineEmits(['resolve'])
+const emit = defineEmits(['resolve', 'grants'])
 const approvals = ref([]), error = ref('')
 // Session grants ("don't ask again for this kind") in force, and whether the
 // store can hold them at all — an unmigrated PostgreSQL store cannot.
@@ -22,6 +22,7 @@ async function load() {
   else {
     approvals.value = result.value?.approvals || []
     grants.value = result.value?.grants || []
+    emit('grants', grants.value)
     grantsAvailable.value = !!result.value?.grants_available
     error.value = ''
   }
@@ -29,6 +30,7 @@ async function load() {
   // including on task/session detail pages where no stream triggers a refresh.
   if (approvals.value.some(a => ['pending', 'approved'].includes(a.state) || (a.state === 'consumed' && !a.outcome && Date.now() < Math.max(a.expires_ms, a.resolved_ms || 0) + 360000))) timer = setTimeout(load, 3000)
 }
+watch(() => props.session, () => { grants.value = []; emit('grants', []) })
 watch(() => [props.session, props.refreshKey, props.disabled], () => { approvals.value = []; error.value = ''; load() }, { immediate: true })
 onUnmounted(() => { clearTimeout(timer); gate.abandon() })
 function decision(a, approve) {
@@ -102,9 +104,9 @@ function when(a) { return new Date(a.resolved_ms || a.created_ms).toLocaleString
       </details>
     </article>
     <div v-if="grants.length" class="grants">
-      <span class="muted">本会话免审批：</span>
+      <span class="muted">本会话免审批（只对这些类别的命令生效，只读查询本来就不需要审批）：</span>
       <span v-for="g in grants" :key="g.id" class="grant">
-        <code>{{ g.class }}</code><span class="muted">（已用 {{ g.uses }} 次）</span>
+        <code>{{ g.class }}</code><span class="muted">（已用 {{ g.uses }} 次，至 {{ new Date(g.expires_ms).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) }}）</span>
         <button class="link" :disabled="revoking === g.id" @click="revoke(g)">撤销</button>
       </span>
     </div>

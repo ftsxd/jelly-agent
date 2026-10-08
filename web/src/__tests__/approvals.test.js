@@ -114,6 +114,16 @@ describe('session grants', () => {
     button('批准并执行一次').click(); await settle()
     expect(decisions).toEqual([{ id: grantable.id, approve: false }, { id: grantable.id, approve: true, remember: true }])
   })
+  it('reports grants in force to the page', async () => {
+    const grant = { id: 'grant_1', class: 'kubectl scale', uses: 0, expires_ms: Date.now() + 3600000 }
+    api.executionApprovals.mockResolvedValue({ approvals: [], grants: [grant], grants_available: true })
+    props = reactive({ session: 's', actionable: true, disabled: false, refreshKey: 0 })
+    const reported = []
+    host = document.createElement('div'); document.body.append(host)
+    app = createApp({ render: () => h(ExecutionApprovals, { ...props, onGrants: (g) => reported.push(g.map(x => x.class)) }) })
+    app.mount(host); await settle()
+    expect(reported.at(-1)).toEqual(['kubectl scale'])
+  })
   it('lists grants in force and revokes one', async () => {
     const grant = { id: 'grant_1', class: 'tccli cvm StopInstances', uses: 3 }
     await mount([], { grants: [grant], grants_available: true })

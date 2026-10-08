@@ -157,3 +157,14 @@ describe('approval requests in the timeline', () => {
     expect(isApprovalRequest({ kind: 'tool', name: 'web_search', status: 'ok', response: { approval_required: true } })).toBe(false)
   })
 })
+
+describe('why a command ran without asking', () => {
+  const step = (data) => ({ kind: 'tool', name: 'shell_exec', status: 'ok', response: { data } })
+  it('names the read-only rules, an approval or a session grant', async () => {
+    const { execAuthority } = await import('../format')
+    expect(execAuthority(step({ executed: true, decision: 'allow' }))).toBe('只读 · 自动执行')
+    expect(execAuthority(step({ executed: true, decision: 'prompt', approved: true }))).toBe('已批准')
+    expect(execAuthority(step({ executed: true, decision: 'prompt', approved: true, grant: 'tccli cvm StopInstances' }))).toBe('会话授权 · tccli cvm StopInstances')
+    expect(execAuthority(step({ executed: false, approval_required: true, decision: 'prompt' }))).toBe('')
+  })
+})

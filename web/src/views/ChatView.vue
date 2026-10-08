@@ -30,6 +30,12 @@ function readSessionsOpen() {
 }
 const showSessions = ref(readSessionsOpen())  // ?sessions=1 applied once the route exists, below
 const listVersion = ref(0)
+// Session grants in force, reported by the approvals panel: a grant quietly
+// skips approvals, so the conversation says so at the top, not only at the end.
+const activeGrants = ref([])
+function showGrants() {
+  document.querySelector('.approvals .grants')?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+}
 function toggleSessions() {
   showSessions.value = !showSessions.value
   try { localStorage.setItem(SESSIONS_OPEN_KEY, showSessions.value ? '1' : '0') } catch { /* storage is optional */ }
@@ -288,6 +294,7 @@ const enter = sendOnEnter(() => send())
 
 function newChat() {
   if (busy.value) return
+  activeGrants.value = []
   // The gate is abandoned, not just ignored: a replay still in flight would
   // otherwise land after this and refill the view with the session the user
   // just left. Polling stops for the same reason.
@@ -415,6 +422,9 @@ function handleFrame(live, ev) {
       <div class="topbar-l">
         <h1>对话</h1>
         <span v-if="sessionId" class="badge mono">{{ sessionId }}</span>
+        <button v-if="sessionId && activeGrants.length" class="badge badge-warn" :title="'本会话免审批：' + activeGrants.map((g) => g.class).join('、') + '（点击查看或撤销）'" @click="showGrants">
+          免审批 {{ activeGrants.length }} 项
+        </button>
         <!-- Running is a fact about the server, not about this page: it shows
              for a run started here, in another tab, or by this tab before the
              user walked away from the view. -->
@@ -469,7 +479,7 @@ function handleFrame(live, ev) {
       </div>
 
       <ChatTranscript :messages="messages" :show-provider="showProviderTag" :pending="locked" />
-      <ExecutionApprovals v-if="sessionId" :session="sessionId" :refresh-key="approvalVersion" :disabled="locked" actionable @resolve="send" />
+      <ExecutionApprovals v-if="sessionId" :session="sessionId" :refresh-key="approvalVersion" :disabled="locked" actionable @resolve="send" @grants="activeGrants = $event" />
 
       <!-- Below the transcript, not above it. A run is watched from the bottom
            of a long page, and a notice at the top is a notice nobody sees.
@@ -541,6 +551,21 @@ function handleFrame(live, ev) {
 }
 .topbar-l h1 {
   font-size: 18px;
+  white-space: nowrap;
+}
+.topbar-l {
+  min-width: 0;
+}
+.topbar-l .badge {
+  white-space: nowrap;
+}
+.topbar-l .badge.mono {
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.topbar-r .btn {
+  white-space: nowrap;
 }
 .topbar-r {
   display: flex;
@@ -565,6 +590,12 @@ function handleFrame(live, ev) {
   min-width: 0;
   display: flex;
   flex-direction: column;
+}
+.badge-warn {
+  cursor: pointer;
+  border: 1px solid var(--warning);
+  color: var(--warning);
+  background: none;
 }
 .btn-on {
   background: var(--primary-tint);

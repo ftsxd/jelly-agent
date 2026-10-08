@@ -25,7 +25,7 @@ import Icon from './Icon.vue'
 import { summarize, timelineSteps } from '../timeline'
 import { renderMarkdown } from '../markdown'
 import {
-  cacheShare, evidenceId, fmtArgs, fmtBytes, fmtTokens, isApprovalRequest, isRetrievable, isTruncated,
+  cacheShare, evidenceId, execAuthority, fmtArgs, fmtBytes, fmtTokens, isApprovalRequest, isRetrievable, isTruncated,
   isWithheld, overviewOf, prettyJSON, resultSummary, stepLabel,
 } from '../format'
 
@@ -151,6 +151,7 @@ function statusIcon(step) {
             >
               <span class="tl-name mono">{{ stepLabel(s) }}</span>
               <span v-if="s.kind === 'tool' && s.args" class="tl-args mono">{{ fmtArgs(s.args) }}</span>
+              <span v-if="execAuthority(s)" class="tl-auth" :class="{ grant: execAuthority(s).startsWith('会话授权') }">{{ execAuthority(s) }}</span>
               <span v-if="s.agent && s.agent !== 'root'" class="tl-agent mono">{{ s.agent }}</span>
               <span
                 v-if="s.approx"
@@ -318,6 +319,19 @@ function statusIcon(step) {
   background: var(--surface);
   box-shadow: 0 0 0 1px var(--hairline);
   color: var(--text-muted);
+}
+.tl-auth {
+  flex: none;
+  font-size: 11px;
+  padding: 0 6px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+.tl-auth.grant {
+  border-color: var(--warning);
+  color: var(--warning);
 }
 .tl-mark.approval {
   color: var(--warning);
